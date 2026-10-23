@@ -2,11 +2,11 @@
 
 此独立项目位于 `/Users/synear/Documents/OA`。入口为 `apps.oa.cli`，使用 SQLite 保存队列、审核意见和提交事实，文件目录保存完整材料。旧开发、生产克隆保持只读。
 
-正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)。
+共享仓库为私有的 [oa-approval](https://github.com/CleverC2200/oa-approval)。正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)，提交材料边界见[安全约定](SECURITY.md)。
 
 ## 启动与操作
 
-运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。首次使用时在 Codex Local environment 执行一次“准备共享 Python 依赖” Action，按 `requirements-dev.lock` 准备依赖；其余工作树直接复用：
+运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。首次使用时在 Codex Local environment 执行一次“准备共享 Python 依赖” Action，按 `requirements-dev.lock` 准备依赖；其余工作树直接复用。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。定时任务使用同一入口，demo 仍可在开发分支离线执行：
 
 ```bash
 bash .codex/python.sh -m apps.oa.cli --root runtime pending --batch-size 50 --limit 50
@@ -80,7 +80,7 @@ bash .codex/python.sh -m apps.oa.cli --root runtime/demo pending --demo
 bash .codex/python.sh check
 ```
 
-该入口供提交钩子、Codex 校验 Action 和 CI 共用，依次运行 Ruff 和完整离线测试；单项检查仍可使用：
+该入口供提交钩子、Codex 校验 Action 和 CI 共用，依次检查暂存文件的共享边界、Ruff 和完整离线测试；单项检查仍可使用：
 
 ```bash
 bash .codex/python.sh -m pytest -q

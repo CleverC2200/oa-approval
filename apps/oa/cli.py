@@ -7,10 +7,12 @@ import fcntl
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import re
 import selectors
 import socket
+import subprocess
 import sys
 
 
@@ -117,6 +119,29 @@ def finish_collection(approval, run_id, worker):
     reply(client, result)
 
 
+def require_production_main(project=None):
+    project = project or Path(__file__).resolve().parents[2]
+    environment = dict(os.environ)
+    for name in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
+        environment.pop(name, None)
+    environment['GIT_TERMINAL_PROMPT'] = '0'
+    def git(*args):
+        try:
+            result = subprocess.run(['git', '-C', str(project), *args], text=True, capture_output=True, env=environment, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise ValueError('production_main_unpublished') from None
+        if result.returncode:
+            raise ValueError('production_main_unpublished')
+        return result.stdout.strip()
+    if git('branch', '--show-current') != 'main':
+        raise ValueError('production_main_required')
+    if git('status', '--porcelain=v1'):
+        raise ValueError('production_checkout_dirty')
+    git('fetch', '--quiet', 'origin', 'refs/heads/main:refs/remotes/origin/main')
+    if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
+        raise ValueError('production_main_not_synced')
+
+
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None):
     from .service import Approval
 
@@ -124,6 +149,8 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
     worker = None
     server_path = socket_path(root)
     with round_lock(root):
+        if not demo:
+            require_production_main()
         if demo:
             from .demo import create_demo
             approval = create_demo(root)

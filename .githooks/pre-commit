@@ -2,7 +2,7 @@
 set -eu
 inputs=(apps tests .ruff.toml pytest.ini requirements-dev.lock .codex .githooks .github/workflows/quality.yml)
 if git diff --cached --quiet -- "${inputs[@]}"; then
-    exit 0
+    exec bash .codex/python.sh .codex/share_check.py
 fi
 if ! git diff --quiet -- "${inputs[@]}"; then
     printf 'Stage or set aside unstaged check inputs before committing.\n' >&2

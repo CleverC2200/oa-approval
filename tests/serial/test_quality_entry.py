@@ -14,17 +14,18 @@ PROJECT = Path(__file__).resolve().parents[2]
 @pytest.fixture
 def repository(tmp_path):
     root = tmp_path / 'repo with spaces'
-    for name in ('.codex/python.sh', '.githooks/pre-commit', 'requirements-dev.lock'):
+    for name in ('.codex/python.sh', '.codex/share_check.py', '.githooks/pre-commit', '.githooks/pre-push', 'requirements-dev.lock'):
         target = root / name
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(PROJECT / name, target)
     (root / '.githooks/pre-commit').chmod(0o755)
+    (root / '.githooks/pre-push').chmod(0o755)
     cache = tmp_path / 'cache'
     key = hashlib.sha256((root / 'requirements-dev.lock').read_bytes()).hexdigest()[:16]
     binary = cache / 'oa-minimal' / f'python311-{platform.machine()}-{key}' / 'bin'
     binary.mkdir(parents=True)
     for name, body in {
-        'python': 'printf "%s\\n" "$*" >> "$CHECK_CALLS"\ncase "$*" in *ruff*) exit "${RUFF_STATUS:-0}";; *) exit "${TEST_STATUS:-0}";; esac\n',
+        'python': 'printf "%s\\n" "$*" >> "$CHECK_CALLS"\ncase "$*" in *ruff*) exit "${RUFF_STATUS:-0}";; *pytest*) exit "${TEST_STATUS:-0}";; *) exit "${SHARE_STATUS:-0}";; esac\n',
         'uv': 'exit 0\n',
     }.items():
         path = binary / name
@@ -50,10 +51,13 @@ def test_check_runs_existing_commands_and_propagates_failure(repository, status)
     _, run, calls = repository
     result = run('bash', '.codex/python.sh', 'check', TEST_STATUS=str(status))
     assert result.returncode == status
-    assert calls.read_text().splitlines() == ['-B -m ruff check apps tests', '-B -m pytest -q']
+    assert calls.read_text().splitlines() == ['-B .codex/share_check.py', '-B -m ruff check apps tests', '-B -m pytest -q']
     calls.unlink()
     assert run('bash', '.codex/python.sh', 'check', RUFF_STATUS='9').returncode == 9
-    assert calls.read_text().splitlines() == ['-B -m ruff check apps tests']
+    assert calls.read_text().splitlines() == ['-B .codex/share_check.py', '-B -m ruff check apps tests']
+    calls.unlink()
+    assert run('bash', '.codex/python.sh', 'check', SHARE_STATUS='8').returncode == 8
+    assert calls.read_text().splitlines() == ['-B .codex/share_check.py']
 
 
 @pytest.mark.parametrize('relative', ['apps/sample.py', '.codex/environments/environment.toml'])
@@ -64,7 +68,8 @@ def test_setup_installs_hook_and_failed_check_blocks_commit(repository, relative
     (root / 'README.md').write_text('documentation\n')
     assert run('git', 'add', 'README.md').returncode == 0
     assert run('git', 'commit', '-qm', 'docs').returncode == 0
-    assert not calls.exists()
+    assert calls.read_text().splitlines() == ['-B .codex/share_check.py']
+    calls.unlink()
     source = root / relative
     source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text('value = 1\n')
@@ -77,7 +82,7 @@ def test_setup_installs_hook_and_failed_check_blocks_commit(repository, relative
     assert not calls.exists()
     assert run('git', 'add', relative).returncode == 0
     assert run('git', 'commit', '-qm', 'checked').returncode == 0
-    assert calls.read_text().splitlines() == ['-B -m ruff check apps tests', '-B -m pytest -q']
+    assert calls.read_text().splitlines() == ['-B .codex/share_check.py', '-B -m ruff check apps tests', '-B -m pytest -q']
 
 
 def test_setup_preserves_existing_custom_hook_path(repository):

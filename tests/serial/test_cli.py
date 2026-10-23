@@ -27,6 +27,7 @@ def pending_output(tmp_path, monkeypatch, capsys):
         for index in reversed(range(23))
     ]
     monkeypatch.setattr(api, 'build_api', lambda _config: fake)
+    monkeypatch.setattr(cli, 'require_production_main', lambda: None)
     monkeypatch.setattr(cli.socket.socket, 'bind', lambda _socket, address: Path(address).touch())
     monkeypatch.setattr(cli.socket.socket, 'listen', lambda _socket: None)
 

@@ -287,12 +287,12 @@ def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
     from tests.serial.test_approval_service import FakeOA
 
     original = jpeg_source.read_bytes()
-    byte_limit = 13848
     with Image.open(jpeg_source) as image, image.crop((0, 0, 72, 64)) as tile:
         before, after = BytesIO(), BytesIO()
         tile.save(before, format='PNG')
         tile.transpose(Image.Transpose.ROTATE_270).save(after, format='PNG')
-        assert len(before.getvalue()) <= byte_limit < len(after.getvalue())
+        byte_limit = len(before.getvalue())
+        assert byte_limit < len(after.getvalue())
     material = {'request_id': '101', 'workflow_key': 'travel_expense',
                 'resources': [{'resource_id': 'archive', 'name': 'invoices.zip'}],
                 'prepared': {'images': [{

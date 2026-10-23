@@ -18,6 +18,7 @@ if [ "${1:-}" = setup ]; then
     printf '%s\n' "$shared_environment/bin/python"
 elif [ "${1:-}" = check ]; then
     cd "$project_root"
+    "$shared_environment/bin/python" -B .codex/share_check.py
     "$shared_environment/bin/python" -B -m ruff check apps tests
     exec "$shared_environment/bin/python" -B -m pytest -q
 else
