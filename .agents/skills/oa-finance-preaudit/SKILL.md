@@ -9,7 +9,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 ## 主 Agent 执行规则
 
-本节是补位、Agent 轮换、批次范围和停止方式的单一执行规则。Python 返回任务和文件路径，原生审核 Agent 由主 Agent 创建。
+本节是补位、Agent 轮换、批次范围和停止方式的单一执行规则。启动目录与主线要求遵循[项目约定](../../../AGENTS.md)，定时任务与人工批次使用同一 `main` 入口。Python 返回任务和文件路径，原生审核 Agent 由主 Agent 创建。
 
 ### 冻结批次与领取
 
