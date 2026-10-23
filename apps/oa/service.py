@@ -9,6 +9,8 @@ import re
 import shutil
 from uuid import uuid4
 
+from apps.oa_approval import writer_outcomes
+
 from .store import Store, encoded, occurrence_key
 
 
@@ -210,9 +212,8 @@ class Approval:
                         writer = build_writer_api()
                     result = writer.submit_and_verify(task["request_id"],opinion)
             except Exception:
-                result = {"submit_ok":False,"done_hit":False,"postcheck_done_hit":False,"failure_code":"writer_result_unknown"}
-            success = all(result.get(key) is True for key in ("submit_ok","done_hit","postcheck_done_hit"))
-            status = "submitted" if success else "failed" if result.get("failure_code") == "writer_submit_rejected" else "unknown"
+                result = {**writer_outcomes.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            status = writer_outcomes.submission_status(result)
             self.store.finish_submission(submission,status,result)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
@@ -228,14 +229,14 @@ class Approval:
             submission = details["submissions"][-1]
             pending = any(str(row.get("request_id")) == task["request_id"] for row in self._api().pending_rows())
             handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
-            result = {"submit_ok":handled and not pending,"done_hit":handled,"postcheck_done_hit":handled and not pending}
+            fields_match = None
             if task["workflow_key"] == "overseas_invoice":
                 from . import overseas
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
-                result["fields_match"] = overseas.check_fields(self._api(),task["request_id"],material,overseas.plan(material,json.loads(review["recognition_json"])))
-                result["postcheck_done_hit"] = result["postcheck_done_hit"] and result["fields_match"]
-            status = "submitted" if all(result.get(key) for key in ("submit_ok","done_hit","postcheck_done_hit")) else "unknown"
+                fields_match = overseas.check_fields(self._api(),task["request_id"],material,overseas.plan(material,json.loads(review["recognition_json"])))
+            result = writer_outcomes.verification_result(handled,pending,fields_match=fields_match)
+            status = writer_outcomes.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
             return {"task_id":task_id,"status":status,**result}
 

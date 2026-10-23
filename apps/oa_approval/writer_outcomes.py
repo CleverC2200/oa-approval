@@ -28,3 +28,22 @@ FAILURE_CODES = frozenset(
 UNKNOWN_WRITE_CODES = frozenset({
     TRANSPORT_UNKNOWN, POSTCHECK_TIMEOUT, PENDING_CONFLICT, "writer_result_unknown",
 })
+
+
+def verification_result(done_hit, pending_hit, *, submit_ok=None, fields_match=None):
+    completed = done_hit and not pending_hit
+    result = {
+        "submit_ok": completed if submit_ok is None else submit_ok,
+        "done_hit": done_hit,
+        "postcheck_done_hit": completed,
+    }
+    if fields_match is not None:
+        result["fields_match"] = fields_match
+        result["postcheck_done_hit"] = completed and fields_match
+    return result
+
+
+def submission_status(result):
+    if all(result.get(key) is True for key in ("submit_ok", "done_hit", "postcheck_done_hit")):
+        return "submitted"
+    return "failed" if result.get("failure_code") == SUBMIT_REJECTED else "unknown"
