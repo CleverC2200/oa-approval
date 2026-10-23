@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 
-from apps.oa_approval import attachment_extractors, evidence_packet, official_sql
+from apps.oa_approval import attachment_extractors, evidence_packet, official_sql, writer_outcomes
 from apps.oa_approval import overseas_invoice as business
 from apps.oa_approval.overseas_invoice_api import download_fresh
 from apps.oa_approval.writer_api import handled_since
@@ -70,10 +70,10 @@ def submit(api, request_id, material, plan):
     response = api.submit_invoice(request_id,plan["remark"],details,fields_by_row=fields_by_row)
     code = str(response.get("code") or "").upper()
     if code != "SUCCESS":
-        return {"submit_ok":False,"done_hit":False,"postcheck_done_hit":False,
-            "failure_code":"writer_submit_rejected" if code == "ERROR" else "writer_result_unknown"}
+        return {**writer_outcomes.verification_result(False,False,submit_ok=False),
+            "failure_code":writer_outcomes.SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
     pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
     done = handled_since(api.handled_rows(),request_id,started_at)
     fields_match = check_fields(api,request_id,material,plan)
-    return {"submit_ok":True,"done_hit":done,"postcheck_done_hit":done and not pending and fields_match,
-        "fields_match":fields_match,"failure_code":None if done and not pending and fields_match else "writer_postcheck_timeout"}
+    result = writer_outcomes.verification_result(done,pending,submit_ok=True,fields_match=fields_match)
+    return {**result,"failure_code":None if result["postcheck_done_hit"] else writer_outcomes.POSTCHECK_TIMEOUT}

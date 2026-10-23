@@ -179,12 +179,16 @@ def test_replaced_task_instance_cannot_receive_previous_review(tmp_path):
     assert api.posts == []
 
 
-def test_unknown_submission_only_allows_readonly_postcheck(tmp_path):
+def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch):
+    from apps.oa_approval import safe_http
+    from apps.oa_approval.writer_api import FrozenWriterApi
+
     app, api = service(tmp_path)
-    def interrupted(request_id, opinion):
-        api.posts.append((request_id,opinion))
+    def interrupted(request, **kwargs):
+        api.posts.append(request.data)
         raise OSError("connection lost")
-    api.submit_and_verify = interrupted
+    monkeypatch.setattr(safe_http, "urlopen", interrupted)
+    app.writer = FrozenWriterApi("fake-token", "fake-user", app_id="fake-app", base_url="https://oa.example.test")
     task = app.collect(app.pending()["run_id"])
     result = app.submit(task["task_id"],opinion="意见",confirm_write=True)
     assert result["status"] == "unknown"
@@ -198,8 +202,20 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path):
     assert app.postcheck(task["task_id"])["status"] == "unknown"
     assert app.submit(task["task_id"],opinion="意见",confirm_write=True)["status"] == "unknown"
     api.handled[0]["handled_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
-    assert app.postcheck(task["task_id"])["status"] == "submitted"
-    assert api.posts == [("101","意见")]
+    api.rows = [{"request_id": "101"}]
+    conflict = app.postcheck(task["task_id"])
+    assert conflict["status"] == "unknown"
+    assert conflict["done_hit"] is True
+    assert conflict["submit_ok"] is False
+    assert conflict["postcheck_done_hit"] is False
+    api.rows = []
+    recovered = app.postcheck(task["task_id"])
+    assert recovered["status"] == "submitted"
+    assert recovered["submit_ok"] is True
+    assert recovered["done_hit"] is True
+    assert recovered["postcheck_done_hit"] is True
+    assert app.submit(task["task_id"], opinion="意见", confirm_write=True)["status"] == "submitted"
+    assert len(api.posts) == 1
 
 
 def test_successful_occurrence_is_not_reset_when_pending_reappears(tmp_path):

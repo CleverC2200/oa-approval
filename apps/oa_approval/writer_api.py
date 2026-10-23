@@ -68,28 +68,12 @@ class FrozenWriterApi(OaApi):
         try:
             response = self._post_submit(request_id, remark)
         except Exception:
-            return {
-                "submit_ok": False,
-                "done_hit": False,
-                "postcheck_done_hit": False,
-                "failure_code": writer_outcomes.TRANSPORT_UNKNOWN,
-            }
+            return {**writer_outcomes.verification_result(False, False, submit_ok=False),
+                    "failure_code": writer_outcomes.TRANSPORT_UNKNOWN}
         response_code = str(response.get("code") or "").strip().upper()
-        submit_ok = response_code == "SUCCESS"
-        if response_code in SUBMIT_REJECTION_CODES:
-            return {
-                "submit_ok": False,
-                "done_hit": False,
-                "postcheck_done_hit": False,
-                "failure_code": writer_outcomes.SUBMIT_REJECTED,
-            }
-        if not submit_ok:
-            return {
-                "submit_ok": False,
-                "done_hit": False,
-                "postcheck_done_hit": False,
-                "failure_code": writer_outcomes.TRANSPORT_UNKNOWN,
-            }
+        if response_code != "SUCCESS":
+            failure = writer_outcomes.SUBMIT_REJECTED if response_code in SUBMIT_REJECTION_CODES else writer_outcomes.TRANSPORT_UNKNOWN
+            return {**writer_outcomes.verification_result(False, False, submit_ok=False), "failure_code": failure}
         target = str(request_id)
         for attempt in range(POSTCHECK_ATTEMPTS):
             try:
@@ -99,28 +83,13 @@ class FrozenWriterApi(OaApi):
                 )
             except Exception:
                 break
-            if done_hit and pending_hit:
-                return {
-                    "submit_ok": True,
-                    "done_hit": True,
-                    "postcheck_done_hit": False,
-                    "failure_code": writer_outcomes.PENDING_CONFLICT,
-                }
+            result = writer_outcomes.verification_result(done_hit, pending_hit, submit_ok=True)
             if done_hit:
-                return {
-                    "submit_ok": True,
-                    "done_hit": True,
-                    "postcheck_done_hit": True,
-                    "failure_code": None,
-                }
+                return {**result, "failure_code": None if result["postcheck_done_hit"] else writer_outcomes.PENDING_CONFLICT}
             if attempt + 1 < POSTCHECK_ATTEMPTS:
                 time.sleep(POSTCHECK_INTERVAL_SECONDS)
-        return {
-            "submit_ok": True,
-            "done_hit": False,
-            "postcheck_done_hit": False,
-            "failure_code": writer_outcomes.POSTCHECK_TIMEOUT,
-        }
+        return {**writer_outcomes.verification_result(False, False, submit_ok=True),
+                "failure_code": writer_outcomes.POSTCHECK_TIMEOUT}
 
 
 def build_writer_api() -> FrozenWriterApi:
