@@ -2,7 +2,7 @@
 
 此独立项目位于 `/Users/synear/Documents/OA`。入口为 `apps.oa.cli`，使用 SQLite 保存队列、审核意见和提交事实，文件目录保存完整材料。旧开发、生产克隆保持只读。
 
-共享仓库为私有的 [oa-approval](https://github.com/CleverC2200/oa-approval)。正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)，提交材料边界见[安全约定](SECURITY.md)。
+代码仓库为 [oa-approval](https://github.com/CleverC2200/oa-approval)。正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)，提交材料边界见[安全约定](SECURITY.md)。
 
 ## 启动与操作
 
