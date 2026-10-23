@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections import Counter
 import fcntl
 import hashlib
 import json
@@ -10,7 +9,7 @@ import re
 import shutil
 from uuid import uuid4
 
-from .store import INFLIGHT_STATUSES, Store, encoded, occurrence_key
+from .store import Store, encoded, occurrence_key
 
 
 PROJECT = Path(__file__).resolve().parents[2]
@@ -117,39 +116,11 @@ class Approval:
         return result
 
     def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
-        running = self.store.run(run_id)["status"] == "running"
-        refusal = None
-        try:
-            task = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
-                agent_workflow_key=agent_workflow_key) if running else None
-        except ValueError as error:
-            task = None
-            if str(error) == "run_blocked":
-                running = False
-            else:
-                refusal = str(error)
-        if task is None:
-            tasks = self.store.tasks(run_id)
-            summary = dict(Counter(item["status"] for item in tasks))
-            busy = [item for item in tasks if item["status"] in INFLIGHT_STATUSES]
-            batch = json.loads(self.store.run(run_id)["summary_json"]).get("batch")
-            queued = any(item["status"] == "queued" and (batch is None or item["id"] in batch["task_ids"]) for item in tasks)
-            status = "waiting"
-            if not running:
-                status, reason = "blocked", "run_blocked"
-            elif refusal:
-                status, reason = "refused", refusal
-            elif len(busy) >= 3:
-                reason = "inflight_limit"
-            elif agent_id and any(item["agent_id"] == agent_id for item in busy):
-                reason = "agent_busy"
-            elif queued:
-                reason = "workflow_unavailable"
-            elif busy:
-                reason = "in_flight"
-            else:
-                status, reason = "done", "batch_exhausted" if batch is not None else "queue_exhausted"
-            return {"run_id":run_id,"status":status,"reason":reason,"summary":summary}
+        decision = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
+            agent_workflow_key=agent_workflow_key)
+        if decision["status"] != "claimed":
+            return decision
+        task = decision["task"]
         directory = self.root / "materials" / str(task["id"]) / uuid4().hex
         directory.mkdir(parents=True)
         try:
