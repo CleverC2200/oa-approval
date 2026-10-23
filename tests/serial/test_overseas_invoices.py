@@ -247,8 +247,10 @@ def test_submit_adapter_sends_mapped_invoice_fields_and_rejects_human_selection(
     assert len(sent) == 1
 
 
-@pytest.mark.parametrize('tamper,po_problem', [(False, None), (True, None), (False, 'missing'), (False, 'mismatch')])
-def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monkeypatch, tamper, po_problem):
+@pytest.mark.parametrize('tamper,po_problem,lost_response', [
+    (False, None, False), (True, None, False), (False, 'missing', False), (False, 'mismatch', False),
+    (False, None, True), (True, None, True)])
+def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monkeypatch, tamper, po_problem, lost_response):
     data, resources, files, _, _ = case()
     pending = [{'request_id': '201', 'received_at': '2026-10-23 09:00:00',
                 'operator_id': 'tester', 'workflow_key': 'overseas_invoice'}]
@@ -282,6 +284,8 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
                 next(field for field in fields if field['fieldName'] == 'fphm')['fieldValue'] = 'unexpected-change'
             pending.clear()
             handled.append({'request_id': request_id, 'handled_at': datetime.now(timezone.utc).isoformat()})
+            if lost_response:
+                raise OSError('connection lost after applying invoice fields')
             return {'code': 'SUCCESS'}
 
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
@@ -302,9 +306,15 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
         app.submit(task['task_id'], recognition=recognized, confirm_write=True)
     result = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)
     expected = 'unknown' if tamper else 'submitted'
-    assert result['status'] == expected
-    assert result['fields_match'] is not tamper
-    assert app.postcheck(task['task_id'])['status'] == expected
+    assert result['status'] == ('unknown' if lost_response else expected)
+    if not lost_response:
+        assert result['fields_match'] is not tamper
+    checked = app.postcheck(task['task_id'])
+    assert checked['status'] == expected
+    if lost_response or tamper:
+        assert checked['fields_match'] is not tamper
+        assert checked['submit_ok'] is True
+        assert checked['postcheck_done_hit'] is not tamper
     assert app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)['status'] == expected
     assert len(posts) == 1
     assert {item['fieldName']: item['fieldValue'] for item in
@@ -312,3 +322,38 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
         'fpje': '20.20', 'fphm': 'INV-101,INV-102', 'fpdqr': '2026-12-01',
         'custom_date': '2026-10-20', 'custom_invoice_po': {
             None: '001234,001234', 'missing': '001234', 'mismatch': '001234,009999'}[po_problem]}
+
+
+@pytest.mark.parametrize('response,pending,fresh,expected_code', [
+    ('ERROR', False, True, 'writer_submit_rejected'),
+    ('UNRECOGNIZED', False, True, 'writer_result_unknown'),
+    ('SUCCESS', True, True, 'writer_postcheck_timeout'),
+    ('SUCCESS', False, False, 'writer_postcheck_timeout'),
+    ('SUCCESS', False, True, None),
+])
+def test_overseas_submit_preserves_response_and_completion_evidence(case, response, pending, fresh, expected_code):
+    data, resources, _, material, recognized = case()
+    plan = overseas.plan(material, recognized)
+    posts = []
+    class Api:
+        def request_context(self, request_id):
+            return data, resources
+
+        def submit_invoice(self, request_id, remark, details, *, fields_by_row):
+            posts.append(details)
+            data.update(invoice.patched_workflow(data, material['snapshot'], plan))
+            return {'code': response}
+
+        def pending_rows(self):
+            return [{'request_id': '201'}] if pending else []
+
+        def handled_rows(self):
+            return [{'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()
+                     if fresh else '2020-01-01T12:00:00+00:00'}]
+
+    result = overseas.submit(Api(), '201', material, plan)
+    assert result['failure_code'] == expected_code
+    assert result['submit_ok'] is (response == 'SUCCESS')
+    assert result['done_hit'] is (response == 'SUCCESS' and fresh)
+    assert result['postcheck_done_hit'] is (expected_code is None)
+    assert len(posts) == 1

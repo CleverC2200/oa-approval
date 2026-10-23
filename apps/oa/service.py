@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from collections import Counter
 import fcntl
 import hashlib
 import json
@@ -10,7 +9,9 @@ import re
 import shutil
 from uuid import uuid4
 
-from .store import INFLIGHT_STATUSES, Store, encoded, occurrence_key
+from apps.oa_approval import writer_outcomes
+
+from .store import Store, encoded, occurrence_key
 
 
 PROJECT = Path(__file__).resolve().parents[2]
@@ -117,39 +118,11 @@ class Approval:
         return result
 
     def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
-        running = self.store.run(run_id)["status"] == "running"
-        refusal = None
-        try:
-            task = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
-                agent_workflow_key=agent_workflow_key) if running else None
-        except ValueError as error:
-            task = None
-            if str(error) == "run_blocked":
-                running = False
-            else:
-                refusal = str(error)
-        if task is None:
-            tasks = self.store.tasks(run_id)
-            summary = dict(Counter(item["status"] for item in tasks))
-            busy = [item for item in tasks if item["status"] in INFLIGHT_STATUSES]
-            batch = json.loads(self.store.run(run_id)["summary_json"]).get("batch")
-            queued = any(item["status"] == "queued" and (batch is None or item["id"] in batch["task_ids"]) for item in tasks)
-            status = "waiting"
-            if not running:
-                status, reason = "blocked", "run_blocked"
-            elif refusal:
-                status, reason = "refused", refusal
-            elif len(busy) >= 3:
-                reason = "inflight_limit"
-            elif agent_id and any(item["agent_id"] == agent_id for item in busy):
-                reason = "agent_busy"
-            elif queued:
-                reason = "workflow_unavailable"
-            elif busy:
-                reason = "in_flight"
-            else:
-                status, reason = "done", "batch_exhausted" if batch is not None else "queue_exhausted"
-            return {"run_id":run_id,"status":status,"reason":reason,"summary":summary}
+        decision = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
+            agent_workflow_key=agent_workflow_key)
+        if decision["status"] != "claimed":
+            return decision
+        task = decision["task"]
         directory = self.root / "materials" / str(task["id"]) / uuid4().hex
         directory.mkdir(parents=True)
         try:
@@ -239,9 +212,8 @@ class Approval:
                         writer = build_writer_api()
                     result = writer.submit_and_verify(task["request_id"],opinion)
             except Exception:
-                result = {"submit_ok":False,"done_hit":False,"postcheck_done_hit":False,"failure_code":"writer_result_unknown"}
-            success = all(result.get(key) is True for key in ("submit_ok","done_hit","postcheck_done_hit"))
-            status = "submitted" if success else "failed" if result.get("failure_code") == "writer_submit_rejected" else "unknown"
+                result = {**writer_outcomes.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            status = writer_outcomes.submission_status(result)
             self.store.finish_submission(submission,status,result)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
@@ -257,14 +229,14 @@ class Approval:
             submission = details["submissions"][-1]
             pending = any(str(row.get("request_id")) == task["request_id"] for row in self._api().pending_rows())
             handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
-            result = {"submit_ok":handled and not pending,"done_hit":handled,"postcheck_done_hit":handled and not pending}
+            fields_match = None
             if task["workflow_key"] == "overseas_invoice":
                 from . import overseas
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
-                result["fields_match"] = overseas.check_fields(self._api(),task["request_id"],material,overseas.plan(material,json.loads(review["recognition_json"])))
-                result["postcheck_done_hit"] = result["postcheck_done_hit"] and result["fields_match"]
-            status = "submitted" if all(result.get(key) for key in ("submit_ok","done_hit","postcheck_done_hit")) else "unknown"
+                fields_match = overseas.check_fields(self._api(),task["request_id"],material,overseas.plan(material,json.loads(review["recognition_json"])))
+            result = writer_outcomes.verification_result(handled,pending,fields_match=fields_match)
+            status = writer_outcomes.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
             return {"task_id":task_id,"status":status,**result}
 

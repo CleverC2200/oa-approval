@@ -6,6 +6,8 @@ import shlex
 from pathlib import Path
 import sys
 
+from apps.oa_approval.attachment_locations import image_locations
+
 
 def command(material_file: Path) -> str:
     return shlex.join([sys.executable, '-X', 'utf8', '-B', '-m', __name__, str(material_file.absolute())])
@@ -87,13 +89,11 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
         ),
         'pages': [],
     }
-    numbers = {}
-    for index, page in enumerate(pages):
-        resource_id = str(page.get('parent_resource_id') or page.get('resource_id') or '')
-        numbers[resource_id] = numbers.get(resource_id, 0) + 1
+    for index, (location, page) in enumerate(image_locations(pages)):
+        resource_id = location['resource_id']
         route = {
             'material_pointer': f'material.prepared.images[{index}]',
-            'evidence_ref': f'material:prepared.images.{resource_id}.{numbers[resource_id]}',
+            'evidence_ref': location['evidence_ref'],
             'resource_pointer': next((f'material.resources[{i}]' for i, resource in enumerate(resources)
                                       if resource.get('resource_id') == resource_id), None),
             'source': page,
