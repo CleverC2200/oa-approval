@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import re
+import hashlib
+from collections.abc import Callable
 from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from apps.oa_approval import material_store, native_documents, rpa_session, runtime_control
 
 
 _MAX_ORIGINAL_BYTES = 50 * 1024 * 1024
@@ -110,8 +114,12 @@ def _download_contexts(request_id: str):
 
 
 class DownloadBatch:
-    def __init__(self, request_id: str):
+    def __init__(self, request_id: str, *, base_url: str, cookie_header: Callable,
+                 native_read: Callable):
         self.request_id = request_id
+        self.base_url = base_url
+        self._cookie_header = cookie_header
+        self._native_read = native_read
         self.client, self._sources = _download_contexts(request_id)
 
     def context(self, request_id: str, native_file_id: str):
@@ -120,82 +128,159 @@ class DownloadBatch:
             source, data_id = self._sources.get(native_file_id, ({}, ''))
         return self.client, source, data_id
 
-    def recheck(self) -> bool:
-        _, current = _download_contexts(self.request_id)
-        return bool(self._sources) and current == self._sources
+    def _checked_resource(self, resource: dict) -> dict:
+        from apps.oa_approval.attachments import normalize_download_url
+
+        url = normalize_download_url(
+            str(resource.get('downloadUrl') or resource.get('download_url') or ''),
+            oa_host=self.base_url,
+        )
+        return dict(resource, downloadUrl=url, _ephemeral_cookie_header=self._cookie_header(
+            urllib.parse.urlsplit(self.base_url).hostname or ''))
+
+    def _verify(self, resource: dict, *, timeout_sec: int, initialize: bool = False) -> bool:
+        source, _ = self._sources.get(str(resource.get('id') or ''), ({}, ''))
+        if not source or source != resource.get('_invoice_original'):
+            return False
+        return native_documents.verify(
+            resource, str(resource.get('downloadUrl') or resource.get('download_url') or ''),
+            base_url=self.base_url, document_id=source['document_id'],
+            timeout_sec=timeout_sec, initialize=initialize,
+        )
+
+    def prepare(self, resources: list[dict], *, timeout_sec: int) -> list[dict]:
+        for resource in resources:
+            if not resource.get('_invoice_original'):
+                continue
+            try:
+                valid = self._verify(self._checked_resource(resource), timeout_sec=timeout_sec)
+            except rpa_session.RpaSessionError as error:
+                return [{'code': error.code, 'message': '发票原件会话核验失败'}]
+            except ValueError:
+                valid = False
+            if not valid:
+                return [{'code': 'resource_ownership_untrusted', 'message': '发票原件归属核验失败'}]
+        return []
+
+    def accept_cache(self, resource: dict, entry: dict, path: Path) -> dict | None:
+        if not resource.get('_invoice_original'):
+            return entry
+        if (entry.get('invoice_original_source') == resource['_invoice_original']
+                and entry.get('content_sha256')
+                and entry['content_sha256'] == _content_sha256(path)):
+            return entry
+        return None
+
+    def cache_metadata(self, resource: dict, path: Path) -> dict | None:
+        if not resource.get('_invoice_original'):
+            return {}
+        digest = _content_sha256(path)
+        return {'invoice_original_source': dict(resource['_invoice_original']),
+                'content_sha256': digest} if digest else None
+
+    def download(self, resource: dict, *, dest_dir: Path, timeout_sec: int) -> tuple[Path | None, str]:
+        checked = self._checked_resource(resource)
+        url = checked['downloadUrl']
+        path, error = self._native_read(checked, url, dest_dir=dest_dir, timeout_sec=timeout_sec)
+        if path is not None or not error.startswith('attachment_access_denied'):
+            return path, error
+        try:
+            initialized = self._verify(checked, timeout_sec=timeout_sec, initialize=True)
+        except rpa_session.RpaSessionError as failure:
+            return None, f'{failure.code}: {failure}'
+        if not initialized:
+            return path, error
+        if runtime_control.stop_requested():
+            return None, runtime_control.STOP_CODE
+        path, retry_error = self._native_read(checked, url, dest_dir=dest_dir, timeout_sec=timeout_sec)
+        if path is None and retry_error.startswith('attachment_access_denied'):
+            from apps.oa_approval.attachments import deterministic_filename
+
+            path, cloud_error = self._download_cloud(
+                checked, dest=dest_dir / deterministic_filename(resource), timeout_sec=timeout_sec,
+            )
+            return path, f'{cloud_error}: 关联发票原件读取失败' if cloud_error else ''
+        return path, retry_error or (error if path is None else '')
+
+    def finish(self) -> list[dict]:
+        if runtime_control.stop_requested():
+            return [runtime_control.stop_error('已请求停止财务预审，停止本单附件下载')]
+        try:
+            _, current = _download_contexts(self.request_id)
+            valid = bool(self._sources) and current == self._sources
+        except rpa_session.RpaSessionError as error:
+            return [{'code': error.code, 'message': '发票原件会话核验失败'}]
+        except Exception:
+            valid = False
+        if runtime_control.stop_requested():
+            return [runtime_control.stop_error('已请求停止财务预审，停止本单附件下载')]
+        return [] if valid else [{'code': 'resource_ownership_untrusted', 'message': '发票原件批量下载归属已变化'}]
+
+    def _download_cloud(self, resource: dict, *, dest: Path, timeout_sec: int) -> tuple[Path | None, str]:
+        from apps.oa_approval import invoice_buyers
+
+        request_id = str(resource.get('_workflow_request_id') or '')
+        native_file_id = str(resource.get('id') or '')
+        try:
+            client, source, data_id = self.context(request_id, native_file_id)
+            if not source or source != resource.get('_invoice_original'):
+                return None, 'resource_ownership_untrusted'
+            token_response = client.get(invoice_buyers.TOKEN_PATH)
+            token = token_response.get('token')
+            if str(token_response.get('status')) != '1' or not isinstance(token, str) or not token:
+                return None, 'attachment_access_denied'
+            if runtime_control.stop_requested():
+                return None, runtime_control.STOP_CODE
+            query = urllib.parse.urlencode({'id': source['cloud_file_id'],
+                                           'fid': source['cloud_record_id'],
+                                           'dataId': data_id, 'token': token})
+            request = urllib.request.Request(
+                _CLOUD_DOWNLOAD_URL + '?' + query,
+                headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://inc.mypiaojia.com/'},
+            )
+            with urllib.request.build_opener(_NoCloudRedirect()).open(request, timeout=max(1, timeout_sec)) as response:
+                length = response.headers.get('Content-Length')
+                if length is not None and (not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES):
+                    return None, 'attachment_content_incomplete'
+                body = response.read(_MAX_ORIGINAL_BYTES + 1)
+                if (len(body) > _MAX_ORIGINAL_BYTES or not body.startswith(b'%PDF-')
+                        or length is not None and len(body) != int(length)):
+                    return None, 'attachment_content_incomplete'
+            if not self._verify(resource, timeout_sec=timeout_sec):
+                return None, 'resource_ownership_untrusted'
+            if runtime_control.stop_requested():
+                return None, runtime_control.STOP_CODE
+            material_store.write_bytes(dest, body, source={
+                'request_id': request_id, 'resource_id': native_file_id, 'kind': 'invoice_original',
+            })
+            return dest, ''
+        except urllib.error.HTTPError as error:
+            return None, 'attachment_access_denied' if error.code in (401, 403) else 'attachment_download_failed'
+        except rpa_session.RpaSessionError as error:
+            return None, error.code
+        except ValueError as error:
+            return None, str(error) if str(error).startswith('material_') else 'attachment_download_failed'
+        except Exception:
+            return None, 'attachment_download_failed'
 
 
-def _download_context(request_id: str, native_file_id: str, batch: DownloadBatch | None = None):
-    if batch is not None:
-        return batch.context(request_id, native_file_id)
-    client, sources = _download_contexts(request_id)
-    source, data_id = sources.get(native_file_id, ({}, ''))
-    return client, source, data_id
+def _content_sha256(path: Path) -> str:
+    try:
+        with path.open('rb') as source:
+            return hashlib.file_digest(source, 'sha256').hexdigest()
+    except OSError:
+        return ''
 
 
-def source_for_download(request_id: str, native_file_id: str, *, batch: DownloadBatch | None = None) -> dict:
-    return _download_context(request_id, native_file_id, batch)[1]
+def source_for_download(request_id: str, native_file_id: str) -> dict:
+    _, sources = _download_contexts(request_id)
+    source, _ = sources.get(native_file_id, ({}, ''))
+    return source
 
 
 class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError('attachment_download_failed')
-
-
-def download_original(resource: dict, *, dest_dir: Path, timeout_sec: int,
-                      batch: DownloadBatch | None = None) -> tuple[Path | None, str]:
-    from apps.oa_approval import attachments, invoice_buyers, material_store, runtime_control
-
-    request_id = str(resource.get('_workflow_request_id') or '')
-    native_file_id = str(resource.get('id') or '')
-    dest = dest_dir / attachments.deterministic_filename(resource)
-    try:
-        client, source, data_id = _download_context(request_id, native_file_id, batch)
-        if not source or source != resource.get('_invoice_original'):
-            return None, 'resource_ownership_untrusted'
-        token_response = client.get(invoice_buyers.TOKEN_PATH)
-        token = token_response.get('token')
-        if str(token_response.get('status')) != '1' or not isinstance(token, str) or not token:
-            return None, 'attachment_access_denied'
-        if runtime_control.stop_requested():
-            return None, runtime_control.STOP_CODE
-        query = urllib.parse.urlencode({'id': source['cloud_file_id'],
-                                       'fid': source['cloud_record_id'],
-                                       'dataId': data_id, 'token': token})
-        request = urllib.request.Request(
-            _CLOUD_DOWNLOAD_URL + '?' + query,
-            headers={'User-Agent': 'Mozilla/5.0', 'Referer': 'https://inc.mypiaojia.com/'},
-        )
-        with urllib.request.build_opener(_NoCloudRedirect()).open(request, timeout=max(1, timeout_sec)) as response:
-            length = response.headers.get('Content-Length')
-            if length is not None and (not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES):
-                return None, 'attachment_content_incomplete'
-            body = response.read(_MAX_ORIGINAL_BYTES + 1)
-            if (len(body) > _MAX_ORIGINAL_BYTES or not body.startswith(b'%PDF-')
-                    or length is not None and len(body) != int(length)):
-                return None, 'attachment_content_incomplete'
-        if batch is None:
-            _, current_source, current_data_id = _download_context(request_id, native_file_id)
-            if current_source != source or current_data_id != data_id:
-                return None, 'resource_ownership_untrusted'
-        url, error = attachments._normalized_download_url(resource)
-        if error or not attachments._initialize_workflow_document_context(
-                resource, url, timeout_sec=timeout_sec, initialize=False, original_batch=batch):
-            return None, 'resource_ownership_untrusted'
-        if runtime_control.stop_requested():
-            return None, runtime_control.STOP_CODE
-        material_store.write_bytes(dest, body, source={
-            'request_id': request_id, 'resource_id': native_file_id, 'kind': 'invoice_original',
-        })
-        return dest, ''
-    except urllib.error.HTTPError as error:
-        return None, 'attachment_access_denied' if error.code in (401, 403) else 'attachment_download_failed'
-    except attachments.rpa_session.RpaSessionError as error:
-        return None, error.code
-    except ValueError as error:
-        return None, str(error) if str(error).startswith('material_') else 'attachment_download_failed'
-    except Exception:
-        return None, 'attachment_download_failed'
 
 
 def prepared_body(source: dict, resource_rows: list, prepared: dict) -> dict:
