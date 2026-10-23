@@ -325,7 +325,7 @@ def test_four_default_previews_release_capacity_and_never_write(tmp_path):
 def test_fail_requires_a_nonempty_reason(tmp_path, reason):
     app, api = service(tmp_path)
     run = app.pending()["run_id"]
-    task = app.store.claim(run)
+    task = app.store.claim(run)["task"]
     with pytest.raises(ValueError, match="failure_reason_required"):
         app.fail(run,task["id"],reason)
     assert app.inspect(task["id"])["task"]["status"] == "preparing"
@@ -401,4 +401,11 @@ def test_bounded_collect_refuses_wrong_agent_and_finishes_without_claiming_outsi
         "run_id":run, "status":"done", "reason":"batch_exhausted",
         "summary":{"failed":1,"preview":1,"queued":1}}
     assert app.inspect(outside_id)["task"]["status"] == "queued"
+    assert api.posts == []
+
+
+def test_collect_unknown_run_keeps_the_public_not_found_error(tmp_path):
+    app, api = service(tmp_path)
+    with pytest.raises(ValueError, match="^run_not_found$"):
+        app.collect("missing", expected_task_id=1)
     assert api.posts == []

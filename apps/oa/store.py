@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -136,38 +137,49 @@ class Store:
     def claim(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
-            run = self.connection.execute("SELECT status,summary_json FROM runs WHERE id=?", (run_id,)).fetchone()
-            if run is None or run["status"] != "running":
-                raise ValueError("run_blocked")
+            run = self.run(run_id)
+            tasks = self.tasks(run_id)
+
+            def unclaimed(status, reason):
+                return {"run_id":run_id,"status":status,"reason":reason,
+                        "summary":dict(Counter(task["status"] for task in tasks))}
+
+            if run["status"] != "running":
+                return unclaimed("blocked", "run_blocked")
             guarded = expected_task_id is not None or agent_workflow_key is not None
             if guarded:
                 if expected_task_id is None or not agent_workflow_key:
-                    raise ValueError("claim_guards_required")
+                    return unclaimed("refused", "claim_guards_required")
                 if not isinstance(agent_id,str) or not agent_id.strip():
-                    raise ValueError("agent_identity_required")
-            busy = self.connection.execute("SELECT agent_id FROM tasks WHERE last_run_id=? AND status IN (?,?,?,?)", (run_id,*INFLIGHT_STATUSES)).fetchall()
+                    return unclaimed("refused", "agent_identity_required")
+            busy = [task for task in tasks if task["status"] in INFLIGHT_STATUSES]
             if len(busy) >= 3:
-                return None
-            if agent_id and any(item["agent_id"] == agent_id for item in busy):
-                return None
+                return unclaimed("waiting", "inflight_limit")
+            if agent_id and any(task["agent_id"] == agent_id for task in busy):
+                return unclaimed("waiting", "agent_busy")
             batch = json.loads(run["summary_json"]).get("batch")
-            candidate = next((task for task in self.tasks(run_id) if task["status"] == "queued"
-                and (batch is None or task["id"] in batch["task_ids"])
-                and (not workflow_key or task["workflow_key"] == workflow_key)), None)
+            queued = [task for task in tasks if task["status"] == "queued"
+                and (batch is None or task["id"] in batch["task_ids"])]
+            candidate = next((task for task in queued
+                if not workflow_key or task["workflow_key"] == workflow_key), None)
             if candidate is None:
-                return None
+                if queued:
+                    return unclaimed("waiting", "workflow_unavailable")
+                if busy:
+                    return unclaimed("waiting", "in_flight")
+                return unclaimed("done", "batch_exhausted" if batch is not None else "queue_exhausted")
             if guarded:
                 if candidate["id"] != expected_task_id:
-                    raise ValueError("expected_task_changed")
+                    return unclaimed("refused", "expected_task_changed")
                 if candidate["workflow_key"] != agent_workflow_key:
-                    raise ValueError("agent_workflow_mismatch")
-                previous = [task for task in self.tasks(run_id) if task["agent_id"] == agent_id]
+                    return unclaimed("refused", "agent_workflow_mismatch")
+                previous = [task for task in tasks if task["agent_id"] == agent_id]
                 if any(task["workflow_key"] != agent_workflow_key for task in previous):
-                    raise ValueError("agent_generation_workflow_mismatch")
+                    return unclaimed("refused", "agent_generation_workflow_mismatch")
                 if len(previous) >= 5:
-                    raise ValueError("agent_claim_limit")
+                    return unclaimed("refused", "agent_claim_limit")
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
-        return self.get_task(candidate["id"])
+            return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"])}
 
     def fail(self, task_id, error, *, run_id=None):
         with self.connection:
