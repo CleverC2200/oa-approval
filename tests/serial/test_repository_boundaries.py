@@ -58,11 +58,15 @@ def test_pre_push_failure_prevents_remote_update(repository, tmp_path):
 @pytest.mark.parametrize('state,error', [('branch', 'production_main_required'),
                                         ('dirty', 'production_checkout_dirty'),
                                         ('ahead', 'production_main_not_synced'),
+                                        ('remote_ahead', 'production_main_not_synced'),
                                         ('unpublished', 'production_main_unpublished')])
 def test_production_requires_clean_published_main(repository, monkeypatch, state, error):
     root, run, _ = repository
+    remote = root.parent / 'origin.git'
     assert run('git', 'branch', '-M', 'main').returncode == 0
-    assert run('git', 'update-ref', 'refs/remotes/origin/main', 'HEAD').returncode == 0
+    assert run('git', 'init', '--bare', '-q', str(remote)).returncode == 0
+    assert run('git', 'remote', 'add', 'origin', str(remote)).returncode == 0
+    assert run('git', 'push', '-q', 'origin', 'main').returncode == 0
     monkeypatch.setenv('GIT_DIR', str(root.parent / 'different.git'))
     monkeypatch.setenv('GIT_WORK_TREE', str(root.parent / 'different-checkout'))
     cli.require_production_main(root)
@@ -72,8 +76,14 @@ def test_production_requires_clean_published_main(repository, monkeypatch, state
         (root / 'README.md').write_text('dirty\n')
     elif state == 'ahead':
         assert run('git', 'commit', '--allow-empty', '-qm', 'ahead').returncode == 0
+    elif state == 'remote_ahead':
+        previous = run('git', 'rev-parse', 'HEAD').stdout.strip()
+        next_commit = run('git', 'commit-tree', 'HEAD^{tree}', '-p', 'HEAD', '-m', 'remote advancement')
+        assert next_commit.returncode == 0
+        assert run('git', 'push', '-q', 'origin', next_commit.stdout.strip() + ':refs/heads/main').returncode == 0
+        assert run('git', 'update-ref', 'refs/remotes/origin/main', previous).returncode == 0
     else:
-        assert run('git', 'update-ref', '-d', 'refs/remotes/origin/main').returncode == 0
+        assert run('git', 'remote', 'set-url', 'origin', str(root.parent / 'missing.git')).returncode == 0
     with pytest.raises(ValueError, match=error):
         cli.require_production_main(root)
 

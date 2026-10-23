@@ -124,8 +124,12 @@ def require_production_main(project=None):
     environment = dict(os.environ)
     for name in subprocess.check_output(['git', 'rev-parse', '--local-env-vars'], text=True).splitlines():
         environment.pop(name, None)
+    environment['GIT_TERMINAL_PROMPT'] = '0'
     def git(*args):
-        result = subprocess.run(['git', '-C', str(project), *args], text=True, capture_output=True, env=environment)
+        try:
+            result = subprocess.run(['git', '-C', str(project), *args], text=True, capture_output=True, env=environment, timeout=30)
+        except subprocess.TimeoutExpired:
+            raise ValueError('production_main_unpublished') from None
         if result.returncode:
             raise ValueError('production_main_unpublished')
         return result.stdout.strip()
@@ -133,6 +137,7 @@ def require_production_main(project=None):
         raise ValueError('production_main_required')
     if git('status', '--porcelain=v1'):
         raise ValueError('production_checkout_dirty')
+    git('fetch', '--quiet', 'origin', 'refs/heads/main:refs/remotes/origin/main')
     if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
         raise ValueError('production_main_not_synced')
 
