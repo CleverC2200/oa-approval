@@ -1,0 +1,27 @@
+{
+  "requestId": "12",
+  "workflowBaseInfo": {
+    "workflowId": "138023",
+    "workflowName": "差旅费报销流程"
+  },
+  "workflowMainTableInfo": {
+    "requestRecords": [{"workflowRequestTableFields": [
+      {"fieldName": "fj", "fieldShowName": "附件", "fieldValue": "", "fieldShowValue": ""},
+      {"fieldName": "fjdz", "fieldShowName": "附件地址", "fieldValue": "", "fieldShowValue": ""},
+      {"fieldName": "fjsl", "fieldShowName": "附件数量", "fieldShowValue": "0"},
+      {"fieldName": "lcbh", "fieldShowName": "流程编号", "fieldShowValue": "SYNTHETIC-TRAVEL"}
+    ]}]
+  },
+  "workflowDetailTableInfos": [{"workflowRequestTableRecords": [
+    {"workflowRequestTableFields": [
+      {"fieldName": "fj", "fieldShowName": "附件", "fieldValue": "", "fieldShowValue": "[该字段暂不支持]"},
+      {"fieldName": "fphm", "fieldShowName": "发票号码", "fieldValue": "", "fieldShowValue": "[该字段暂不支持]"},
+      {"fieldName": "fjdz", "fieldShowName": "附件地址", "fieldValue": "", "fieldShowValue": ""}
+    ]},
+    {"workflowRequestTableFields": [
+      {"fieldName": "fj", "fieldShowName": "附件", "fieldValue": "", "fieldShowValue": "[该字段暂不支持]"},
+      {"fieldName": "fphm", "fieldShowName": "发票号码", "fieldValue": "", "fieldShowValue": "[该字段暂不支持]"},
+      {"fieldName": "fjdz", "fieldShowName": "附件地址", "fieldValue": "", "fieldShowValue": ""}
+    ]}
+  ]}]
+}

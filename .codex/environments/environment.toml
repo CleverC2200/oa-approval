@@ -1,0 +1,25 @@
+version = 1
+name = "oa-workspace-improve"
+
+[setup]
+script = "bash .codex/python.sh --version"
+
+[[actions]]
+name = "准备共享 Python 依赖"
+icon = "tool"
+command = "bash .codex/python.sh setup"
+
+[[actions]]
+name = "本地离线测试"
+icon = "test"
+command = "bash .codex/python.sh -m pytest -q"
+
+[[actions]]
+name = "静态检查"
+icon = "tool"
+command = "bash .codex/python.sh -m ruff check apps tests"
+
+[[actions]]
+name = "本地离线校验"
+icon = "test"
+command = "bash .codex/python.sh check"

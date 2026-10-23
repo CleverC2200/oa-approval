@@ -1,0 +1,7 @@
+interface:
+  display_name: "OA 预审"
+  short_description: "读取可信证据，审核财务单据或校对包装版面文字"
+  default_prompt: "使用 $oa-finance-preaudit 执行当前授权的 OA 预审。主 Agent 按 Skill 的执行规则管理批次和原生审核 Agent；审核子 Agent 完整读取本单材料及匹配规则，六类财务按固定项目形成意见，包装校对原图文字，有 Excel 时逐字符对照。最终文本遵守共享结果格式。"
+
+policy:
+  allow_implicit_invocation: false

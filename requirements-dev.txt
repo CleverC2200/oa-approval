@@ -1,0 +1,11 @@
+openpyxl==3.1.5
+xlrd==2.0.2
+oracledb==4.0.1
+PyMuPDF==1.26.4
+Pillow==13.0.0
+playwright==1.62.0
+pytest==9.1.1
+
+PyYAML==6.0.3
+ruff==0.13.2
+uv==0.11.6
