@@ -363,6 +363,78 @@ def selected_material(tmp_path):
     return material_file, material, source
 
 
+def test_material_navigation_matches_recognition_page_identity(tmp_path, requests, selected_material):
+    from apps.oa_finance_preaudit.read_material import read
+
+    material_file, material, source = selected_material
+    material['prepared']['images'].append({
+        **material['prepared']['images'][0], 'resource_id': 'a:second.pdf', 'page_number': 99})
+    material_file.write_text(json.dumps(material))
+    frozen = material_file.read_bytes()
+    original = source.read_bytes()
+
+    navigation = json.loads(read(material_file).split('[reader.image_tool_routes]\n')[1])
+    report = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'recognized')
+
+    assert report['status'] == 'complete'
+    assert navigation['coverage'] == 'navigation_only'
+    expected = [
+        ('a', 'a:invoice.pdf', 1, 'material:prepared.images.a.1'),
+        ('b', 'b:invoice.pdf', 1, 'material:prepared.images.b.1'),
+        ('b', 'b:invoice.pdf', 2, 'material:prepared.images.b.2'),
+        ('a', 'a:second.pdf', 2, 'material:prepared.images.a.2'),
+    ]
+    images = [part for part in report['parts'] if part['kind'] == 'image']
+    assert [(part['resource_id'], part['prepared_resource_id'], part['page_number'], part['evidence_ref'])
+            for part in images] == expected
+    assert [route['evidence_ref'] for route in navigation['pages']] == [item[3] for item in expected]
+    assert [route['material_pointer'] for route in navigation['pages']] == [
+        'material.prepared.images[0]', 'material.prepared.images[1]',
+        'material.prepared.images[2]', 'material.prepared.images[3]']
+    assert [route['resource_pointer'] for route in navigation['pages']] == [
+        'material.resources[0]', 'material.resources[1]', 'material.resources[1]', 'material.resources[0]']
+    assert [route['source'] for route in navigation['pages']] == material['prepared']['images']
+    assert all('region_read' in route for route in navigation['pages'])
+    assert [(part['resource_id'], part['source'], part['evidence_ref'])
+            for part in report['parts'] if part['kind'] == 'text'] == [
+        ('a', 'parser', 'material:prepared.structured_contents[0]'),
+        ('b', 'parser', 'material:prepared.structured_contents[1]')]
+    assert [part.get('reused_from') for part in images] == [None, 'image-1', 'image-1', 'image-1']
+    assert len(requests) == 1
+    assert material_file.read_bytes() == frozen
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(('resource_id', 'status', 'error'), [
+    ('', 'failed', 'attachment_page_unbound'),
+    ('orphan', 'complete', None),
+])
+def test_material_navigation_keeps_missing_resource_guards_separate_from_recognition(
+        tmp_path, requests, selected_material, resource_id, status, error):
+    from apps.oa_finance_preaudit.read_material import read
+
+    material_file, material, _ = selected_material
+    material['prepared']['images'] = [{
+        **material['prepared']['images'][0], 'resource_id': resource_id, 'parent_resource_id': ''}]
+    material['prepared']['structured_contents'] = []
+    material_file.write_text(json.dumps(material))
+
+    navigation = json.loads(read(material_file).split('[reader.image_tool_routes]\n')[1])
+    report = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'recognized')
+
+    route = navigation['pages'][0]
+    assert route['resource_pointer'] is None
+    assert 'region_read' not in route
+    assert 'auxiliary_copy' not in route
+    assert report['status'] == status
+    assert report.get('error_code') == error
+    if error:
+        assert report['parts'] == requests == []
+    else:
+        assert report['parts'][0]['evidence_ref'] == route['evidence_ref']
+        assert report['parts'][0]['resource_id'] == 'orphan'
+
+
 def test_page_selection_reads_only_original_image_page(tmp_path, requests, selected_material):
     material_file, material, source = selected_material
     material['prepared']['images'][0]['path'] = str(tmp_path / 'unselected-a.png')
