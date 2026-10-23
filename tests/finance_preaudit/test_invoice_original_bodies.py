@@ -526,3 +526,105 @@ def test_original_legacy_cache_waits_for_final_binding_check(original_transport,
         collect_original(state, tmp_path)
     assert not writes
 
+
+
+@pytest.mark.parametrize('cached_state', ['unchanged', 'bytes_changed', 'document_changed'])
+def test_explicit_original_cache_reuse_checks_current_document_and_bytes(
+    original_transport, tmp_path, cached_state,
+):
+    from pathlib import Path
+
+    state = original_transport
+    material = collect_original(state, tmp_path)
+    source = material['invoice_evidence']['invoices'][0]['files'][0]['original_source']
+    path = Path(material['resources'][0]['local_readonly_path'])
+    if cached_state == 'bytes_changed':
+        path.write_bytes(b'%PDF changed')
+    elif cached_state == 'document_changed':
+        state.main_file = '999'
+    targets = [{
+        'id': '202', 'name': 'invoice-original-202.pdf',
+        'downloadUrl': '/weaver/weaver.file.FileDownload?fileid=202',
+        '_invoice_original': source,
+    }]
+    before = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
+    files, errors = attachments.download_resources(
+        targets, dest_dir=path.parent, timeout_sec=1, allow_browser_download=True,
+        request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
+    )
+    after = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
+    if cached_state == 'document_changed':
+        assert files == [] and errors[0]['code'] == 'resource_ownership_untrusted'
+        assert after == before
+    else:
+        assert errors == []
+        assert files[0]['reused'] is (cached_state == 'unchanged')
+        assert after - before == (0 if cached_state == 'unchanged' else 1)
+        assert Path(files[0]['path']).read_bytes() == state.pdf
+
+
+@pytest.mark.parametrize('failure', ['binding_changed', 'stopped'])
+def test_failed_mixed_original_batch_never_publishes_cache(
+    original_transport, tmp_path, monkeypatch, failure,
+):
+    state = original_transport
+    source = {'cloud_record_id': '9001', 'cloud_file_id': '8001',
+              'document_id': '303', 'native_file_id': '202'}
+    targets = [
+        {'id': '202', 'name': 'invoice-original-202.pdf', '_invoice_original': source,
+         'downloadUrl': 'https://oa.example.test/weaver/weaver.file.FileDownload?fileid=202'},
+        {'id': 'ordinary', 'name': 'ordinary.pdf', 'allowExtraDownloadHost': True,
+         'downloadUrl': 'https://files.example.test/ordinary.pdf'},
+    ]
+    original_open = attachments.safe_http.urlopen
+
+    class Response(BytesIO):
+        def __init__(self, url):
+            super().__init__(state.pdf)
+            self.url = url
+
+        def geturl(self):
+            return self.url
+
+    def open_request(request, **kwargs):
+        if request.full_url == 'https://files.example.test/ordinary.pdf':
+            return Response(request.full_url)
+        return original_open(request, **kwargs)
+
+    monkeypatch.setattr(attachments, 'EXTRA_DOWNLOAD_HOSTS', {'files.example.test'})
+    monkeypatch.setattr(attachments.safe_http, 'urlopen', open_request)
+    context = state.client.request_context
+    reads = []
+    stopped = []
+
+    def changing_context(request_id):
+        reads.append(request_id)
+        if len(reads) == 2:
+            if failure == 'binding_changed':
+                state.detail['oa']['doc_id'] = '404'
+            else:
+                stopped.append(True)
+        return context(request_id)
+
+    monkeypatch.setattr(attachments.runtime_control, 'stop_requested', lambda: bool(stopped))
+    state.client.request_context = changing_context
+    destination = tmp_path / 'mixed'
+    files, errors = attachments.download_resources(
+        targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
+        request_id='101', flow_key=CONFIG['flow_key'],
+    )
+    expected = 'resource_ownership_untrusted' if failure == 'binding_changed' else 'oa_run_stopped'
+    assert files == [] and errors[0]['code'] == expected
+    assert list(destination.glob('*.pdf'))
+    state.detail['oa']['doc_id'] = '303'
+    stopped.clear()
+    state.client.request_context = context
+    files, errors = attachments.download_resources(
+        targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
+        request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
+    )
+    assert errors == []
+    assert [item['resource_id'] for item in files] == ['202', 'ordinary']
+    assert all(item['reused'] is False for item in files)
+    assert files[0]['path'] == files[1]['path']
+    assert b'session=fixed' not in b''.join(path.read_bytes() for path in destination.rglob('*') if path.is_file())
