@@ -19,7 +19,7 @@ from uuid import uuid4
 import fitz
 from PIL import Image, JpegImagePlugin
 
-from . import attachment_extractors, auth, runtime_control
+from . import attachment_extractors, attachment_locations, auth, runtime_control
 
 MODEL = 'deepseek-flash'
 ENDPOINT = 'https://api.deepseek.com/chat/completions'
@@ -277,17 +277,13 @@ def _material(path: Path) -> tuple[dict, dict]:
 
 
 def _parts(prepared: dict):
-    numbers = {}
-    for index, page in enumerate(prepared.get('images', [])):
-        resource = str(page.get('parent_resource_id') or page.get('resource_id') or '')
+    for index, (location, page) in enumerate(attachment_locations.image_locations(prepared.get('images', []))):
+        resource = location['resource_id']
         if not resource:
             raise ValueError('attachment_page_unbound')
-        numbers[resource] = numbers.get(resource, 0) + 1
         metadata = {key: value for key, value in page.items() if key != 'path'}
-        yield {**metadata, 'resource_id': resource, 'part_id': f'image-{index + 1}', 'kind': 'image', 'source': 'deepseek',
-               'prepared_resource_id': str(page.get('resource_id') or resource),
-               'page_number': numbers[resource],
-               'evidence_ref': f'material:prepared.images.{resource}.{numbers[resource]}'}, page
+        yield {**metadata, **location, 'part_id': f'image-{index + 1}', 'kind': 'image', 'source': 'deepseek',
+               'prepared_resource_id': str(page.get('resource_id') or resource)}, page
     for index, content in enumerate(prepared.get('structured_contents', [])):
         yield {**content, 'part_id': f'text-{index + 1}', 'kind': 'text', 'source': 'parser',
                'resource_id': str(content.get('parent_resource_id') or content.get('resource_id') or ''),
