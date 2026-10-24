@@ -58,6 +58,63 @@ def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
     assert "100.00" in details["contents"][0]["content"]
 
 
+def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_or_submission(tmp_path, monkeypatch):
+    from apps.oa import cli
+    from apps.oa_approval import travel_orders
+    from apps.oa_finance_preaudit.case_bundle import CollectionFailure, _travel_resources
+
+    def fail_collect(request_id, **_kwargs):
+        return _travel_resources(config={'flow_key': 'travel_expense'}, workflow={},
+            request_id=request_id, allow_browser_download=True, attachment_timeout_sec=1)
+
+    monkeypatch.setattr(travel_orders, 'collect_evidence', lambda *_a, **_k: {'errors': [{
+        'code': 'travel_attachment_discovery_failed', 'message': 'synthetic-secret-message',
+        'counts': {'declared_attachment_count': 1},
+        'diagnostics': [{'stage': 'navigation', 'reason': 'navigation_failed', 'browser': 'headless',
+                         'exception_type': 'TimeoutError', 'http_status': 503,
+                         'source_url': 'https://example.test/?token=synthetic-secret',
+                         'message': 'synthetic-secret-message'}]}]})
+    app, api = service(tmp_path)
+    app.collector = fail_collect
+    run = app.pending()['run_id']
+    with pytest.raises(CollectionFailure) as captured:
+        app.collect(run)
+
+    output = cli.failure(captured.value)
+    report = Path(output['diagnostics_file'])
+    body = json.loads(report.read_text())
+    assert body['error'] == 'travel_attachment_discovery_failed'
+    assert body['counts'] == {'declared_attachment_count': 1}
+    assert body['diagnostics'] == [{'stage': 'navigation', 'reason': 'navigation_failed',
+        'browser': 'headless', 'exception_type': 'TimeoutError', 'http_status': 503}]
+    assert 'synthetic-secret' not in report.read_text()
+    task, = app.store.tasks(run)
+    assert task['status'] == 'failed' and task['failure_count'] == 1
+    assert task['material_file'] is None
+    assert app.inspect(task['id'])['submissions'] == []
+    assert api.posts == []
+
+
+def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave_task_busy(tmp_path, monkeypatch):
+    from apps.oa import cli
+    from apps.oa_finance_preaudit.case_bundle import CollectionFailure
+
+    def failed(*_args, **_kwargs):
+        raise CollectionFailure('travel_attachment_discovery_failed')
+
+    app, api = service(tmp_path)
+    app.collector = failed
+    run = app.pending()['run_id']
+    monkeypatch.setattr(Path, 'write_text', lambda *_a, **_k: (_ for _ in ()).throw(OSError('synthetic write failure')))
+    with pytest.raises(CollectionFailure) as captured:
+        app.collect(run)
+    assert cli.failure(captured.value) == {'status': 'failed', 'error': 'travel_attachment_discovery_failed',
+                                         'diagnostics_write_failed': True}
+    task, = app.store.tasks(run)
+    assert task['status'] == 'failed' and task['failure_count'] == 1
+    assert api.posts == []
+
+
 def test_fresh_request_scope_keeps_successful_tasks_out_of_replay(tmp_path):
     app, api = service(tmp_path)
     original = dict(api.rows[0])

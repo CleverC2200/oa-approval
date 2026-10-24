@@ -38,7 +38,7 @@ _SAFE_COLLECTION_COUNT_KEYS = {
 
 class CollectionFailure(RuntimeError):
 
-    def __init__(self, code: str, counts: object = None) -> None:
+    def __init__(self, code: str, counts: object = None, diagnostics: object = None) -> None:
         super().__init__(code)
         self.counts = {
             key: value
@@ -47,6 +47,22 @@ class CollectionFailure(RuntimeError):
             and isinstance(value, int)
             and 0 <= value <= 100_000
         }
+        self.diagnostics = []
+        for item in diagnostics[:20] if isinstance(diagnostics, list) else []:
+            if not isinstance(item, dict):
+                continue
+            kept = {}
+            for key, value in item.items():
+                if key in {"stage", "reason", "browser", "exception_type", "result_type"}:
+                    if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
+                        kept[key] = value
+                elif key in {"http_status", "api_code"}:
+                    if isinstance(value, int) and not isinstance(value, bool):
+                        kept[key] = value
+                elif key in {"api_success", "identity_present", "identity_matches"} and isinstance(value, bool):
+                    kept[key] = value
+            if kept:
+                self.diagnostics.append(kept)
 
 
 def _field_rows(workflow: dict[str, Any]) -> list[dict[str, Any]]:
@@ -340,6 +356,7 @@ def _travel_resources(
         raise CollectionFailure(
             str(error.get("code") or "travel_attachment_failed"),
             error.get("counts"),
+            error.get("diagnostics"),
         )
     resources = [item for item in result.get("resources", []) if isinstance(item, dict)]
     for resource in resources:
