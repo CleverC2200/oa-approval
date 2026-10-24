@@ -2,7 +2,7 @@
 
 本规则包仅适用于 `workflow_key=packaging_layout_approval`。先执行[共享结果接口](../result-contract.md)，不得读取其他流程规则包。
 
-完整读取并执行 [`$audit-chinese-image-text`](../../../audit-chinese-image-text/SKILL.md) 及其按闸门要求引用的 reference。脚本只提供来源字段、同名去重记录、图片页面和 Excel 结构化内容，不生成校对结论。
+完整读取并执行 [`$audit-chinese-image-text`](../../../audit-chinese-image-text/SKILL.md) 及其按闸门要求引用的 reference。脚本只提供来源字段、同名去重记录、图片页面和 Excel 结构化内容，不生成校对结论。缺少可观察页面时按技术失败停止。
 
 ## 固定审核项
 

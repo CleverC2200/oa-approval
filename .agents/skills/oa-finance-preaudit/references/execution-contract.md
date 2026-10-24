@@ -16,9 +16,9 @@
 [
   {
     "resource_id": "本单材料中的真实附件ID",
-    "locator": "第1页／累计里程区域",
+    "locator": "第1页／金额区域",
     "source": "agent",
-    "content": "本页已读取的原值、单位、相关行程及其核对依据；未确认的读数或配对关系明确说明。",
+    "content": "本页已读取的原值、单位、对应明细及其核对依据；未确认的读数或配对关系明确说明。",
     "status": "read"
   }
 ]
@@ -37,10 +37,6 @@ bash .codex/python.sh -m apps.oa.cli --root runtime submit \
   --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt \
   --observations-file /absolute/path/observations.json
 ```
-
-## 按次油补观察
-
-“按次”油补仍逐行程读取原始起止照片，保留日期或可定位行程、原始读数与单位、配对依据、算式、合计及实际复读情况。分行申报不构成行程配对依据，原值不稳定时保留具体缺口。完整记录与公开意见的分工见[差旅油补规则](flows/travel-expense.md#第-6-项按申报形态建立里程关系)，附件部分使用上述观察入口保存。
 
 ## 审核未完成的人工交接
 
