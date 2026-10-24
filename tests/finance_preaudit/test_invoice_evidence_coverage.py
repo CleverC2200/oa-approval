@@ -4,8 +4,8 @@ import json
 
 import pytest
 
-from apps.oa_approval import invoice_buyers
-from apps.oa_finance_preaudit.case_bundle import collect_case
+from apps.oa.approvals.sources import invoices as invoice_buyers
+from apps.oa.approvals.collection.case import collect_case
 from tests.finance_preaudit.invoice_fakes import CONFIG, NUMBER, InvoiceApi, linked_field
 
 
@@ -117,7 +117,7 @@ def test_each_invoice_preserves_exact_multiple_row_binding_and_partial_fields(cl
     {'flow_key': 'general_expense', 'workflow_id': '195021', 'workflow_name': '通用费用报销申请流程'},
 ])
 def test_six_finance_collectors_preserve_same_invoice_coverage(config, monkeypatch, cloud_http):
-    from apps.oa_approval import travel_orders
+    from apps.oa.approvals.sources import travel as travel_orders
 
     api = InvoiceApi(config=config)
     if config['flow_key'] == 'travel_expense':

@@ -4,7 +4,7 @@ import shutil
 
 import pytest
 
-from apps.oa.service import Approval
+from apps.oa.approvals.operations import Approval
 
 
 @pytest.fixture
@@ -16,7 +16,7 @@ def rule_case(tmp_path, monkeypatch):
                          'operator_id': 'synthetic-reviewer', 'received_at': '2026-10-24 09:00:00'}]
 
             def request_context(self, request_id):
-                from apps.oa_approval import overseas_invoice
+                from apps.oa.approvals import overseas as overseas_invoice
 
                 fields = [{'fieldName': name, 'fieldValue': value, 'edit': True}
                           for name, value in [('scfp', '201'), ('fpje', '1'), ('fphm', ''), ('fpdqr', '')]]
@@ -32,7 +32,7 @@ def rule_case(tmp_path, monkeypatch):
                     {'id': '201', 'name': 'synthetic.pdf', 'downloadUrl': '/news/download.do?fileid=201'}]
 
         if workflow_key == 'overseas_invoice':
-            from apps.oa import overseas
+            from apps.oa.approvals import overseas_runtime as overseas
 
             def download(_resources, directory, **_options):
                 directory.mkdir(parents=True)
@@ -107,7 +107,7 @@ def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workf
     'docs/overseas-invoice.md',
 ])
 def test_missing_required_rules_fail_collection(rule_case, tmp_path, monkeypatch, missing):
-    from apps.oa import service
+    from apps.oa.approvals import operations as service
 
     project = tmp_path / 'source'
     shutil.copytree(service.PROJECT / '.agents', project / '.agents')
@@ -133,7 +133,7 @@ def test_missing_required_rules_fail_collection(rule_case, tmp_path, monkeypatch
 
 
 def test_new_cross_flow_link_cannot_expand_or_leave_incomplete_rule_package(rule_case, tmp_path, monkeypatch):
-    from apps.oa import service
+    from apps.oa.approvals import operations as service
 
     project = tmp_path / 'source'
     shutil.copytree(service.PROJECT / '.agents', project / '.agents')

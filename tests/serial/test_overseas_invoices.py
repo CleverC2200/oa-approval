@@ -9,10 +9,10 @@ import urllib.parse
 import fitz
 import pytest
 
-from apps.oa import overseas
-from apps.oa.service import Approval
-from apps.oa_approval import overseas_invoice as invoice
-from apps.oa_approval import overseas_invoice_api
+from apps.oa.approvals import overseas_runtime as overseas
+from apps.oa.approvals.operations import Approval
+from apps.oa.approvals import overseas as invoice
+from apps.oa.approvals.sources import overseas as overseas_invoice_api
 
 
 @pytest.fixture

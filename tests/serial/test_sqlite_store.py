@@ -4,7 +4,7 @@ from threading import Barrier
 
 import pytest
 
-from apps.oa.store import Store
+from apps.oa.approvals.store import Store
 
 
 def pending(request_id="101", received_at="2026-10-22 09:00:00", workflow_key="travel_expense"):

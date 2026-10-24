@@ -11,11 +11,11 @@ import zlib
 from PIL import Image
 import pytest
 
-from apps.oa_approval.image_compression import compress_image
+from apps.oa.materials.compress import compress_image
 
 
 def invoke(source, destination, *options):
-    result = subprocess.run([sys.executable, '-B', '-m', 'apps.oa_approval.image_compression',
+    result = subprocess.run([sys.executable, '-B', '-m', 'apps.oa.materials.compress',
         '--file', str(source), '--output-dir', str(destination), *options],
         capture_output=True, text=True, timeout=70)
     return result, json.loads(result.stdout)

@@ -6,9 +6,12 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from apps.oa_approval import safe_http, writer_api
-from apps.oa_approval.api import HANDLED_ENDPOINTS, TODO_ENDPOINT
-from apps.oa_approval.writer_api import FrozenWriterApi, SUBMIT_ENDPOINT
+from apps.oa.approvals.sources import http as safe_http
+from apps.oa.approvals.sources import writer as writer_api
+from apps.oa.approvals.sources.oa import HANDLED_ENDPOINTS
+from apps.oa.approvals.sources.oa import TODO_ENDPOINT
+from apps.oa.approvals.sources.writer import FrozenWriterApi
+from apps.oa.approvals.sources.writer import SUBMIT_ENDPOINT
 
 
 @pytest.mark.parametrize("handled_time, confirmed", [(None, False), ("2020-01-01 12:00:00", False), ("fresh", True)])

@@ -1,7 +1,7 @@
 # 图片压缩
 
 ```bash
-python -m apps.oa_approval.image_compression \
+python -m apps.oa.materials.compress \
   --file /absolute/path/source.jpg \
   --output-dir /absolute/path/new-reading-copy \
   --max-dimension 8192 --max-pixels 16000000 --max-bytes 8388608

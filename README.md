@@ -1,6 +1,6 @@
 # OA 最小 SQLite 审批
 
-此独立项目位于 `/Users/synear/Documents/OA`。入口为 `apps.oa.cli`，使用 SQLite 保存队列、审核意见和提交事实，文件目录保存完整材料。旧开发、生产克隆保持只读。
+此独立项目位于 `/Users/synear/Documents/OA`。入口为 `apps.oa.approvals.cli`，使用 SQLite 保存队列、审核意见和提交事实，文件目录保存完整材料。旧开发、生产克隆保持只读。
 
 代码仓库为 [oa-approval](https://github.com/CleverC2200/oa-approval)。正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)，提交材料边界见[安全约定](SECURITY.md)。
 
@@ -20,7 +20,7 @@ bash .codex/python.sh -m pytest -q tests/serial/test_cli.py::test_demo_runs_coll
 
 ```bash
 export OA_RUNTIME_ROOT="$PWD/runtime/demo"
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --demo
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" pending --demo
 ```
 
 保持前台进程的标准输入打开。在另一终端把 `OA_RUNTIME_ROOT` 设为上述同一绝对路径，再按下文参数领取和预览，身份与流程取本次输出。演示意见标明是合成内容。结束时向原进程输入 `{"operation":"finish"}`，或关闭标准输入；等待进程退出，socket 随本轮关闭，并释放 `approval.lock`。再次启动会新建一轮，不续跑旧审核对话。
@@ -30,7 +30,7 @@ bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --dem
 运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。真实运行先把 `OA_RUNTIME_ROOT` 设为本项目 `runtime/` 的绝对路径，定时任务使用同一入口：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --batch-size 50 --limit 50
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" pending --batch-size 50 --limit 50
 ```
 
 `pending` 重新拉取 OA 待办，创建本轮 SQLite 队列并全程持有文件锁，保持前台运行。再次启动同一根目录会返回 `already_running`。不传 `--root` 时使用代码项目的 `runtime/`，不受启动目录影响。本机 Unix socket 把以下操作送到该运行服务，所有 OA 提交由服务主循环串行执行。
@@ -42,12 +42,12 @@ bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --bat
 限定处理指定申请时，重复传入 `pending --request-id <申请ID>`。每轮仍重新拉取真实待办，只纳入当前待办中匹配的申请，并在该范围内按 FIFO 排队；已提交成功或结果未知的任务保持原状态，不能重新领取。
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" collect \
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" collect \
   --agent-id "$OA_REVIEW_AGENT_ID" \
   --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt --confirm-write YES
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" postcheck --task-id "$OA_TASK_ID"
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt --confirm-write YES
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" postcheck --task-id "$OA_TASK_ID"
 ```
 
 不传 `--confirm-write YES` 时只保存预览结果，不写 OA。海外回填使用 `--recognition-file`，真实提交还需独立的 `--allow-overseas YES`。实际授权以当前任务为准。
@@ -55,7 +55,7 @@ bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" postcheck --t
 `OA_REVIEW_AGENT_ID` 使用原生工具返回的实际 Agent 标识，`OA_TASK_ID` 和 `OA_WORKFLOW_KEY` 使用本轮下一张任务的实际值；领取返回后再次核对身份。三个保护参数必需，省略或错配时拒绝领取。审核技术失败登记使用本地 `fail` 入口：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" fail --task-id "$OA_TASK_ID" --reason 'native reviewer failed: concrete reason'
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" fail --task-id "$OA_TASK_ID" --reason 'native reviewer failed: concrete reason'
 ```
 
 `fail` 由运行中的服务校验，只接受当前轮 `preparing`/`reviewing` 任务，不访问 OA。使用条件及批次收尾见下文 Skill。
@@ -79,7 +79,7 @@ socket `collect` 由唯一采集工作进程执行，原客户端等待最终结
 TPM 终端形象制作费的参考报价仍使用本地导入入口，导入财务确认的工作簿后再取材料：
 
 ```bash
-bash .codex/python.sh -m apps.oa_finance_preaudit.tpm_price_reference /absolute/path/reference.xlsx --runtime-root "${OA_RUNTIME_ROOT:?}"
+bash .codex/python.sh -m apps.oa.references.tpm /absolute/path/reference.xlsx --runtime-root "${OA_RUNTIME_ROOT:?}"
 ```
 
 未导入时材料会明确记为 `not_configured`，由 Agent 按业务规则说明核验缺口。

@@ -5,12 +5,14 @@ import sys
 
 import pytest
 
-from apps.oa import cli
+from apps.oa.approvals import cli
 
 
 @pytest.mark.parametrize('name,content,kind', [
     ('.env', 'OA_DB_PASSWORD=synthetic', 'private_path'),
     ('runtime/report.json', '{}', 'private_path'),
+    ('apps/oa/runtime/report.json', '{}', 'private_path'),
+    ('apps/oa/runtime/nested/report.py', 'value = 1', 'private_path'),
     ('cookies-current.json', '{}', 'private_path'),
     ('receipt.pdf', 'synthetic receipt', 'private_path'),
     ('tests/fixtures/legacy-workbook.xls', 'unreviewed replacement', 'private_path'),
@@ -27,6 +29,16 @@ def test_staged_sensitive_files_are_blocked_without_printing_values(repository, 
     assert result.returncode == 1
     assert kind + ': ' + name in result.stdout
     assert content not in result.stdout
+
+
+def test_runtime_source_is_shareable_without_allowing_runtime_data(repository):
+    root, run, _ = repository
+    target = root / 'apps/oa/runtime/paths.py'
+    target.parent.mkdir(parents=True)
+    target.write_text('value = 1\n')
+    assert run('git', 'add', str(target)).returncode == 0
+    result = run(sys.executable, '.codex/share_check.py')
+    assert result.returncode == 0, result.stdout
 
 
 def test_deleted_secret_is_still_blocked_in_outgoing_history(repository):
@@ -134,7 +146,7 @@ def test_production_requires_clean_published_main(repository, monkeypatch, state
 
 
 def test_production_guard_stops_before_api_or_queue_creation(tmp_path, monkeypatch, capsys):
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
 
     def refuse():
         raise ValueError('production_main_required')

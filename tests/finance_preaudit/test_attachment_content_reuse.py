@@ -11,8 +11,11 @@ from openpyxl.drawing.image import Image as WorkbookImage
 from PIL import Image
 import pytest
 
-from apps.oa_approval import attachment_cache, attachment_extractors, attachments, spreadsheet_images
-from apps.oa_finance_preaudit import case_bundle
+from apps.oa.approvals.collection import cache as attachment_cache
+from apps.oa.materials import formats as attachment_extractors
+from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import spreadsheet_images
+from apps.oa.approvals.collection import case as case_bundle
 
 
 @pytest.fixture

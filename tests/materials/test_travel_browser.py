@@ -6,7 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from apps.oa_approval import attachments, travel_orders
+from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import travel as travel_orders
 
 
 def expense_order(source='3', order_no='BL-SYNTHETIC'):
@@ -95,7 +96,7 @@ def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_tr
     assert 'inventory' not in evidence.get('attachment_scan', {})
     assert all(page.closed for browser in browser_transport.browsers for page in browser.pages)
 
-    from apps.oa_finance_preaudit import case_bundle
+    from apps.oa.approvals.collection import case as case_bundle
 
     config = {'flow_key': 'travel_expense', 'workflow_id': '138023', 'workflow_name': '差旅费报销流程'}
     workflow = {'requestId': '12', 'workflowBaseInfo': {

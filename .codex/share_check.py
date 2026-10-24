@@ -33,7 +33,10 @@ def git(*args):
 
 def private_path(name):
     path = PurePosixPath(name)
-    return (bool(set(path.parts[:-1]) & PRIVATE_DIRECTORIES)
+    directories = path.parts[:-1]
+    if directories == ('apps', 'oa', 'runtime') and path.suffix == '.py':
+        directories = directories[:2]
+    return (bool(set(directories) & PRIVATE_DIRECTORIES)
             or path.suffix.lower() in PRIVATE_SUFFIXES
             or (path.name.startswith('.env') and name != '.env.example')
             or re.match(r'(?:credentials|service-account|storage[-_]state|cookies).*\.json$', path.name, re.I) is not None

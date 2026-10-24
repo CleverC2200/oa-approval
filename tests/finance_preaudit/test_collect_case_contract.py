@@ -28,19 +28,17 @@ import pytest
 from apps import json_artifact
 
 
-from apps.oa_approval import (
-    attachments,
-    attachment_extractors,
-    evidence_packet,
-    flow,
-    invoice_buyers,
-    travel_orders,
-)
+from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import formats as attachment_extractors
+from apps.oa.approvals import forms as evidence_packet
+from apps.oa.approvals import flows as flow
+from apps.oa.approvals.sources import invoices as invoice_buyers
+from apps.oa.approvals.sources import travel as travel_orders
 
 
-from apps.oa_finance_preaudit import case_bundle
+from apps.oa.approvals.collection import case as case_bundle
 
-from apps.oa_finance_preaudit.case_bundle import collect_case
+from apps.oa.approvals.collection.case import collect_case
 
 
 FLOW_CONFIGS = (

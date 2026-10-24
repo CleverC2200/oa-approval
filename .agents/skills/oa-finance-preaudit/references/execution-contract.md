@@ -1,6 +1,6 @@
 # 最小审批执行接口
 
-当前执行由 `apps.oa.cli` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
+当前执行由 `apps.oa.approvals.cli` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
 
 ## 采集与提交
 
@@ -33,7 +33,7 @@
 默认预览的保存示例，`OA_RUNTIME_ROOT` 沿用本轮 pending 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit \
+bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" submit \
   --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt \
   --observations-file /absolute/path/observations.json
 ```

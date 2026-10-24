@@ -13,7 +13,7 @@ import pytest
 def test_deepseek_reads_prepared_material_without_legacy_action(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
-    from apps.oa_approval import attachment_recognition
+    from apps.oa.materials import recognize as attachment_recognition
 
     image = tmp_path / 'invoice.png'
     Image.new('RGB', (12, 8), 'white').save(image)
@@ -43,7 +43,7 @@ def test_deepseek_reads_prepared_material_without_legacy_action(tmp_path, monkey
 
 
 def test_parser_returns_complete_structured_content_without_api_key(tmp_path, monkeypatch):
-    from apps.oa_approval import attachment_recognition
+    from apps.oa.materials import recognize as attachment_recognition
 
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     monkeypatch.setenv('OA_REVIEW_API_KEY', '')
@@ -73,8 +73,8 @@ def test_parser_returns_complete_structured_content_without_api_key(tmp_path, mo
 
 
 def test_deepseek_archive_and_duplicate_pages_keep_real_attachment_ids_in_sqlite(tmp_path, monkeypatch):
-    from apps.oa.store import Store
-    from apps.oa_approval import attachment_recognition
+    from apps.oa.approvals.store import Store
+    from apps.oa.materials import recognize as attachment_recognition
 
     monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
     image = tmp_path / 'page.png'
@@ -126,7 +126,8 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     import fitz
     from openpyxl import Workbook
-    from apps.oa_approval import attachments, attachment_extractors
+    from apps.oa.approvals.collection import downloads as attachments
+    from apps.oa.materials import formats as attachment_extractors
 
     pdf = tmp_path / 'invoice.pdf'
     with fitz.open() as document:
@@ -161,7 +162,7 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
 
 def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
-    from apps.oa_approval import attachments
+    from apps.oa.approvals.collection import downloads as attachments
 
     def download(resource, *, dest_dir, timeout_sec, original_batch=None):
         target = dest_dir / (resource['id'] + '.png')
@@ -182,7 +183,7 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
 
 def test_compression_preserves_original_and_creates_bounded_reading_copy(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
-    from apps.oa_approval.image_compression import compress_image
+    from apps.oa.materials.compress import compress_image
 
     source = tmp_path / 'large.png'
     Image.new('RGB', (600, 400), 'white').save(source)
@@ -199,7 +200,7 @@ def test_compression_preserves_original_and_creates_bounded_reading_copy(tmp_pat
 def test_deepseek_region_keeps_original_coordinates_and_partial_coverage(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
-    from apps.oa_approval import attachment_recognition
+    from apps.oa.materials import recognize as attachment_recognition
 
     source = tmp_path / 'receipt.png'
     Image.new('RGB', (40, 30), 'white').save(source)
@@ -215,7 +216,7 @@ def test_deepseek_region_keeps_original_coordinates_and_partial_coverage(tmp_pat
 
 def test_office_converter_output_is_read_page_by_page(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
-    from apps.oa_approval.attachment_extractors import render_office_document
+    from apps.oa.materials.formats import render_office_document
 
     converter = tmp_path / 'converter'
     converter.write_text(f'#!{sys.executable}\n' + '''import sys
@@ -242,7 +243,7 @@ with fitz.open() as document:
 
 def test_zip_member_cannot_escape_output_directory(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
-    from apps.oa_approval.attachments import extract_zip_safely
+    from apps.oa.approvals.collection.downloads import extract_zip_safely
 
     archive = tmp_path / 'unsafe.zip'
     with zipfile.ZipFile(archive, 'w') as output:
@@ -258,7 +259,7 @@ def test_zip_member_cannot_escape_output_directory(tmp_path, monkeypatch):
 def test_deepseek_does_not_report_complete_when_input_changes(tmp_path, monkeypatch, changed):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
-    from apps.oa_approval import attachment_recognition
+    from apps.oa.materials import recognize as attachment_recognition
 
     image = tmp_path / 'invoice.png'
     Image.new('RGB', (12, 8), 'white').save(image)

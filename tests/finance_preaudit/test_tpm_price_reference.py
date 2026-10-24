@@ -20,7 +20,7 @@ import pytest
 from openpyxl import Workbook
 
 
-from apps.oa_finance_preaudit import tpm_price_reference as prices
+from apps.oa.references import tpm as prices
 
 
 def _catalog(tmp_path: Path) -> dict:
@@ -47,7 +47,7 @@ def test_import_preserves_price_column_units_and_source(tmp_path: Path) -> None:
 
 
 def test_collect_includes_local_reference_in_frozen_material(tmp_path: Path) -> None:
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
 
     catalog = _catalog(tmp_path)
     reference = tmp_path / prices.REFERENCE_PATH

@@ -15,9 +15,9 @@ PROJECT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def pending_output(tmp_path, monkeypatch, capsys):
-    from apps.oa import cli
-    from apps.oa.demo import DemoApi
-    from apps.oa_approval import api
+    from apps.oa.approvals import cli
+    from apps.oa.approvals.demo import DemoApi
+    from apps.oa.approvals.sources import oa as api
 
     fake = DemoApi()
     fake.rows = [
@@ -40,7 +40,7 @@ def pending_output(tmp_path, monkeypatch, capsys):
 
 
 def test_pending_summarizes_first_twenty_without_trimming_the_queue(tmp_path, pending_output):
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
 
     started = pending_output()
     assert started['run_id']
@@ -83,7 +83,7 @@ def test_pending_full_returns_every_complete_task(pending_output, arguments):
 
 
 def test_pending_rejects_negative_limit_before_starting_a_round(tmp_path, capsys, pending_output, monkeypatch):
-    from apps.oa import cli
+    from apps.oa.approvals import cli
 
     root = tmp_path / 'not-started'
     monkeypatch.setattr(sys, 'stdin', io.StringIO('{"operation":"finish"}\n'))
@@ -109,7 +109,7 @@ def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_out
 
 
 def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys):
-    from apps.oa import cli
+    from apps.oa.approvals import cli
 
     monkeypatch.setattr(sys, 'stdin', io.StringIO(
         '{"operation":"collect","agent_id":"travel-reviewer","expected_task_id":1,"agent_workflow_key":"travel_expense"}\n'
@@ -124,7 +124,7 @@ def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pendi
 
 
 def command(root, *arguments):
-    return [sys.executable, '-m', 'apps.oa.cli', '--root', str(root), *arguments]
+    return [sys.executable, '-m', 'apps.oa.approvals.cli', '--root', str(root), *arguments]
 
 
 @pytest.mark.parametrize('arguments', [(), ('--agent-id', 'reviewer'),
@@ -146,7 +146,7 @@ def test_collect_cli_requires_all_guards_before_connecting(tmp_path, arguments):
     ({'expected_task_id': True, 'agent_workflow_key': 'travel_expense', 'agent_id': 'reviewer'}, 'claim_guards_required'),
 ])
 def test_collect_json_transports_refuse_missing_guards_without_consuming_task(tmp_path, transport, options, reason):
-    from apps.oa.cli import send
+    from apps.oa.approvals.cli import send
 
     process = subprocess.Popen(command(tmp_path, 'pending', '--demo'), cwd=PROJECT,
                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -221,7 +221,7 @@ def test_demo_runs_collect_preview_submit_and_postcheck(tmp_path, monkeypatch):
         assert material['resources'][0]['name'] == 'demo.pdf'
         opinion = tmp_path / 'opinion.txt'
         opinion.write_text('合成离线演示意见，不是实际审批判断。')
-        from apps.oa_approval import attachment_recognition
+        from apps.oa.materials import recognize as attachment_recognition
         monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
         monkeypatch.setattr(attachment_recognition, '_post', lambda *_args, **_kwargs: {
             'choices': [{'finish_reason': 'stop', 'message': {'content': '合成测试金额 12.50'}}]})
@@ -346,7 +346,7 @@ def test_socket_collect_guards_batch_independently_of_pending_display_limit(tmp_
         process.stdin.flush()
         process.wait(timeout=10)
         assert process.returncode == 0, process.stderr.read()
-        from apps.oa.service import Approval
+        from apps.oa.approvals.operations import Approval
         app = Approval(tmp_path)
         assert app.inspect(3)['task']['status'] == 'queued'
         assert json.loads(app.store.run(started['run_id'])['summary_json'])['batch'] == started['batch']
@@ -360,7 +360,7 @@ def test_socket_collect_guards_batch_independently_of_pending_display_limit(tmp_
 def blocked_collection(tmp_path):
     import socket
 
-    from apps.oa.cli import socket_path
+    from apps.oa.approvals.cli import socket_path
     control_path = socket_path(tmp_path / 'collector')
     control = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     control.bind(str(control_path))
@@ -372,7 +372,7 @@ from pathlib import Path
 import socket
 import sys
 sys.path.insert(0, PROJECT)
-from apps.oa import cli, demo
+from apps.oa.approvals import cli, demo
 original_collect = demo.collect_demo
 
 def collect(request_id, **options):
@@ -441,7 +441,7 @@ def test_socket_submit_finishes_while_another_collection_is_blocked(blocked_coll
     assert submitted['status'] == 'submitted'
     assert invoke('postcheck', '--task-id', str(first['task_id']))['status'] == 'submitted'
     assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['status'] == 'waiting'
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     assert [task['status'] for task in app.store.tasks(started['run_id'])] == ['submitted', 'preparing', 'queued']
     channel.sendall(b'r')
@@ -462,7 +462,7 @@ def test_failed_preparation_keeps_material_without_resurrecting_task(blocked_col
         assert result['reason'] == 'reviewer_stopped'
     else:
         assert result['error'] == 'controlled_read_failed'
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
     details = Approval(tmp_path).inspect(2)
     assert details['task']['status'] == 'failed'
     assert details['task']['failure_count'] == 1
@@ -487,7 +487,7 @@ def test_unknown_blocks_refill_and_other_write_without_discarding_collection(blo
     channel.sendall(action)
     result = json.loads(client.makefile().readline())
     assert result['status'] == ('reviewing' if action == b'r' else 'failed')
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
     assert task['status'] == ('reviewing' if action == b'r' else 'failed')
@@ -516,7 +516,7 @@ def test_exit_waits_for_disconnected_collection_and_keeps_lock(blocked_collectio
     channel.sendall(b'r')
     process.wait(timeout=15)
     assert process.returncode == 0, process.stderr.read()
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
     assert task['status'] == 'reviewing'
@@ -533,7 +533,7 @@ def test_collection_process_crash_marks_preparing_task_failed_once(blocked_colle
     process, started, first, invoke, client, channel = blocked_collection
     channel.sendall(b'x')
     assert json.loads(client.makefile().readline()) == {'status':'failed', 'error':'collection_process_failed'}
-    from apps.oa.service import Approval
+    from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
     assert task['status'] == 'failed'

@@ -7,7 +7,7 @@ from pathlib import Path
 import openpyxl
 import fitz
 import pytest
-from apps.oa_approval import attachment_extractors
+from apps.oa.materials import formats as attachment_extractors
 
 
 def book(tmp_path: Path, *, broken=False, image_content=None):

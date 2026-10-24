@@ -5,8 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from apps.oa_approval import attachment_recognition, official_sql, travel_orders
-from apps.oa_finance_preaudit.case_bundle import collect_case
+from apps.oa.materials import recognize as attachment_recognition
+from apps.oa.approvals.sources import official_sql
+from apps.oa.approvals.sources import travel as travel_orders
+from apps.oa.approvals.collection.case import collect_case
 
 
 CONFIG = {'flow_key': 'general_expense', 'workflow_id': '195021',
@@ -91,7 +93,7 @@ def test_recognizer_skips_official_empty_material_without_model(tmp_path, monkey
 
 
 def test_travel_collection_uses_zero_count_only_after_source_read(monkeypatch):
-    from apps.oa_approval import travel_orders
+    from apps.oa.approvals.sources import travel as travel_orders
 
     config = {'flow_key': 'travel_expense', 'workflow_id': '138023', 'workflow_name': '差旅费报销流程'}
 
@@ -291,8 +293,10 @@ def test_travel_positive_count_still_requires_resources(travel_source):
 @pytest.mark.parametrize('failure', ['', 'missing_record', 'missing_file', 'duplicate_source', 'cloud_originals'])
 def test_travel_count_uses_native_records_and_retains_each_source_identity(
         tmp_path, monkeypatch, travel_source, failure):
-    from apps.oa_approval import attachments, evidence_packet, invoice_originals
-    from apps.oa_finance_preaudit.case_bundle import CollectionFailure
+    from apps.oa.approvals.collection import downloads as attachments
+    from apps.oa.approvals import forms as evidence_packet
+    from apps.oa.approvals.collection import invoice_originals
+    from apps.oa.approvals.collection.case import CollectionFailure
 
     workflow, scan, oa_api = travel_source
     workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][2][

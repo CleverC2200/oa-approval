@@ -7,7 +7,10 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from apps.oa_approval import api, auth, overseas_invoice_api, writer_api
+from apps.oa.approvals.sources import oa as api
+from apps.oa.approvals.sources import auth
+from apps.oa.approvals.sources import overseas as overseas_invoice_api
+from apps.oa.approvals.sources import writer as writer_api
 
 
 @pytest.fixture

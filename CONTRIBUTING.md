@@ -10,12 +10,12 @@
 
 | 修改目标 | 实现入口 | 首选测试 |
 | --- | --- | --- |
-| 队列、领取与任务状态 | [Store](apps/oa/store.py)、[Approval](apps/oa/service.py) | [SQLite 队列](tests/serial/test_sqlite_store.py)、[审批执行](tests/serial/test_approval_service.py) |
-| CLI、socket 与进程生命周期 | [CLI](apps/oa/cli.py) | [公开 CLI](tests/serial/test_cli.py) |
-| 材料采集、来源与发票原件 | [材料组装](apps/oa_finance_preaudit/case_bundle.py)、[发票原件](apps/oa_approval/invoice_originals.py) | [采集合同](tests/finance_preaudit/test_collect_case_contract.py)、[发票原件](tests/finance_preaudit/test_invoice_original_bodies.py) |
-| 附件准备、识别与定位 | [准备](apps/oa_approval/attachment_extractors.py)、[识别](apps/oa_approval/attachment_recognition.py)、[读取](apps/oa_finance_preaudit/read_material.py) | [材料工具](tests/materials/test_tools.py)、[识别与旋转](tests/materials/test_recognition_rotation.py) |
-| 提交与未知结果回查 | [Approval](apps/oa/service.py)、[Writer](apps/oa_approval/writer_api.py) | [审批执行](tests/serial/test_approval_service.py)、[提交回查](tests/serial/test_writer_verification.py) |
-| 运行目录、缓存及识别输出 | [Approval](apps/oa/service.py)、[附件缓存](apps/oa_approval/attachment_cache.py) | [运行目录](tests/materials/test_runtime_locations.py) |
+| 队列、领取与任务状态 | [Store](apps/oa/approvals/store.py)、[Approval](apps/oa/approvals/operations.py) | [SQLite 队列](tests/serial/test_sqlite_store.py)、[审批执行](tests/serial/test_approval_service.py) |
+| CLI、socket 与进程生命周期 | [CLI](apps/oa/approvals/cli.py) | [公开 CLI](tests/serial/test_cli.py) |
+| 材料采集、来源与发票原件 | [材料组装](apps/oa/approvals/collection/case.py)、[发票原件](apps/oa/approvals/collection/invoice_originals.py) | [采集合同](tests/finance_preaudit/test_collect_case_contract.py)、[发票原件](tests/finance_preaudit/test_invoice_original_bodies.py) |
+| 附件准备、识别与定位 | [准备](apps/oa/materials/formats.py)、[识别](apps/oa/materials/recognize.py)、[读取](apps/oa/materials/read.py) | [材料工具](tests/materials/test_tools.py)、[识别与旋转](tests/materials/test_recognition_rotation.py) |
+| 提交与未知结果回查 | [Approval](apps/oa/approvals/operations.py)、[Writer](apps/oa/approvals/sources/writer.py) | [审批执行](tests/serial/test_approval_service.py)、[提交回查](tests/serial/test_writer_verification.py) |
+| 运行目录、缓存及识别输出 | [Approval](apps/oa/approvals/operations.py)、[附件缓存](apps/oa/approvals/collection/cache.py) | [运行目录](tests/materials/test_runtime_locations.py) |
 | 审核业务规则 | [财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)、[海外 Skill](.agents/skills/oa-overseas-invoice/SKILL.md) | [规则冻结](tests/serial/test_rule_packages.py)，当前流程的材料与意见对照 |
 
 共享测试支撑放在实际使用它的测试组附近。pytest fixture 使用相邻 `conftest.py`；可直接构造的发票传输 fake 见 [invoice_fakes.py](tests/finance_preaudit/invoice_fakes.py)。新测试复用这些支撑，场景数据保留在各自测试中。

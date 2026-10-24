@@ -1,6 +1,6 @@
 import pytest
-from apps.oa_approval import attachments
-from apps.oa_approval import evidence_packet
+from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals import forms as evidence_packet
 
 
 def workflow(html):

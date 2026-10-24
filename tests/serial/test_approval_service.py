@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from apps.oa.service import Approval
+from apps.oa.approvals.operations import Approval
 
 
 class FakeOA:
@@ -59,9 +59,10 @@ def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
 
 
 def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_or_submission(tmp_path, monkeypatch):
-    from apps.oa import cli
-    from apps.oa_approval import travel_orders
-    from apps.oa_finance_preaudit.case_bundle import CollectionFailure, _travel_resources
+    from apps.oa.approvals import cli
+    from apps.oa.approvals.sources import travel as travel_orders
+    from apps.oa.approvals.collection.case import CollectionFailure
+    from apps.oa.approvals.collection.case import _travel_resources
 
     def fail_collect(request_id, **_kwargs):
         return _travel_resources(config={'flow_key': 'travel_expense'}, workflow={},
@@ -96,8 +97,8 @@ def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_
 
 
 def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave_task_busy(tmp_path, monkeypatch):
-    from apps.oa import cli
-    from apps.oa_finance_preaudit.case_bundle import CollectionFailure
+    from apps.oa.approvals import cli
+    from apps.oa.approvals.collection.case import CollectionFailure
 
     def failed(*_args, **_kwargs):
         raise CollectionFailure('travel_attachment_discovery_failed')
@@ -168,7 +169,8 @@ def test_preview_preserves_recognition_source_and_original_report(tmp_path, sour
 
 
 def test_default_clients_handle_expired_credentials_between_tasks(tmp_path, monkeypatch):
-    from apps.oa_approval import api, writer_api
+    from apps.oa.approvals.sources import oa as api
+    from apps.oa.approvals.sources import writer as writer_api
 
     live = FakeOA()
     live.rows.append({**live.rows[0], "request_id": "102", "received_at": "2026-10-22 09:01:00"})
@@ -237,8 +239,8 @@ def test_replaced_task_instance_cannot_receive_previous_review(tmp_path):
 
 
 def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch):
-    from apps.oa_approval import safe_http
-    from apps.oa_approval.writer_api import FrozenWriterApi
+    from apps.oa.approvals.sources import http as safe_http
+    from apps.oa.approvals.sources.writer import FrozenWriterApi
 
     app, api = service(tmp_path)
     def interrupted(request, **kwargs):
@@ -408,7 +410,8 @@ def test_fail_requires_a_nonempty_reason(tmp_path, reason):
 
 def test_pending_classifies_raw_overseas_workflow(tmp_path):
     app, api = service(tmp_path)
-    from apps.oa_approval.overseas_invoice import WORKFLOW_ID, WORKFLOW_NAME
+    from apps.oa.approvals.overseas import WORKFLOW_ID
+    from apps.oa.approvals.overseas import WORKFLOW_NAME
     api.rows = [{"request_id":"201","received_at":"2026-10-22 09:00:00","operator_id":"tester",
                  "workflow_id":WORKFLOW_ID,"workflow_name":WORKFLOW_NAME}]
     assert app.pending()["tasks"][0]["workflow_key"] == "overseas_invoice"
@@ -416,8 +419,11 @@ def test_pending_classifies_raw_overseas_workflow(tmp_path):
 
 @pytest.mark.parametrize("handled_time, expected_status", [("2020-01-01 12:00:00", "unknown"), ("fresh", "submitted")])
 def test_overseas_authorized_no_invoice_preserves_fields_and_has_independent_consent(tmp_path, monkeypatch, handled_time, expected_status):
-    from apps.oa_approval.overseas_invoice import WORKFLOW_ID, WORKFLOW_NAME, RPA_NODE_ID, digest
-    from apps.oa_approval import official_sql
+    from apps.oa.approvals.overseas import WORKFLOW_ID
+    from apps.oa.approvals.overseas import WORKFLOW_NAME
+    from apps.oa.approvals.overseas import RPA_NODE_ID
+    from apps.oa.approvals.overseas import digest
+    from apps.oa.approvals.sources import official_sql
     api = FakeOA()
     api.rows[0]["workflow_key"] = "overseas_invoice"
     data = {"requestId":"101","workflowId":WORKFLOW_ID,"workflowName":WORKFLOW_NAME,
@@ -485,8 +491,8 @@ def test_collect_unknown_run_keeps_the_public_not_found_error(tmp_path):
 
 
 def test_auth_failure_keeps_attempt_diagnostics_and_never_submits(tmp_path, monkeypatch):
-    from apps.oa import cli
-    from apps.oa_approval import auth
+    from apps.oa.approvals import cli
+    from apps.oa.approvals.sources import auth
     import base64
 
     app, fake = service(tmp_path)

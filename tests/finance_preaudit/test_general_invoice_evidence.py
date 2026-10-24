@@ -7,10 +7,10 @@ import json
 import pytest
 
 
-from apps.oa_approval import invoice_buyers
+from apps.oa.approvals.sources import invoices as invoice_buyers
 
 
-from apps.oa_finance_preaudit.case_bundle import collect_case
+from apps.oa.approvals.collection.case import collect_case
 
 
 CONFIG = {

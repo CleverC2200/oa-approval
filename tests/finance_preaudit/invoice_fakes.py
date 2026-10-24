@@ -1,4 +1,4 @@
-from apps.oa_approval import invoice_buyers
+from apps.oa.approvals.sources import invoices as invoice_buyers
 
 
 CONFIG = {

@@ -14,9 +14,14 @@ import fitz
 
 import pytest
 
-from apps.oa_approval import api, attachments, auth, flow, invoice_buyers, official_sql
+from apps.oa.approvals.sources import oa as api
+from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import auth
+from apps.oa.approvals import flows as flow
+from apps.oa.approvals.sources import invoices as invoice_buyers
+from apps.oa.approvals.sources import official_sql
 
-from apps.oa_finance_preaudit.case_bundle import collect_case
+from apps.oa.approvals.collection.case import collect_case
 from tests.finance_preaudit.invoice_fakes import CONFIG, NUMBER, InvoiceApi
 
 @pytest.fixture
@@ -76,7 +81,7 @@ def original_transport(monkeypatch, tmp_path):
                 from urllib.error import HTTPError
                 raise HTTPError(request.full_url, 403, 'forbidden', {}, None)
             if state.cloud_failure == 'redirect':
-                from apps.oa_approval.invoice_originals import _NoCloudRedirect
+                from apps.oa.approvals.collection.invoice_originals import _NoCloudRedirect
                 return _NoCloudRedirect().redirect_request(request, None, 302, '', {}, 'https://other.invalid/collect')
             if state.after_cloud_download:
                 state.after_cloud_download()
@@ -170,7 +175,7 @@ def test_cloud_download_rechecks_live_identity_before_preparation(original_trans
 
 @pytest.mark.parametrize('failure', ['json', 'truncated', 'oversized', 'http', 'redirect'])
 def test_cloud_failure_keeps_collection_unavailable(original_transport, tmp_path, monkeypatch, failure):
-    from apps.oa_approval import invoice_originals
+    from apps.oa.approvals.collection import invoice_originals
     state = original_transport
     state.still_denied = True
     state.cloud_pdf = b'{}' if failure == 'json' else state.pdf
@@ -245,7 +250,7 @@ def test_multiple_file_records_keep_partial_body_coverage(original_transport, tm
     invoice = material['invoice_evidence']['invoices'][0]
     assert invoice['body_read_status'] == 'partial_read'
     assert [f['body_read_status'] for f in invoice['files']] == ['content_read', 'not_read']
-    from apps.oa_approval.invoice_originals import body_coverage
+    from apps.oa.approvals.collection.invoice_originals import body_coverage
     assert body_coverage(invoice, material['resources'], material['prepared']) == 'partial_read'
 
 @pytest.mark.parametrize('mapping', ['missing_document', 'multiple_pdfs', 'deleted_pdf'])
@@ -293,7 +298,7 @@ def test_existing_exact_native_resource_is_downloaded_once(original_transport, t
     'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense',
 ])
 def test_original_body_uses_shared_finance_collection(workflow_key, original_transport, tmp_path, monkeypatch):
-    from apps.oa_finance_preaudit import case_bundle
+    from apps.oa.approvals.collection import case as case_bundle
     state = original_transport
     config = {**CONFIG, 'flow_key': workflow_key}
     state.client.config = config

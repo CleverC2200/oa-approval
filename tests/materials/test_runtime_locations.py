@@ -7,8 +7,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from apps.oa.service import Approval
-from apps.oa_approval import attachment_cache, attachment_recognition, attachments
+from apps.oa.approvals.operations import Approval
+from apps.oa.approvals.collection import cache as attachment_cache
+from apps.oa.materials import recognize as attachment_recognition
+from apps.oa.approvals.collection import downloads as attachments
 
 
 def test_collection_cache_follows_runtime_root_across_working_directories(tmp_path, monkeypatch):
@@ -88,8 +90,8 @@ def test_material_recognition_defaults_to_unique_version_local_directories(tmp_p
 def test_collection_preserves_cache_overrides_and_restores_context(
     tmp_path, monkeypatch, workflow, cache_setting,
 ):
-    from apps.oa import overseas
-    from apps.oa_approval import runtime_control
+    from apps.oa.approvals import overseas_runtime as overseas
+    from apps.oa.runtime import control as runtime_control
 
     root = tmp_path / 'selected-root'
     shared = tmp_path / 'shared' / 'cache.sqlite3'
@@ -132,8 +134,8 @@ def test_reference_import_default_is_anchored_outside_working_directory(tmp_path
 
     from openpyxl import Workbook
 
-    from apps.oa_approval import runtime_control
-    from apps.oa_finance_preaudit import tpm_price_reference
+    from apps.oa.runtime import control as runtime_control
+    from apps.oa.references import tpm as tpm_price_reference
 
     workbook = Workbook()
     sheet = workbook.active
