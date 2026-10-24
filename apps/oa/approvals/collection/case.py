@@ -10,7 +10,6 @@ import urllib.parse
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.materials import resources
-from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
@@ -498,7 +497,8 @@ def collect_case(
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
 ) -> dict[str, Any]:
-    transfer = remote.DownloadTransfer(source_policy)
+    download_sources = attachments.build_download_sources(source_policy)
+    transfer = download_sources.transfer
     travel_source = travel_orders.TravelSource(source_policy, transfer=transfer)
     workflow, raw_resources = oa_api.request_context(str(request_id))
     try:
@@ -596,8 +596,8 @@ def collect_case(
             target = dict(resource)
             target["id"] = descriptor["raw_resource_id"]
             download_targets.append(target)
-        downloaded, download_errors = attachments.download_resources(
-            download_targets, transfer=transfer,
+        download_result = attachments.download_resources(
+            download_targets, sources=download_sources,
             dest_dir=attachment_dir
             / str(config.get("flow_key") or "unknown")
             / str(request_id),
@@ -606,9 +606,10 @@ def collect_case(
             request_id=str(request_id),
             flow_key=str(config.get("flow_key") or ""),
         )
+        downloaded, download_errors = download_result.items, download_result.errors
         if download_errors or len(downloaded) != len(download_targets):
             code = (
-                str(download_errors[0].get("code") or "attachment_download_failed")
+                download_errors[0].code
                 if download_errors
                 else "attachment_download_incomplete"
             )

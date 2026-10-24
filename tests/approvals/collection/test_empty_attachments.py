@@ -335,7 +335,7 @@ def test_travel_count_uses_native_records_and_retains_each_source_identity(
                 document.new_page().insert_text((40, 40), 'synthetic attachment')
                 document.save(path)
             result.append({'resource_id': target['id'], 'path': str(path), 'name': path.name})
-        return result, []
+        return attachments.DownloadResult(tuple(result), (), "complete")
 
     monkeypatch.setattr(attachments, 'download_resources', download)
     if failure:

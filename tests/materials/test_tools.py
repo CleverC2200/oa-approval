@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from apps.oa.approvals.sources import downloads as remote
-from tests.approvals.source_fakes import POLICY
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
 
 import hashlib
 import json
@@ -129,7 +129,6 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     import fitz
     from openpyxl import Workbook
-    from apps.oa.approvals.collection import downloads as attachments
     from apps.oa.materials import archives
     from apps.oa.materials import formats as attachment_extractors
 
@@ -171,16 +170,19 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     from apps.oa.approvals.collection import downloads as attachments
 
-    def download(resource, *, dest_dir, timeout_sec, original_batch=None, transfer):
+    def download(resource, *, dest_dir, timeout_sec):
         target = dest_dir / (resource['id'] + '.png')
         Image.new('RGB', (10, 10), 'white').save(target)
-        return target, ''
+        return Downloaded(target)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
     resources = [{'id': 'a', 'name': 'A.png', 'downloadUrl': 'https://example.invalid/a'},
                  {'id': 'b', 'name': 'B.png', 'downloadUrl': 'https://example.invalid/b'}]
-    downloaded, errors = attachments.download_resources(resources, dest_dir=tmp_path / 'files',
-        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False, transfer=remote.DownloadTransfer(POLICY))
+    download_result = attachments.download_resources(resources, dest_dir=tmp_path / 'files',
+        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False, sources=attachments.build_download_sources(POLICY))
+    downloaded = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert [item['resource_id'] for item in downloaded] == ['a', 'b']
     assert [item['name'] for item in downloaded] == ['A.png', 'B.png']

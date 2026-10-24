@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from tests.approvals.source_fakes import POLICY
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
 
 
 import tempfile
@@ -88,9 +89,9 @@ def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, c
     resource = {"id": "resource-001", "name": "scan.pdf", "downloadUrl": "/download/scan.pdf"}
     monkeypatch.setattr(case_bundle, "_travel_resources", lambda *_a, **_k: ([], []))
     monkeypatch.setattr(case_bundle.evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
-    monkeypatch.setattr(case_bundle.attachments, "download_resources", lambda *_a, **_k: ([{
+    monkeypatch.setattr(case_bundle.attachments, "download_resources", lambda *_a, **_k: attachments.DownloadResult(({
         "resource_id": "resource-001", "name": "scan.pdf", "path": str(tmp_path / "scan.pdf"),
-    }], []))
+    },), (), "complete"))
     captured = []
 
     def prepare(_downloads, *, out_dir, compact_pdf=False, compact_spreadsheet=False):
@@ -321,7 +322,7 @@ def test_archive_limit_error_reaches_flow_admission_without_preparing_partial_fi
     monkeypatch.setattr(case_bundle, "_travel_resources", lambda **_kw: ([], []))
     monkeypatch.setattr(case_bundle, "_authority_facts", lambda **_kw: [])
     monkeypatch.setattr(evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
-    monkeypatch.setattr(attachments, "_download_resource_direct", lambda *_a, **_kw: (archive, ""))
+    monkeypatch.setattr(attachments, "build_download_sources", lambda _policy: download_sources(lambda *_a, **_kw: Downloaded(archive)))
     monkeypatch.setattr(attachments.runtime_control, "stop_requested", lambda: False)
     prepared = []
     monkeypatch.setattr(attachment_extractors, "prepare_materials", lambda *_a, **_kw: prepared.append(True))
