@@ -16,6 +16,9 @@ from apps.oa.approvals.client import emit, failure, socket_path
 from apps.oa.approvals.source_policy import load_source_policy
 
 
+_STDIN_EOF = object()
+
+
 @contextmanager
 def round_lock(root):
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -138,7 +141,7 @@ class _RoundSession:
             return
         try:
             request = receive_request()
-            if source == 'stdin' and (request is None or request.get('operation') == 'finish'):
+            if source == 'stdin' and (request is _STDIN_EOF or request.get('operation') == 'finish'):
                 self._finishing = True
             elif request.get('operation') == 'finish':
                 if request.get('run_id') != self._run_id:
@@ -201,7 +204,7 @@ class _RoundSession:
 
 def _read_stdin():
     line = sys.stdin.readline()
-    return json.loads(line) if line else None
+    return json.loads(line) if line else _STDIN_EOF
 
 
 def _read_socket(client):

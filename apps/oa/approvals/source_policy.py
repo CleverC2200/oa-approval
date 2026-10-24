@@ -62,7 +62,7 @@ def load_source_policy() -> SourcePolicy:
     environment.load_local_env()
     return SourcePolicy(
         AttachmentOrigins(
-            os.environ.get("OA_BASE_URL", "").rstrip("/"),
+            os.environ.get("OA_BASE_URL", "").strip().rstrip("/"),
             frozenset(
                 host.strip().lower()
                 for host in os.environ.get("OA_EXTRA_DOWNLOAD_HOSTS", "").split(",")

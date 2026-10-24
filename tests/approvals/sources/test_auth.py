@@ -112,3 +112,26 @@ def test_token_and_final_client_use_the_same_explicit_origin(authentication):
     overseas = overseas_invoice_api.build_api(source_policy=POLICY)
     assert calls == ['https://oa.example.test/api/ec/dev/auth/applytoken'] * 3
     assert {client.base_url for client in (reader, writer, overseas)} == {'https://oa.example.test'}
+
+
+@pytest.mark.parametrize('raw_origin, expected_origin', [
+    ('  https://oa.example.test/  ', 'https://oa.example.test'),
+    (' \t ', None),
+])
+def test_loaded_origin_preserves_auth_whitespace_normalization(
+    authentication, monkeypatch, raw_origin, expected_origin,
+):
+    from apps.oa.approvals.source_policy import load_source_policy
+
+    monkeypatch.setenv('OA_BASE_URL', raw_origin)
+    policy = load_source_policy()
+    _, calls, encrypted = authentication
+    if expected_origin is None:
+        with pytest.raises(auth.AuthFailure, match='^oa_auth_configuration_invalid$') as caught:
+            api.build_api({}, source_policy=policy)
+        assert caught.value.diagnostics[0]['stage'] == 'configuration'
+        assert calls == encrypted == []
+        return
+    reader = api.build_api({}, source_policy=policy)
+    assert policy.attachments.oa_origin == reader.base_url == expected_origin
+    assert calls == ['https://oa.example.test/api/ec/dev/auth/applytoken']

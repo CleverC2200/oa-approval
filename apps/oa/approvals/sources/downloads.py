@@ -42,13 +42,6 @@ YES_VALUES = {"1", "true", "yes", "y", "on", "YES"}
 CHROME_LAUNCH_TIMEOUT_CODE = "attachment_download_launch_timeout"
 DOWNLOAD_TIMEOUT_CODE = "attachment_download_timeout"
 RESOURCE_SLOT_TIMEOUT_CODE = "attachment_download_capacity_timeout"
-FATAL_DOWNLOAD_ERROR_CODES = {
-    OA_SESSION_EXPIRED_CODE,
-    CHROME_LAUNCH_TIMEOUT_CODE,
-    DOWNLOAD_TIMEOUT_CODE,
-    runtime_control.STOP_CODE,
-    *rpa_session.FATAL_SESSION_CODES,
-}
 RPA_STORAGE_STATE_CACHE_SEC = 60.0
 DEFAULT_GLOBAL_DOWNLOAD_CAPACITY = 6
 MAX_GLOBAL_DOWNLOAD_CAPACITY = 8
