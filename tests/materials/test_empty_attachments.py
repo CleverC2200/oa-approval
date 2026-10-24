@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from apps.oa.materials import recognize as attachment_recognition
+from apps.oa.materials import cli as materials_cli
 from apps.oa.approvals.sources import official_sql
 from apps.oa.approvals.sources import travel as travel_orders
 from apps.oa.approvals.collection.case import collect_case
@@ -75,7 +76,7 @@ def test_recognizer_skips_official_empty_material_without_model(tmp_path, monkey
     if entry == 'api':
         report = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'recognized')
     else:
-        assert attachment_recognition.main([
+        assert materials_cli.main(['recognize', 
             '--material-file', str(material_file), '--output-dir', str(tmp_path / 'recognized')]) == 0
         summary = json.loads(capsys.readouterr().out)
         assert summary['status'] == 'skipped'
@@ -136,7 +137,7 @@ def test_travel_placeholder_fields_skip_only_with_official_empty_scan(
     if entry == 'api':
         report = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'recognized')
     else:
-        assert attachment_recognition.main([
+        assert materials_cli.main(['recognize', 
             '--material-file', str(material_file), '--output-dir', str(tmp_path / 'recognized')]) == 0
         report = json.loads(Path(json.loads(capsys.readouterr().out)['report_file']).read_text())
 

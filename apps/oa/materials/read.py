@@ -10,7 +10,7 @@ from apps.oa.materials.locations import image_locations
 
 
 def command(material_file: Path) -> str:
-    return shlex.join([sys.executable, '-X', 'utf8', '-B', '-m', __name__, str(material_file.absolute())])
+    return shlex.join([sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'read', str(material_file.absolute())])
 
 
 def _json(value: object) -> str:
@@ -69,7 +69,7 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
     resources = material.get('resources') or []
     if not pages:
         return {}
-    recognition = [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials.recognize']
+    recognition = [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'recognize']
     routes = {
         'kind': 'generated_tool_navigation',
         'readability': 'not_verified',
@@ -108,7 +108,7 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
                 'coverage': 'image_region',
             }
             route['auxiliary_copy'] = {
-                'argv': [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials.compress', '--file', path],
+                'argv': [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'compress', '--file', path],
                 'recognition_authorization': 'requires_current_scope',
                 'counts_as_original_page_coverage': False,
             }
@@ -128,9 +128,3 @@ def read(material_file: Path) -> str:
     if routes:
         view += '\n[reader.image_tool_routes]\n' + _json(routes) + '\n'
     return view
-
-
-if __name__ == '__main__':
-    if len(sys.argv) != 2:
-        raise SystemExit('usage: python3 -m apps.oa.materials.read MATERIAL_FILE')
-    print(read(Path(sys.argv[1])), end='')

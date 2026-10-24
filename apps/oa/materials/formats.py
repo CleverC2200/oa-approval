@@ -963,7 +963,7 @@ def _prepare_one_attachment(
                 "name": name,
                 "status": "rar_archive_unsupported",
                 "path": str(path),
-                "error_message": "RAR 压缩包未在下载层完成安全展开，请确认 RAR 工具可用或展开为 PDF/图片后上传",
+                "error_message": "RAR 压缩包未完成安全展开，请确认 RAR 工具可用或展开为 PDF/图片后上传",
             }
         )
     elif suffix in XML_EXTS:

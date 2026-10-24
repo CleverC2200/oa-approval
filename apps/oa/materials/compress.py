@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
@@ -152,7 +151,7 @@ def compress_image(source: Path, *, output_dir: Path | None = None, max_dimensio
                 '--max-bytes', str(max_bytes), '--quality', str(quality), '--reserved-output', str(reserved_output)]
             with material_store.bounded_output(reserved_output, max_bytes=max_bytes):
                 result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
-                    text=True, timeout=timeout_seconds)
+                    text=True, timeout=timeout_seconds, cwd=runtime_control.PROJECT_ROOT)
                 if result.returncode != 0:
                     raise ValueError('image_compression_worker_failed')
                 detail = json.loads(result.stdout)
@@ -185,33 +184,28 @@ def compress_image(source: Path, *, output_dir: Path | None = None, max_dimensio
     return report
 
 
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description='Create a bounded image reading copy while preserving the source.',
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument('--file', type=Path, required=True, help='Local static source image; source remains unchanged.')
-    parser.add_argument('--output-dir', type=Path, help='New private directory for the reading copy.')
-    parser.add_argument('--max-dimension', type=int, default=8192, help='Longest output edge, 1..8192 pixels.')
-    parser.add_argument('--max-pixels', type=int, default=16_000_000, help='Output pixel count, 1..16000000.')
-    parser.add_argument('--max-bytes', type=int, default=8 * 1024 * 1024, help='Output bytes, 1024..33554432.')
-    parser.add_argument('--quality', type=int, default=90, help='JPEG encoding quality, 40..95.')
-    parser.add_argument('--timeout-seconds', type=float, default=60, help='Worker wait limit, greater than 0 and at most 60.')
-    parser.add_argument('--reserved-output', type=Path, help=argparse.SUPPRESS)
-    parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+def worker_main(argv=None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description='Internal bounded image conversion worker.')
+    parser.add_argument('--worker', action='store_true', required=True)
+    parser.add_argument('--file', type=Path, required=True)
+    parser.add_argument('--output-dir', type=Path, required=True)
+    parser.add_argument('--reserved-output', type=Path, required=True)
+    parser.add_argument('--max-dimension', type=int, required=True)
+    parser.add_argument('--max-pixels', type=int, required=True)
+    parser.add_argument('--max-bytes', type=int, required=True)
+    parser.add_argument('--quality', type=int, required=True)
     args = parser.parse_args(argv)
-    if args.worker:
-        try:
-            result = _worker(args)
-        except (ValueError, OSError) as error:
-            code = str(error)
-            result = {'status': 'failed', 'error_code': code if re.fullmatch(r'image_[a-z_]+', code)
-                      else 'image_compression_worker_failed'}
-        print(json.dumps(result))
-        return 0
-    result = compress_image(args.file, output_dir=args.output_dir, max_dimension=args.max_dimension,
-        max_pixels=args.max_pixels, max_bytes=args.max_bytes, quality=args.quality, timeout_seconds=args.timeout_seconds)
-    print(json.dumps(result, ensure_ascii=False))
-    return 0 if result['status'] == 'complete' else 1
+    try:
+        result = _worker(args)
+    except (ValueError, OSError) as error:
+        code = str(error)
+        result = {'status': 'failed', 'error_code': code if re.fullmatch(r'image_[a-z_]+', code)
+                  else 'image_compression_worker_failed'}
+    print(json.dumps(result))
+    return 0
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    raise SystemExit(worker_main())
