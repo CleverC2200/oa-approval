@@ -14,6 +14,7 @@ from apps.oa.runtime import files as material_store
 from apps.oa.approvals.sources import native_documents
 from apps.oa.approvals.sources import browser_session as rpa_session
 from apps.oa.runtime import control as runtime_control
+from apps.oa.materials.prepared import PreparedMaterial, read_prepared
 
 
 _MAX_ORIGINAL_BYTES = 50 * 1024 * 1024
@@ -261,25 +262,21 @@ class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
         raise ValueError('attachment_download_failed')
 
 
-def prepared_body(source: dict, resource_rows: list, prepared: dict) -> dict:
+def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial) -> dict:
     resource_id = source['native_file_id']
     resource = [item for item in resource_rows if item.get('resource_id') == resource_id]
-    manifest = [item for item in prepared.get('manifest', []) if item.get('resource_id') == resource_id]
-    images = [item for item in prepared.get('images', []) if item.get('resource_id') == resource_id]
-    hashes = {item.get('source_content_sha256') for item in images}
+    coverage = prepared.coverage(resource_id)
     if (len(resource) != 1 or resource[0].get('media_type') != 'application/pdf'
-            or len(manifest) != 1 or manifest[0].get('status') != 'pdf_rendered'
-            or not images or manifest[0].get('page_count') != len(images)
-            or manifest[0].get('image_count') != len(images) or len(hashes) != 1):
+            or coverage is None or coverage.manifest_count != 1 or coverage.status != 'pdf_rendered'
+            or not coverage.direct_image_count or coverage.declared_page_count != coverage.direct_image_count
+            or coverage.declared_image_count != coverage.direct_image_count
+            or coverage.direct_source_sha256 is None):
         raise RuntimeError('attachment_content_incomplete')
-    digest = hashes.pop()
-    if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
-        raise RuntimeError('attachment_content_incomplete')
-    return {'resource_id': resource_id, 'source_content_sha256': digest,
-            'page_count': len(images), 'body_read_status': 'content_read'}
+    return {'resource_id': resource_id, 'source_content_sha256': coverage.direct_source_sha256,
+            'page_count': coverage.direct_image_count, 'body_read_status': 'content_read'}
 
 
-def bind_prepared_bodies(evidence: dict, resource_rows: list, prepared: dict) -> None:
+def bind_prepared_bodies(evidence: dict, resource_rows: list, prepared: PreparedMaterial) -> None:
     for invoice in evidence.get('invoices', []):
         files = invoice.get('files') or []
         for file in files:
@@ -295,13 +292,14 @@ def body_coverage(invoice: dict, resource_rows: list, prepared: dict) -> str:
     for rows in (resource_rows, prepared.get('manifest', []), prepared.get('images', [])):
         if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
             return 'unknown'
+    prepared_result = read_prepared(prepared)
     files = invoice.get('files') or []
     if not isinstance(files, list) or any(not isinstance(file, dict) for file in files):
         return 'unknown'
     for file in files:
         if file.get('body_read_status') == 'content_read':
             try:
-                expected = prepared_body(file['original_source'], resource_rows, prepared)
+                expected = prepared_body(file['original_source'], resource_rows, prepared_result)
                 if any(file.get(key) != value for key, value in expected.items()):
                     return 'unknown'
             except (KeyError, TypeError, RuntimeError):

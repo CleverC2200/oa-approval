@@ -148,7 +148,10 @@ def test_preparation_reuses_content_and_rebinds_each_resource(tmp_path, monkeypa
         return extract(*args, **kwargs)
 
     monkeypatch.setattr(spreadsheet_images, 'extract', recorded_extract)
-    images, manifest, facts = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    facts = prepared_record['structured_contents']
     assert len(calls) == 1
     assert [(i['resource_id'], i['parent_resource_id'], i['name']) for i in images] == [
         ('first', 'archive-a', 'first.xlsx'), ('second', 'archive-b', 'second.xlsx'),
@@ -219,7 +222,8 @@ def test_identical_docx_files_keep_their_own_media_identities(tmp_path, png_byte
         path = tmp_path/f'{rid}.docx'
         path.write_bytes(content.getvalue())
         items.append({'resource_id':rid, 'name':path.name, 'path':str(path)})
-    images, _, _ = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
     assert [(i['resource_id'], i['parent_resource_id']) for i in images] == [
         (f'{rid}::docx_media::{index}', rid) for rid in ('first', 'second') for index in (1, 2)
     ]
@@ -232,9 +236,11 @@ def test_identical_archive_videos_keep_parent_in_skip_records(tmp_path):
         path = tmp_path/f'{index}.mp4'
         path.write_bytes(b'recorded unread video')
         children.append({'resource_id':f'archive::{index}', 'parent_resource_id':'archive', 'path':str(path)})
-    images, manifest, _ = attachment_extractors.prepare_materials(
+    prepared_record = attachment_extractors.prepare_materials(
         [{'resource_id':'archive', 'extracted_files':children}], out_dir=tmp_path/'prepared',
-    )
+    ).to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
     assert images == []
     assert [(i['resource_id'], i['parent_resource_id']) for i in manifest[0]['skipped_videos']] == [
         ('archive::1', 'archive'), ('archive::2', 'archive'),
@@ -247,12 +253,13 @@ def test_identical_archive_image_stays_inside_prepared_directory(tmp_path, png_b
     standalone.write_bytes(png_bytes)
     child.write_bytes(png_bytes)
     prepared = tmp_path/'prepared'
-    images, _, _ = attachment_extractors.prepare_materials([
+    prepared_record = attachment_extractors.prepare_materials([
         {'resource_id':'standalone', 'path':str(standalone)},
         {'resource_id':'archive', 'extracted_files':[
             {'resource_id':'archive::1', 'parent_resource_id':'archive', 'path':str(child)},
         ]},
-    ], out_dir=prepared)
+    ], out_dir=prepared).to_record()
+    images = prepared_record['images']
     assert images[0]['path'] == standalone
     assert Path(images[1]['path']).is_relative_to(prepared)
     assert images[1]['parent_resource_id'] == 'archive'

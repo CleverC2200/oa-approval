@@ -93,7 +93,7 @@ def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, c
 
     def prepare(_downloads, *, out_dir, compact_pdf=False, compact_spreadsheet=False):
         captured.append((compact_pdf, compact_spreadsheet))
-        return [], [], []
+        return case_bundle.attachment_extractors.PreparedMaterial({"images": [], "manifest": [], "structured_contents": []})
 
     monkeypatch.setattr(case_bundle.attachment_extractors, "prepare_materials", prepare)
     monkeypatch.setattr(case_bundle.invoice_buyers, "read_invoice_buyers", lambda *_a, **_k: {

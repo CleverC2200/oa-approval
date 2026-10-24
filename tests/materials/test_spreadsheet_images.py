@@ -40,7 +40,10 @@ def book(tmp_path: Path, *, broken=False, image_content=None):
 
 def test_preparation_keeps_wps_cell_and_floating_images(tmp_path):
     path = book(tmp_path)
-    images, manifest, facts = attachment_extractors.prepare_materials([{'resource_id':'book', 'path':str(path)}], out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials([{'resource_id':'book', 'path':str(path)}], out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    facts = prepared_record['structured_contents']
     assert len(images) == 2
     assert {image['spreadsheet_cell'] for image in images} == {'现场!B2', '现场!C3'}
     assert all(image['resource_id']=='book' and Path(image['path']).is_file() for image in images)
@@ -82,10 +85,13 @@ def test_preparation_ignores_unreferenced_workbook_custom_xml(tmp_path, compact)
         archive.writestr('customXml/item1.xml', '<metadata/>')
     original = path.read_bytes()
 
-    images, manifest, facts = attachment_extractors.prepare_materials(
+    prepared_record = attachment_extractors.prepare_materials(
         [{'resource_id': 'book', 'path': str(path)}],
         out_dir=tmp_path/'prepared', compact_spreadsheet=compact,
-    )
+    ).to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    facts = prepared_record['structured_contents']
 
     assert path.read_bytes() == original
     assert {image['spreadsheet_cell'] for image in images} == {'现场!B2', '现场!C3'}
@@ -97,7 +103,8 @@ def test_preparation_ignores_unreferenced_workbook_custom_xml(tmp_path, compact)
 def test_shared_formula_preserves_each_cell_anchor(tmp_path):
     path = book(tmp_path)
     rewrite_part(path, 'xl/worksheets/sheet1.xml', lambda b: b.replace(b'<f>DISPIMG', b'<f t="shared" si="0" ref="B2:C2">DISPIMG').replace(b'</row></sheetData>', b'<c r="C2"><f t="shared" si="0"/></c></row></sheetData>'))
-    images, _, _ = attachment_extractors.prepare_materials([{'resource_id':'book', 'path':str(path)}], out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials([{'resource_id':'book', 'path':str(path)}], out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
     assert {image['spreadsheet_cell'] for image in images} == {'现场!B2', '现场!C2', '现场!C3'}
 
 
@@ -151,10 +158,14 @@ def test_compact_spreadsheet_keeps_pixels_anchors_and_original_source(tmp_path):
     source = book(tmp_path, image_content=content)
     original = source.read_bytes()
     descriptor = {'resource_id': 'book', 'path': str(source)}
-    normal, _, _ = attachment_extractors.prepare_materials([descriptor], out_dir=tmp_path/'normal')
-    compact, manifest, facts = attachment_extractors.prepare_materials(
+    prepared_record = attachment_extractors.prepare_materials([descriptor], out_dir=tmp_path/'normal').to_record()
+    normal = prepared_record['images']
+    prepared_record = attachment_extractors.prepare_materials(
         [descriptor], out_dir=tmp_path/'compact', compact_spreadsheet=True,
-    )
+    ).to_record()
+    compact = prepared_record['images']
+    manifest = prepared_record['manifest']
+    facts = prepared_record['structured_contents']
     assert source.read_bytes() == original
     assert len(normal) == len(compact) == manifest[0]['image_count'] == 2
     assert {item['spreadsheet_cell'] for item in compact} == {'现场!B2', '现场!C3'}
@@ -182,8 +193,9 @@ def test_compact_spreadsheet_keeps_small_or_transparent_images_lossless(tmp_path
         image.clear_with(255)
     content = image.tobytes('png')
     source = book(tmp_path, image_content=content)
-    images, _, _ = attachment_extractors.prepare_materials(
+    prepared_record = attachment_extractors.prepare_materials(
         [{'resource_id': 'book', 'path': str(source)}],
         out_dir=tmp_path/'prepared', compact_spreadsheet=True,
-    )
+    ).to_record()
+    images = prepared_record['images']
     assert all(Path(item['path']).read_bytes() == content for item in images)

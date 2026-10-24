@@ -148,11 +148,14 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     children, error = archives.extract_zip_safely(
         archive, dest_dir=tmp_path / 'downloads', resource={'id': 'archive', 'name': 'files.zip'})
     assert error == ''
-    images, manifest, contents = attachment_extractors.prepare_materials([
+    prepared_record = attachment_extractors.prepare_materials([
         {'resource_id': 'archive', 'path': str(archive), 'extracted_files': children},
         {'resource_id': 'detail-a', 'path': str(excel)},
         {'resource_id': 'detail-b', 'path': str(excel)},
-    ], out_dir=tmp_path / 'prepared')
+    ], out_dir=tmp_path / 'prepared').to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    contents = prepared_record['structured_contents']
     assert len(images) == 2
     assert all(item['parent_resource_id'] == 'archive' for item in images)
     assert manifest[0]['image_count'] == 2
