@@ -1,6 +1,6 @@
 # 最小审批执行接口
 
-当前执行由 `apps.oa.cli` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
+当前执行由 `apps.oa.approvals` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
 
 ## 采集与提交
 
@@ -16,9 +16,9 @@
 [
   {
     "resource_id": "本单材料中的真实附件ID",
-    "locator": "第1页／累计里程区域",
+    "locator": "第1页／金额区域",
     "source": "agent",
-    "content": "本页已读取的原值、单位、相关行程及其核对依据；未确认的读数或配对关系明确说明。",
+    "content": "本页已读取的原值、单位、对应明细及其核对依据；未确认的读数或配对关系明确说明。",
     "status": "read"
   }
 ]
@@ -30,17 +30,13 @@
 - 表单和商旅权威事实使用完整 `declared_fields.path`、`authority_facts` 中的来源路径及本次工作上下文定位。没有真实附件归属的字段事实不编造附件 ID，也不强行塞入附件观察。
 - DeepSeek 工具生成的整份原始报告可通过 `--recognition-file` 一起保存；其原始回答和来源保持原样，Agent 的补充判断另放附件观察。已有工具生成的观察数组也可直接传入。
 
-默认预览的保存示例，`OA_TASK_ID` 使用本单实际任务 ID：
+默认预览的保存示例，`OA_RUNTIME_ROOT` 沿用本轮 start 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime submit \
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit \
   --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt \
   --observations-file /absolute/path/observations.json
 ```
-
-## 按次油补观察
-
-“按次”油补仍逐行程读取原始起止照片，保留日期或可定位行程、原始读数与单位、配对依据、算式、合计及实际复读情况。分行申报不构成行程配对依据，原值不稳定时保留具体缺口。完整记录与公开意见的分工见[差旅油补规则](flows/travel-expense.md#第-6-项按申报形态建立里程关系)，附件部分使用上述观察入口保存。
 
 ## 审核未完成的人工交接
 

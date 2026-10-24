@@ -13,7 +13,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 ### 冻结批次与领取
 
-1. 通过 `bash .codex/python.sh -m apps.oa.cli pending --batch-size N --limit N` 重新拉取真实待办，按当前授权选择适用类型。`--batch-size N` 将本轮全局 FIFO 排队前缀持久保存在 `runs`，启动输出的 `batch.size` 和 `batch.task_ids` 给出范围。保存 `run_id`、任务身份及顺序。`--limit` 仅控制紧凑展示，不能限制批次；省略 `--batch-size` 保留完整队列的旧调用行为。旧批次名单不跨新轮使用，历史成功和未知提交不进入重发路径。默认预览，真实写入和海外字段分别按当前明确授权执行。
+1. 先按 README 操作入口确定本轮绝对根目录 `OA_RUNTIME_ROOT`，通过 `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" start --batch-size N --limit N` 重新拉取真实待办，后续操作沿用同一根目录，按当前授权选择适用类型。`--batch-size N` 将本轮全局 FIFO 排队前缀持久保存在 `runs`，启动输出的 `batch.size` 和 `batch.task_ids` 给出范围。保存 `run_id`、任务身份及顺序。`--limit` 仅控制紧凑展示，不能限制批次；省略 `--batch-size` 保留完整队列的旧调用行为。旧批次名单不跨新轮使用，历史成功和未知提交不进入重发路径。默认预览，真实写入和海外字段分别按当前明确授权执行。
 2. 每次 `collect` 前检查停止状态、下一张预期任务和剩余名额。领取达到批次范围后不再请求 `collect`，技术失败也占已领取数量。程序拒绝领取范围外的第 N+1 单；批次内无排队或在途任务时返回 `done`，即使完整队列还有范围外待办。
 3. 有空位时先确定最早的下一单，再选择审核 Agent。自动领取不传 `--workflow-key`；该参数只用于显式筛选。类型只影响空闲 Agent 的复用，同类积压可以占满三个名额。将原生工具返回的实际 Agent 标识、下一张 `task_id` 和该 Agent 的类型声明一起传给保护入口：`collect --agent-id <actual-native-agent-id> --expected-task-id <next-task-id> --agent-workflow-key <workflow-key>`。程序在事务内领取前检查预期身份、类型、同代类型一致及最多 5 单，拒绝时不领取，也不跳过老单。逻辑槽号只保存在主 Agent 工作表中。领取后核对本轮及预期任务身份，异常立即停止派发和写入。
 
@@ -51,9 +51,28 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 用户要求停止时，立即停止补位。已领取的最多 3 单按当前授权完成审核、提交或预览及回查，再核对记录并通过原标准输入发送 `finish` 关闭整轮；收尾前保持原进程标准输入打开。`finish` 或 EOF 到达时，服务先等待当前采集完成并落盘，再关闭本轮、socket 和 `approval.lock`；客户端断开也保留已经取得的材料。采集进程异常记录技术失败，不生成业务意见。用户明确要求立即停止时，不再发起新写入，已开始且结果未知的写入只读回查。
 
+## 流程路由
+
+本文件只定义所有流程共用的输出接口和规则包路由，不包含任何流程的业务判断。材料中的 `workflow_key` 未精确确认前不得加载流程规则；确认后只读取下表对应的一个规则包，不得读取其他流程规则包。
+
+| `workflow_key` | 唯一规则包 |
+| --- | --- |
+| `travel_expense` | [差旅费报销](references/flows/travel-expense.md) |
+| `business_entertainment` | [业务招待费](references/flows/business-entertainment.md) |
+| `business_support_fee` | [业务支持费](references/flows/business-support-fee.md) |
+| `small_marketing_fee` | [小额市场费](references/flows/small-marketing-fee.md) |
+| `tpm_small_marketing_fee` | [TPM 小额市场费](references/flows/tpm-small-marketing-fee.md) |
+| `general_expense` | [通用费用报销](references/flows/general-expense.md) |
+| `packaging_layout_approval` | [包装版面](references/flows/packaging-layout-approval.md) |
+
+六类财务同时完整读取[对公付款免支付截图](references/payment-screenshot-exemption.md)，先核对已有支付截图，仅在缺少有效截图时按共用规则核验豁免及相关补充材料。包装只读取自己的规则包。
+
+不在表中的 `workflow_key` 属于技术失败，停止当前单据，不猜测相近流程。
+
+
 ## 读取材料
 
-确认任务 `workflow_key`，只加载[对应流程规则](references/result-contract.md)；六类财务同时完整读取[共享付款规则](references/payment-screenshot-exemption.md)和[证据阅读规则](references/observation-contract.md)。
+审核者以 collect 返回的 `rule_file` 和 `rules_root` 为当前规则入口，完整读取本单冻结规则；六类财务同时完整读取本单冻结的共享付款与证据规则。
 
 读取冻结表单、所有相关明细、关联发票原件、资源清单和准备页。差旅完整读取 `authority_facts` 中的商旅页面正文、住宿订单详情及酒店地址，逐笔核对住宿、交通和其他行程；采集未取得必要详情时先补齐读取或记录具体读取失败。附件数量为 0 只表示没有可下载附件，页面资料仍须完整审核。文件名、顺序及相似金额不能代替资源归属和费用对应关系。财务图片使用 [DeepSeek 附件识别](../../../docs/agents/attachment-recognition.md) 的逐页文本及来源；高影响原值不稳定时定向复读。包装调用[中文图片校对](../audit-chinese-image-text/SKILL.md)直接观察原图，有 Excel 时逐字符对照。
 

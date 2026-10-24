@@ -22,5 +22,8 @@ elif [ "${1:-}" = check ]; then
     "$shared_environment/bin/python" -B -m ruff check apps tests
     exec "$shared_environment/bin/python" -B -m pytest -q
 else
+    if [ "${1:-}" = -m ] && [[ "${2:-}" == apps.oa || "${2:-}" == apps.oa.* ]]; then
+        export PYTHONPATH="$project_root${PYTHONPATH:+:$PYTHONPATH}"
+    fi
     exec "$shared_environment/bin/python" -B "$@"
 fi

@@ -10,7 +10,8 @@ from random import Random
 from PIL import Image
 import pytest
 
-from apps.oa_approval import attachment_recognition
+from apps.oa.materials import recognize as attachment_recognition
+from apps.oa.materials import cli as materials_cli
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def test_cli_accepts_clockwise_rotation(tmp_path, requests, capsys):
     source = tmp_path / 'page.png'
     Image.new('RGB', (3, 2), (7, 0, 0)).save(source)
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize',
         '--file', str(source), '--rotate', '270', '--output-dir', str(tmp_path / 'report')])
 
     assert code == 0
@@ -103,8 +104,8 @@ def test_cli_accepts_clockwise_rotation(tmp_path, requests, capsys):
 
 
 def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_path, requests):
-    from apps.oa.service import Approval
-    from tests.serial.test_approval_service import FakeOA
+    from apps.oa.approvals.operations import Approval
+    from tests.approvals.test_operations import FakeOA
 
     source = tmp_path / 'page.png'
     Image.new('RGB', (3, 2), (7, 0, 0)).save(source)
@@ -118,7 +119,7 @@ def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_
                     'manifest': [], 'structured_contents': [
                         {'resource_id': 'a:invoice.pdf', 'parent_resource_id': 'a', 'text': '原件 25.00'}]}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     baseline = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'baseline')
@@ -173,7 +174,7 @@ def test_cli_rejects_multiframe_rotation_and_keeps_default_reading(
     assert base64.b64decode(url.split(',', 1)[1]) == original
     requests.clear()
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize',
         '--file', str(multiframe_source), '--rotate', str(rotate), '--output-dir', str(tmp_path / 'report')])
 
     assert code == 1
@@ -283,8 +284,8 @@ def test_rotated_jpeg_splits_when_png_exceeds_byte_limit(tmp_path, requests, mon
 
 def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
         tmp_path, requests, monkeypatch, jpeg_source):
-    from apps.oa.service import Approval
-    from tests.serial.test_approval_service import FakeOA
+    from apps.oa.approvals.operations import Approval
+    from tests.approvals.test_operations import FakeOA
 
     original = jpeg_source.read_bytes()
     with Image.open(jpeg_source) as image, image.crop((0, 0, 72, 64)) as tile:
@@ -300,7 +301,7 @@ def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
                     'path': str(jpeg_source), 'content_sha256': hashlib.sha256(original).hexdigest()}],
                     'manifest': [], 'structured_contents': []}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     monkeypatch.setattr(attachment_recognition, 'MAX_FILE_BYTES', byte_limit)
@@ -364,7 +365,7 @@ def selected_material(tmp_path):
 
 
 def test_material_navigation_matches_recognition_page_identity(tmp_path, requests, selected_material):
-    from apps.oa_finance_preaudit.read_material import read
+    from apps.oa.materials.read import read
 
     material_file, material, source = selected_material
     material['prepared']['images'].append({
@@ -411,7 +412,7 @@ def test_material_navigation_matches_recognition_page_identity(tmp_path, request
 ])
 def test_material_navigation_keeps_missing_resource_guards_separate_from_recognition(
         tmp_path, requests, selected_material, resource_id, status, error):
-    from apps.oa_finance_preaudit.read_material import read
+    from apps.oa.materials.read import read
 
     material_file, material, _ = selected_material
     material['prepared']['images'] = [{
@@ -482,13 +483,13 @@ def test_material_region_crops_selected_page_before_rotation_and_keeps_prior_rep
 
 def test_selected_observations_keep_sources_and_bind_to_real_attachments(
         tmp_path, requests, selected_material):
-    from apps.oa.service import Approval
-    from tests.serial.test_approval_service import FakeOA
+    from apps.oa.approvals.operations import Approval
+    from tests.approvals.test_operations import FakeOA
 
     _, material, _ = selected_material
     api = FakeOA()
     app = Approval(tmp_path / 'approval', api=api, configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     report = attachment_recognition.recognize(
         material_file=Path(task['material_file']), resource_id='b', prompt='读取原始金额',
         output_dir=tmp_path / 'selected')
@@ -516,7 +517,7 @@ def test_selected_observations_keep_sources_and_bind_to_real_attachments(
 def test_cli_returns_selected_page_observations(tmp_path, requests, selected_material, capsys):
     material_file, _, _ = selected_material
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize',
         '--material-file', str(material_file), '--resource-id', 'b', '--page', '2',
         '--region', '1', '0', '4', '2', '--rotate', '90', '--output-dir', str(tmp_path / 'selected')])
 
