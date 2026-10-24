@@ -716,17 +716,6 @@ def _read_browser_trip_candidates_uncoordinated(
                     launch_kwargs["executable_path"] = attachments.CHROME_BIN
                 browser = playwright.chromium.launch(**launch_kwargs)
                 context = browser.new_context(storage_state=storage_state)
-                page = context.new_page()
-                response_resources: List[Dict[str, Any]] = []
-                attachment_inventory: List[Dict[str, Any]] = []
-                hotel_orders: List[Dict[str, str]] = []
-                response_diagnostics: List[Dict[str, Any]] = []
-
-                def capture_response(response: Any) -> None:
-                    _capture_attachment_response(response, response_resources, response_diagnostics, attachment_inventory)
-                    _capture_hotel_order_response(response, hotel_orders, response_diagnostics)
-
-                page.on("response", capture_response)
                 deadline = time.monotonic() + max(1, timeout_sec)
                 for index, url in enumerate(urls):
                     remaining = deadline - time.monotonic()
@@ -735,6 +724,19 @@ def _read_browser_trip_candidates_uncoordinated(
                         break
                     budget = max(1.0, remaining / max(1, len(urls) - index))
                     candidate_deadline = min(deadline, time.monotonic() + budget)
+                    page = context.new_page()
+                    response_resources: List[Dict[str, Any]] = []
+                    attachment_inventory: List[Dict[str, Any]] = []
+                    hotel_orders: List[Dict[str, str]] = []
+                    response_diagnostics: List[Dict[str, Any]] = []
+
+                    def capture_response(response: Any, resources=response_resources,
+                                         inventory=attachment_inventory, orders=hotel_orders,
+                                         diagnostics=response_diagnostics) -> None:
+                        _capture_attachment_response(response, resources, diagnostics, inventory)
+                        _capture_hotel_order_response(response, orders, diagnostics)
+
+                    page.on("response", capture_response)
                     stage = "navigation"
                     try:
                         response = page.goto(
@@ -820,6 +822,8 @@ def _read_browser_trip_candidates_uncoordinated(
                             break
                     except Exception as error:
                         results.append(_trip_read_failure(stage, f"{stage}_failed", headless=headless, error=error))
+                    finally:
+                        page.close()
 
     except (_TravelReadDeadline, Exception) as error:
         results.append(_trip_read_failure("browser", "browser_deadline" if isinstance(error, _TravelReadDeadline) else "browser_failed",

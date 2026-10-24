@@ -68,6 +68,51 @@ def test_repeated_native_responses_do_not_inflate_attachment_record_count(browse
     assert len(evidence['resources']) == 4
 
 
+def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_transport, monkeypatch):
+    wrong_url = 'https://trip.example.test/wrong'
+    target_url = 'https://trip.example.test/target'
+    browser_transport.candidate_outcomes = {
+        wrong_url: {'text': 'SYNTHETIC-OTHER-REQUEST', 'expense_rows': native_attachment_rows()},
+        target_url: {'text': 'SYNTHETIC-TRAVEL 暂无数据'},
+    }
+    monkeypatch.setattr(travel_orders, '_oa_jump_url', lambda _: wrong_url)
+    monkeypatch.setattr(travel_orders, '_trip_url', lambda _: target_url)
+    candidates = []
+    read = travel_orders._read_trip_candidate_results
+
+    def capture(*args, **kwargs):
+        result = read(*args, **kwargs)
+        candidates.extend(result)
+        return result
+
+    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', capture)
+    evidence = collect_travel(count='6')
+    wrong, target = candidates
+    assert len(wrong['attachment_inventory']) == 6
+    assert target['attachment_inventory'] == []
+    assert target['resources'] == target['hotel_order_details'] == target['diagnostics'] == []
+    assert evidence['resources'] == []
+    assert 'inventory' not in evidence.get('attachment_scan', {})
+    assert all(page.closed for browser in browser_transport.browsers for page in browser.pages)
+
+    from apps.oa_finance_preaudit import case_bundle
+
+    config = {'flow_key': 'travel_expense', 'workflow_id': '138023', 'workflow_name': '差旅费报销流程'}
+    workflow = {'requestId': '12', 'workflowBaseInfo': {
+        'workflowId': config['workflow_id'], 'workflowName': config['workflow_name']},
+        'workflowMainTableInfo': {'requestRecords': [{'workflowRequestTableFields': [
+            {'fieldName': 'lcbh', 'fieldShowName': '流程编号', 'fieldShowValue': 'SYNTHETIC-TRAVEL'},
+            {'fieldName': 'fjsl', 'fieldShowName': '附件数量', 'fieldShowValue': '6'},
+        ]}]}}
+    oa_api = SimpleNamespace(request_context=lambda _: (workflow, []))
+    monkeypatch.setattr(case_bundle, '_authority_facts', lambda **_: [])
+    monkeypatch.setattr(case_bundle.invoice_originals, 'resources', lambda *_: [])
+    with pytest.raises(case_bundle.CollectionFailure, match='^travel_attachment_resources_incomplete$') as caught:
+        case_bundle.collect_case('12', oa_api=oa_api, configs=[config], allow_browser_download=True,
+                                 attachment_timeout_sec=1)
+    assert caught.value.counts['trusted_source_sighting_count'] == 0
+
+
 def hotel_transport(payload, status=200):
     calls = []
 
@@ -200,12 +245,14 @@ def browser_transport(monkeypatch):
             self.outcome = transport.outcomes.get(headless, {})
             self.url = ''
             self.handlers = []
+            self.closed = False
 
         def on(self, _event, handler):
             self.handlers.append(handler)
 
         def goto(self, url, **_kwargs):
             self.url = url
+            self.outcome = getattr(transport, 'candidate_outcomes', {}).get(url, self.outcome)
             failure = self.outcome.get('failure')
             if failure == 'deadline':
                 signal.raise_signal(signal.SIGALRM)
@@ -244,18 +291,27 @@ def browser_transport(monkeypatch):
         def wait_for_timeout(self, _milliseconds):
             pass
 
+        def close(self):
+            self.closed = True
+
     class Browser:
         def __init__(self, headless):
-            self.page = Page(headless)
+            self.headless = headless
+            self.pages = []
             self.disposed = False
             self.close_timers = []
 
         def new_context(self, **_kwargs):
+            def new_page():
+                self.page = Page(self.headless)
+                self.pages.append(self.page)
+                return self.page
+
             def post(url, **kwargs):
                 transport.requests.append((url, kwargs))
                 return SimpleNamespace(status=200, json=lambda: self.page.outcome['hotel_payload'])
 
-            return SimpleNamespace(new_page=lambda: self.page, cookies=lambda *_a: [],
+            return SimpleNamespace(new_page=new_page, cookies=lambda *_a: [],
                                    request=SimpleNamespace(post=post))
 
         def close(self):
