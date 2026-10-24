@@ -13,7 +13,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 ### 冻结批次与领取
 
-1. 通过 `bash .codex/python.sh -m apps.oa.cli pending --batch-size N --limit N` 重新拉取真实待办，按当前授权选择适用类型。`--batch-size N` 将本轮全局 FIFO 排队前缀持久保存在 `runs`，启动输出的 `batch.size` 和 `batch.task_ids` 给出范围。保存 `run_id`、任务身份及顺序。`--limit` 仅控制紧凑展示，不能限制批次；省略 `--batch-size` 保留完整队列的旧调用行为。旧批次名单不跨新轮使用，历史成功和未知提交不进入重发路径。默认预览，真实写入和海外字段分别按当前明确授权执行。
+1. 先按 README 操作入口确定本轮绝对根目录 `OA_RUNTIME_ROOT`，通过 `bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --batch-size N --limit N` 重新拉取真实待办，后续操作沿用同一根目录，按当前授权选择适用类型。`--batch-size N` 将本轮全局 FIFO 排队前缀持久保存在 `runs`，启动输出的 `batch.size` 和 `batch.task_ids` 给出范围。保存 `run_id`、任务身份及顺序。`--limit` 仅控制紧凑展示，不能限制批次；省略 `--batch-size` 保留完整队列的旧调用行为。旧批次名单不跨新轮使用，历史成功和未知提交不进入重发路径。默认预览，真实写入和海外字段分别按当前明确授权执行。
 2. 每次 `collect` 前检查停止状态、下一张预期任务和剩余名额。领取达到批次范围后不再请求 `collect`，技术失败也占已领取数量。程序拒绝领取范围外的第 N+1 单；批次内无排队或在途任务时返回 `done`，即使完整队列还有范围外待办。
 3. 有空位时先确定最早的下一单，再选择审核 Agent。自动领取不传 `--workflow-key`；该参数只用于显式筛选。类型只影响空闲 Agent 的复用，同类积压可以占满三个名额。将原生工具返回的实际 Agent 标识、下一张 `task_id` 和该 Agent 的类型声明一起传给保护入口：`collect --agent-id <actual-native-agent-id> --expected-task-id <next-task-id> --agent-workflow-key <workflow-key>`。程序在事务内领取前检查预期身份、类型、同代类型一致及最多 5 单，拒绝时不领取，也不跳过老单。逻辑槽号只保存在主 Agent 工作表中。领取后核对本轮及预期任务身份，异常立即停止派发和写入。
 
