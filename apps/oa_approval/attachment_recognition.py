@@ -342,8 +342,9 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
             raise ValueError('attachment_region_invalid')
     if not 0 < timeout_seconds <= 300 or not 0 < budget_seconds <= 3600:
         raise ValueError('attachment_recognition_timeout_invalid')
-    material_file = material_file.absolute() if material_file else None
-    output_dir = Path(output_dir or runtime_control.PROJECT_ROOT / 'runtime' / 'recognitions' / uuid4().hex).absolute()
+    material_file = Path(material_file).expanduser().absolute() if material_file else None
+    recognition_root = material_file.parent if material_file else runtime_control.RUNTIME_ROOT
+    output_dir = Path(output_dir or recognition_root / 'recognitions' / uuid4().hex).expanduser().absolute()
     output_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
     report_file = output_dir / 'recognition.json'
     report = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,

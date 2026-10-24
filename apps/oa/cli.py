@@ -16,7 +16,10 @@ import subprocess
 import sys
 
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[2] / 'runtime'
+from apps.oa_approval.runtime_control import RUNTIME_ROOT
+
+
+DEFAULT_ROOT = RUNTIME_ROOT
 
 
 def emit(value):
