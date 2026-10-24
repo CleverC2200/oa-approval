@@ -2,6 +2,8 @@
 
 本规则包仅适用于 `workflow_key=business_support_fee`。先执行[共享结果接口](../result-contract.md)，不得读取其他流程规则包。
 
+财务共用的金额与表达要求见[财务意见补充要求](../finance-result-contract.md)，付款、发票和识别覆盖见[财务证据补充规则](../finance-observation-contract.md)。
+
 ## 固定审核项
 
 固定四项，顺序不可改变：
