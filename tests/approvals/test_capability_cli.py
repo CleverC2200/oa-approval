@@ -64,6 +64,19 @@ def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
             process.wait()
 
 
+def test_stdin_null_reports_failure_and_continues_to_the_next_request(tmp_path):
+    result = subprocess.run(
+        [sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo'],
+        cwd=PROJECT, input='null\n{"operation":"status"}\n{"operation":"finish"}\n',
+        capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    started, failed, status = [json.loads(line) for line in result.stdout.splitlines()]
+    assert failed == {'status': 'failed', 'error': 'AttributeError'}
+    assert status == {'run_id': started['run_id'], 'status': 'running'}
+    assert not Path(started['socket']).exists()
+
+
 def test_help_does_not_import_owner_collection_or_external_adapters():
     script = '''import importlib.abc
 import runpy

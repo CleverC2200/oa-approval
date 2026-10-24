@@ -36,6 +36,13 @@ MANIFEST_NAME = "manifest.json"
 ATTACHMENT_IDENTITY_CONFLICT_CODE = "attachment_resource_identity_conflict"
 DEFAULT_DOWNLOAD_CONCURRENCY = 4
 MAX_DOWNLOAD_CONCURRENCY = 8
+_FATAL_DOWNLOAD_ERROR_CODES = {
+    remote.OA_SESSION_EXPIRED_CODE,
+    remote.CHROME_LAUNCH_TIMEOUT_CODE,
+    remote.DOWNLOAD_TIMEOUT_CODE,
+    runtime_control.STOP_CODE,
+    *rpa_session.FATAL_SESSION_CODES,
+}
 
 
 def _unique_attachment_resources(
@@ -578,7 +585,7 @@ class _DownloadBatch:
             item = self._materialize_one(resource, outcome)
             if isinstance(item, Failed):
                 self.errors.append(item.error)
-                if item.error.code in remote.FATAL_DOWNLOAD_ERROR_CODES:
+                if item.error.code in _FATAL_DOWNLOAD_ERROR_CODES:
                     self.errors.insert(0, self.errors.pop())
                     break
             elif isinstance(item, dict):
