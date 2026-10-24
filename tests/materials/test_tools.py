@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from apps.oa.approvals.sources import downloads as remote
+from tests.approvals.source_fakes import POLICY
+
 import hashlib
 import json
 from pathlib import Path
@@ -168,7 +171,7 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     from apps.oa.approvals.collection import downloads as attachments
 
-    def download(resource, *, dest_dir, timeout_sec, original_batch=None):
+    def download(resource, *, dest_dir, timeout_sec, original_batch=None, transfer):
         target = dest_dir / (resource['id'] + '.png')
         Image.new('RGB', (10, 10), 'white').save(target)
         return target, ''
@@ -177,7 +180,7 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
     resources = [{'id': 'a', 'name': 'A.png', 'downloadUrl': 'https://example.invalid/a'},
                  {'id': 'b', 'name': 'B.png', 'downloadUrl': 'https://example.invalid/b'}]
     downloaded, errors = attachments.download_resources(resources, dest_dir=tmp_path / 'files',
-        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False)
+        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False, transfer=remote.DownloadTransfer(POLICY))
     assert errors == []
     assert [item['resource_id'] for item in downloaded] == ['a', 'b']
     assert [item['name'] for item in downloaded] == ['A.png', 'B.png']

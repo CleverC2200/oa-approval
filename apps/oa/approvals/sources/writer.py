@@ -144,5 +144,5 @@ class FrozenWriterApi(OaApi):
                 "failure_code": POSTCHECK_TIMEOUT}
 
 
-def build_writer_api() -> FrozenWriterApi:
-    return FrozenWriterApi(*auth.credentials())
+def build_writer_api(*, source_policy) -> FrozenWriterApi:
+    return FrozenWriterApi(*auth.credentials(base_url=source_policy.attachments.oa_origin), base_url=source_policy.attachments.oa_origin)

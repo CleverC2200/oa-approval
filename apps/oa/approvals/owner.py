@@ -13,6 +13,7 @@ import sys
 
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
+from apps.oa.approvals.source_policy import load_source_policy
 
 
 @contextmanager
@@ -41,7 +42,7 @@ def dispatch(approval, run_id, request):
         return approval.fail(run_id, request['task_id'], request['reason'])
     raise ValueError('unknown_operation')
 
-def collect_process(root, demo, run_id, request, output):
+def collect_process(root, demo, run_id, request, output, source_policy):
     from apps.oa.approvals.operations import Approval
 
     approval = None
@@ -50,7 +51,7 @@ def collect_process(root, demo, run_id, request, output):
             from apps.oa.approvals.demo import create_demo
             approval = create_demo(root)
         else:
-            approval = Approval(root)
+            approval = Approval(root, source_policy=source_policy)
         result = dispatch(approval, run_id, request)
     except Exception as error:
         result = failure(error)
@@ -79,10 +80,10 @@ class _Collection:
         self._run_id = run_id
 
     @classmethod
-    def start(cls, root, demo, run_id, request, respond, store):
+    def start(cls, root, demo, run_id, request, respond, store, source_policy):
         context = multiprocessing.get_context('spawn')
         receiver, output = context.Pipe(duplex=False)
-        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output))
+        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy))
         try:
             process.start()
         except Exception:
@@ -161,7 +162,7 @@ class _RoundSession:
                      'reason': 'run_blocked' if blocked else 'collection_in_progress'})
         else:
             self._collection = _Collection.start(self._root, self._demo, self._run_id, request,
-                                                 respond, self._approval.store)
+                                                 respond, self._approval.store, self._approval.source_policy)
 
     def _drain_collection(self):
         if self._collection is not None:
@@ -235,13 +236,15 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
 
     server_path = socket_path(root)
     with round_lock(root):
+        source_policy = None
         if not demo:
             require_production_main()
+            source_policy = load_source_policy()
         if demo:
             from apps.oa.approvals.demo import create_demo
             approval = create_demo(root)
         else:
-            approval = Approval(root)
+            approval = Approval(root, source_policy=source_policy)
         started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 import json
 import signal
 from types import SimpleNamespace
@@ -9,6 +11,8 @@ import pytest
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import travel as travel_orders
+
+travel_source = travel_orders.TravelSource(POLICY)
 
 
 def expense_order(source='3', order_no='BL-SYNTHETIC'):
@@ -77,17 +81,17 @@ def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_tr
         wrong_url: {'text': 'SYNTHETIC-OTHER-REQUEST', 'expense_rows': native_attachment_rows()},
         target_url: {'text': 'SYNTHETIC-TRAVEL 暂无数据'},
     }
-    monkeypatch.setattr(travel_orders, '_oa_jump_url', lambda _: wrong_url)
-    monkeypatch.setattr(travel_orders, '_trip_url', lambda _: target_url)
+    monkeypatch.setattr(travel_orders.TravelSource, '_oa_jump_url', staticmethod(lambda _: wrong_url))
+    monkeypatch.setattr(travel_orders.TravelSource, '_trip_url', staticmethod(lambda _: target_url))
     candidates = []
-    read = travel_orders._read_trip_candidate_results
+    read = travel_source._read_trip_candidate_results
 
     def capture(*args, **kwargs):
         result = read(*args, **kwargs)
         candidates.extend(result)
         return result
 
-    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', capture)
+    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(capture))
     evidence = collect_travel(count='6')
     wrong, target = candidates
     assert len(wrong['attachment_inventory']) == 6
@@ -111,7 +115,7 @@ def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_tr
     monkeypatch.setattr(case_bundle.invoice_originals, 'resources', lambda *_, **__: [])
     with pytest.raises(case_bundle.CollectionFailure, match='^travel_attachment_resources_incomplete$') as caught:
         case_bundle.collect_case('12', oa_api=oa_api, configs=[config], allow_browser_download=True,
-                                 attachment_timeout_sec=1)
+                                 attachment_timeout_sec=1, source_policy=POLICY)
     assert caught.value.counts['trusted_source_sighting_count'] == 0
 
 
@@ -135,7 +139,7 @@ def test_hotel_discovery_keeps_native_expense_source_and_identity():
 def test_offline_hotel_uses_native_expense_read_and_keeps_declared_semantics(source):
     result = expense_result(sjly=source)
     context, calls = hotel_transport({'success': True, 'result': result})
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order(source)], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order(source)], timeout_sec=1)
 
     assert calls[0][0].endswith('/fcecf/fcc/pcapi/COMM_B2G_bldDetail')
     assert calls[0][1]['data'] == {'id': 'expense-1', 'ywdh': 'BL-SYNTHETIC', 'bxpch': 'batch-1'}
@@ -151,7 +155,7 @@ def test_offline_hotel_uses_native_expense_read_and_keeps_declared_semantics(sou
 
 def test_order_number_prefix_does_not_choose_hotel_interface():
     context, calls = hotel_transport({'success': True, 'result': {'ddbh': 'BL-SYNTHETIC'}})
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
     assert travel_orders.HOTEL_ORDER_DETAIL_PATH in calls[0][0]
     assert detail['detail_source'] == 'online_order'
 
@@ -159,7 +163,7 @@ def test_order_number_prefix_does_not_choose_hotel_interface():
 @pytest.mark.parametrize('key', ['id', 'ywdh', 'bxpch', 'sjly', 'cpbh', 'ddlx'])
 def test_offline_hotel_rejects_wrong_expense_identity(key):
     context, _ = hotel_transport({'success': True, 'result': expense_result(**{key: 'other'})})
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
     assert detail['reason'] == 'hotel_order_identity_mismatch'
     assert 'order_detail' not in detail
 
@@ -168,7 +172,7 @@ def test_offline_hotel_without_expense_identity_does_not_guess_or_request():
     context, calls = hotel_transport({'success': True, 'result': expense_result()})
     order = expense_order()
     del order['id']
-    detail, = travel_orders._read_hotel_order_details(context, [order], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [order], timeout_sec=1)
     assert detail['reason'] == 'hotel_expense_identity_missing'
     assert calls == []
 
@@ -186,7 +190,7 @@ def test_offline_hotel_without_expense_identity_does_not_guess_or_request():
 def test_hotel_failures_preserve_distinct_safe_diagnostics(status, payload, reason):
     payload['message'] = 'synthetic-secret-message'
     context, _ = hotel_transport(payload, status)
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
     assert detail['reason'] == reason
     assert detail['diagnostics']['http_status'] == status
     assert 'synthetic-secret-message' not in json.dumps(detail)
@@ -198,7 +202,7 @@ def test_hotel_transport_exception_keeps_type_without_request_secrets():
         raise TimeoutError('https://example.test/?token=synthetic-secret')
 
     context = SimpleNamespace(request=SimpleNamespace(post=post))
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
     assert detail['reason'] == 'hotel_order_detail_timeout'
     assert detail['diagnostics']['exception_type'] == 'TimeoutError'
     assert 'synthetic-secret' not in json.dumps(detail)
@@ -210,7 +214,7 @@ def test_offline_hotel_requires_native_success_flag(success):
     if success is not None:
         payload['success'] = success
     context, _ = hotel_transport(payload)
-    detail, = travel_orders._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
+    detail, = travel_source._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
     assert detail['reason'] == 'hotel_order_response_invalid'
     assert 'order_detail' not in detail
 
@@ -221,7 +225,7 @@ def test_hotel_details_preserve_complete_result_and_identity(address, identity):
               'xzqmc': '西湖区', 'ydrzrq': '2026-10-20', 'ydldrq': '2026-10-21', 'ddztmc': '已完成'}
     context = SimpleNamespace(request=SimpleNamespace(post=lambda *_a, **_k: SimpleNamespace(
         json=lambda: {'result': result})))
-    details = travel_orders._read_hotel_order_details(
+    details = travel_source._read_hotel_order_details(
         context, [{'order_no': 'hotel-1', 'expense_description': '合成住宿'}], timeout_sec=1)
     assert len(details) == 1
     if identity == 'hotel-1':
@@ -261,7 +265,7 @@ def browser_transport(monkeypatch):
             if failure == 'read':
                 raise RuntimeError('synthetic navigation failure')
             if self.outcome.get('expense_rows'):
-                response = SimpleNamespace(url=travel_orders.TRIP_BASE_URL + travel_orders.TRIP_EXPENSE_API_PATH,
+                response = SimpleNamespace(url=POLICY.travel_origin + travel_orders.TRIP_EXPENSE_API_PATH,
                     status=200, json=lambda: {'success': True, 'result': self.outcome['expense_rows']})
                 for handler in self.handlers:
                     handler(response)
@@ -336,15 +340,14 @@ def browser_transport(monkeypatch):
                 browser.disposed = True
 
     monkeypatch.setattr(playwright.sync_api, 'sync_playwright', Playwright)
-    monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: True)
-    monkeypatch.setattr(travel_orders, 'TRIP_BASE_URL', 'https://trip.example.test')
-    monkeypatch.setattr(remote, 'rpa_storage_state', lambda **_k: {'cookies': [], 'origins': []})
+    monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
+    monkeypatch.setattr(remote.DownloadTransfer, 'rpa_storage_state', staticmethod(lambda **_k: {'cookies': [], 'origins': []}))
     monkeypatch.setattr(remote, 'browser_visible_fallback_enabled', lambda: True)
     return transport
 
 
 def collect_travel(count='0'):
-    return travel_orders.collect_evidence(
+    return travel_source.collect_evidence(
         {'flow_key': 'travel_expense'},
         {'workflowMainTableInfo': {'requestRecords': [{'workflowRequestTableFields': [
             {'fieldName': 'lcbh', 'fieldShowName': '流程编号', 'fieldShowValue': 'SYNTHETIC-TRAVEL'},

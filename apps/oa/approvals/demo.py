@@ -67,4 +67,9 @@ def collect_demo(request_id, *, oa_api, configs, attachment_root, prepared_root,
 def create_demo(root):
     from apps.oa.approvals.operations import Approval
     api = DemoApi()
-    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api)
+    from apps.oa.approvals.source_policy import AttachmentOrigins, BrowserLocation, SourcePolicy
+    source_policy = SourcePolicy(
+        AttachmentOrigins('', frozenset()), '',
+        BrowserLocation(Path('/synthetic/chrome'), Path('/synthetic/profile'), 'Default', 'http://127.0.0.1:9223'),
+    )
+    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api, source_policy=source_policy)

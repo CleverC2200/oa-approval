@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 
 import json
 
@@ -106,7 +108,7 @@ def test_general_collection_reads_linked_invoice_parties(recorded_invoice_http):
     material = collect_case(
         "synthetic-request", oa_api=RecordedInvoiceApi(workflow),
         configs=[CONFIG], allow_browser_download=False,
-    )
+     source_policy=POLICY)
 
     assert material["authority_facts"] == [
         {
@@ -148,7 +150,7 @@ def test_document_attachment_reference_is_not_reported_as_absent(recorded_invoic
     material = collect_case(
         "synthetic-request", oa_api=RecordedInvoiceApi(workflow),
         configs=[CONFIG], allow_browser_download=False,
-    )
+     source_policy=POLICY)
     assert material["resources"] == []
     assert material["warnings"] == [{
         "code": "invoice_document_reference_unresolved",
@@ -173,7 +175,7 @@ def test_collection_exposes_seller_without_guessing_payment(config, recorded_inv
     material = collect_case(
         "synthetic-request", oa_api=RecordedInvoiceApi(workflow),
         configs=[config], allow_browser_download=False,
-    )
+     source_policy=POLICY)
     assert [fact["value"] for fact in material["authority_facts"]] == [
         "示例食品有限公司", "示例纸品有限公司",
     ]
@@ -187,7 +189,7 @@ def test_missing_or_different_seller_is_preserved_as_observed(seller, recorded_i
     material = collect_case(
         "synthetic-request", oa_api=RecordedInvoiceApi(workflow),
         configs=[CONFIG], allow_browser_download=False,
-    )
+     source_policy=POLICY)
     sellers = [fact["value"] for fact in material["authority_facts"] if fact["name"] == "发票销售方"]
     assert sellers == ([seller] if seller else [])
 
@@ -220,4 +222,4 @@ def test_invoice_read_failure_stops_collection_without_fabricated_parties():
         collect_case(
             "synthetic-request", oa_api=UnavailableApi(workflow), configs=[CONFIG],
             allow_browser_download=False,
-        )
+         source_policy=POLICY)

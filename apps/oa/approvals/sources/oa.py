@@ -147,12 +147,12 @@ class OaApi:
         enc_uid: str,
         *,
         app_id: str | None = None,
-        base_url: str | None = None,
+        base_url: str,
     ) -> None:
         self.token = token
         self.enc_uid = enc_uid
         self.app_id = app_id or auth.env("OA_APP_ID")
-        self.base_url = (base_url or auth.host()).rstrip("/")
+        self.base_url = base_url.rstrip("/")
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -313,5 +313,5 @@ class OaApi:
         return data if isinstance(data, dict) else {}, rows
 
 
-def build_api(config: dict[str, Any], *, oa_uid_override: str = "") -> OaApi:
-    return OaApi(*auth.credentials(oa_uid_override))
+def build_api(config: dict[str, Any], *, source_policy, oa_uid_override: str = "") -> OaApi:
+    return OaApi(*auth.credentials(oa_uid_override, base_url=source_policy.attachments.oa_origin), base_url=source_policy.attachments.oa_origin)

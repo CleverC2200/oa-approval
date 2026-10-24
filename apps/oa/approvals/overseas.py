@@ -60,7 +60,7 @@ def _invoice_field_names(fields: dict) -> dict:
 
 
 def snapshot(data: dict, resources: list[dict], *, writable: bool = True,
-             empty_fields: dict | None = None) -> dict:
+             empty_fields: dict | None = None, origins) -> dict:
     identity = flow.workflow_identity(data)
     _require(identity == {'workflow_id': WORKFLOW_ID, 'workflow_name': WORKFLOW_NAME}, 'invoice_workflow_mismatch')
     _require(bool(str(data.get('requestId') or '')) and bool(str(data.get('currentNodeId') or '')), 'invoice_identity_invalid')
@@ -74,7 +74,7 @@ def snapshot(data: dict, resources: list[dict], *, writable: bool = True,
     _require(isinstance(currency, str) and re.fullmatch('[A-Z]{3}', currency) is not None, 'invoice_currency_missing')
     tables = data.get('workflowDetailTableInfos')
     _require(isinstance(tables, list) and bool(tables), 'invoice_details_missing')
-    logical = evidence_packet.logical_attachment_resources(data, resources)
+    logical = evidence_packet.logical_attachment_resources(data, resources, origins=origins)
     declared = evidence_packet.extract_fields(data)
     rows, selected, seen_rows, seen_resources = [], [], set(), set()
     for ti, table in enumerate(tables):

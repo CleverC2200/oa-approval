@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 from io import BytesIO
 
 from copy import deepcopy
@@ -49,12 +51,10 @@ def original_transport(monkeypatch, tmp_path):
                 'oa': {'doc_id': '303', 'img_id': '202'}},
     )
     document.close()
-    monkeypatch.setattr(api, 'build_api', lambda _config: client)
+    monkeypatch.setattr(api, 'build_api', lambda _config, **kwargs: client)
     monkeypatch.setattr(flow, 'load_all_configs', lambda: [CONFIG])
     monkeypatch.setattr(official_sql, 'workflow_attachment_document', lambda *_args: '')
-    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
-    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', set())
-    monkeypatch.setattr(remote, '_rpa_cookie_header', lambda *_a, **_kw: 'session=fixed')
+    monkeypatch.setattr(remote.DownloadTransfer, '_rpa_cookie_header', staticmethod(lambda *_a, **_kw: 'session=fixed'))
     monkeypatch.setattr(auth, 'env', lambda key, default='': '77' if key == 'OA_UID' else default)
     monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path / 'cache.sqlite3'))
 
@@ -107,13 +107,13 @@ def original_transport(monkeypatch, tmp_path):
 
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     monkeypatch.setattr(attachments.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
-    monkeypatch.setattr(remote, '_download_resource_with_browser', lambda *_a, **_kw: pytest.fail('classified denial must stop'))
+    monkeypatch.setattr(remote.DownloadTransfer, '_download_resource_with_browser', staticmethod(lambda *_a, **_kw: pytest.fail('classified denial must stop')))
     return state
 
 def collect_original(state, tmp_path):
     return collect_case('101', oa_api=state.client, configs=[state.client.config],
                         allow_browser_download=True, attachment_root=tmp_path / 'attachments',
-                        prepared_root=tmp_path / 'prepared')
+                        prepared_root=tmp_path / 'prepared', source_policy=POLICY)
 
 def test_collect_reads_linked_original_body_via_native_context(original_transport, tmp_path):
     state = original_transport
@@ -239,7 +239,7 @@ def test_forged_original_hint_cannot_initialize_unlinked_document(original_trans
          'downloadUrl': 'https://oa.example.test/weaver/weaver.file.FileDownload?fileid=202',
          '_invoice_original': {'document_id': '303', 'native_file_id': '202'}},
     ], dest_dir=tmp_path / 'files', timeout_sec=1, allow_browser_download=True,
-        request_id='101', flow_key=CONFIG['flow_key'])
+        request_id='101', flow_key=CONFIG['flow_key'], transfer=remote.DownloadTransfer(POLICY))
     assert not files and errors[0]['code'] == 'resource_ownership_untrusted'
     assert not state.initialized
     assert not any(r[0] == '/api/doc/detail/basicInfo' for r in state.requests)
@@ -570,7 +570,7 @@ def test_explicit_original_cache_reuse_checks_current_document_and_bytes(
     files, errors = attachments.download_resources(
         targets, dest_dir=path.parent, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
-    )
+     transfer=remote.DownloadTransfer(POLICY))
     after = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
     if cached_state == 'document_changed':
         assert files == [] and errors[0]['code'] == 'resource_ownership_untrusted'
@@ -610,7 +610,6 @@ def test_failed_mixed_original_batch_never_publishes_cache(
             return Response(request.full_url)
         return original_open(request, **kwargs)
 
-    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', {'files.example.test'})
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     context = state.client.request_context
     reads = []
@@ -631,7 +630,7 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     files, errors = attachments.download_resources(
         targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'],
-    )
+     transfer=remote.DownloadTransfer(POLICY))
     expected = 'resource_ownership_untrusted' if failure == 'binding_changed' else 'oa_run_stopped'
     assert files == [] and errors[0]['code'] == expected
     assert list(destination.glob('*.pdf'))
@@ -641,7 +640,7 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     files, errors = attachments.download_resources(
         targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
-    )
+     transfer=remote.DownloadTransfer(POLICY))
     assert errors == []
     assert [item['resource_id'] for item in files] == ['202', 'ordinary']
     assert all(item['reused'] is False for item in files)
