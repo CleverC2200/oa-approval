@@ -5,7 +5,6 @@ import json
 from pathlib import Path
 import sqlite3
 
-from apps.oa.approvals import owner
 from apps.oa.approvals.client import emit, failure, send, socket_path, query
 from apps.oa.runtime.paths import RUNTIME_ROOT
 
@@ -64,6 +63,8 @@ def main(argv=None):
     root = args.root.expanduser().resolve()
     try:
         if args.operation in {'pending', 'start'}:
+            from apps.oa.approvals import owner
+
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
                              batch_size=args.batch_size, request_ids=args.request_id)

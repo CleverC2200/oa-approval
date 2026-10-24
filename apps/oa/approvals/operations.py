@@ -225,11 +225,12 @@ class Approval:
             submission = self.store.begin_submission(task_id,review["id"])
             try:
                 if plan is not None:
-                    read_api = self._api()
-                    write_api = self.writer if self.writer is not None else self.api
-                    if write_api is None:
+                    if self.api is None and self.writer is None:
                         from apps.oa.approvals.sources.overseas import build_api
-                        write_api = build_api()
+                        read_api = write_api = build_api()
+                    else:
+                        read_api = self._api()
+                        write_api = self.writer if self.writer is not None else self.api
                     result = submit_overseas(read_api,write_api,task["request_id"],material,plan)
                 else:
                     writer = self.writer

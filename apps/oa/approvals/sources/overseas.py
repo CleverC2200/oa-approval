@@ -55,5 +55,3 @@ class InvoiceApi(OaApi):
 
 def build_api() -> InvoiceApi:
     return InvoiceApi(*auth.credentials())
-
-
