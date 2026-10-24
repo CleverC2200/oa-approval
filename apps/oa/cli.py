@@ -38,7 +38,9 @@ def round_lock(root):
 
 def failure(error):
     code = str(error)
-    return {'status': 'failed', 'error': code if re.fullmatch('[a-z][a-z0-9_]*', code) else type(error).__name__}
+    return {'status': 'failed', 'error': code if re.fullmatch('[a-z][a-z0-9_]*', code) else type(error).__name__,
+            **({'diagnostics_file': error.diagnostics_file} if getattr(error, 'diagnostics_file', None) else {}),
+            **({'diagnostics_write_failed': True} if getattr(error, 'diagnostics_write_failed', False) else {})}
 
 
 def dispatch(approval, run_id, request):

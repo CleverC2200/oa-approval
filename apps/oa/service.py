@@ -151,6 +151,16 @@ class Approval:
                 "request_id":task["request_id"],"material_file":str(material_file),"rule_file":str(rule),"rules_root":str(directory / "rules"),"status":frozen_task["status"],
                 **({"reason":frozen_task["error"]} if frozen_task["status"] == "failed" else {})}
         except Exception as error:
+            from apps.oa_finance_preaudit.case_bundle import CollectionFailure
+
+            if isinstance(error, CollectionFailure):
+                report = directory / "collection-error.json"
+                try:
+                    report.write_text(encoded({"error": str(error), "counts": error.counts,
+                        "diagnostics": error.diagnostics}), encoding="utf-8")
+                    error.diagnostics_file = str(report)
+                except OSError:
+                    error.diagnostics_write_failed = True
             self.store.fail_collection(task["id"],type(error).__name__+":"+str(error)[:200])
             raise
 

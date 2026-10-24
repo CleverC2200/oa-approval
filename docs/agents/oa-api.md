@@ -2,6 +2,14 @@
 
 查询和修改 OA 请求时，使用[泛微 E9 官方后端接口文档](https://e-cloudstore.com/ec/api/applist/index.html#/)；在左侧搜索接口名称，展开参数示例。文档是技术依据，不授予真实业务写入权限。
 
+## 商旅住宿详情读取
+
+2026-10-24 对照商旅原生页面的 `commons/enum.js`、`bxdHome/modules/costDetails.js` 和两单只读响应确认，`sjly=3` 为 OCR 识别来源，属于线下费用明细。页面按 `sjly` 选择读取入口，编号前缀不构成类型依据。线上来源 `2` 或原生兼容的空来源使用酒店订单详情；非空且非 `2` 的来源使用 `POST /fcecf/fcc/pcapi/COMM_B2G_bldDetail`，JSON 参数 `id`、`ywdh`、`bxpch` 均取当前费用明细。该入口只读取补录单详情，原生页面在详情状态禁用修改；不调用复制、保存或提交接口。返回明细 ID、业务单号、批次、来源和产品类型须与本次目标一致。
+
+线下返回的 `xcrqs`、`xcrqz` 及城市、酒店名称和扩展地址属于费用申报内容。冻结事实的 `detail_source=offline_expense`、`date_semantics=declared` 和 `location_semantics=declared` 保留这一含义；读取成功不证明实际入住。完整读取后仍缺实际入住或可信门店证据，按[差旅规则](../../.agents/skills/oa-finance-preaudit/references/flows/travel-expense.md)记录业务缺口。接口读取失败继续作为技术失败，不改写成申请人缺材料。
+
+采集失败的脱敏诊断保存在本次材料目录的 `collection-error.json`，失败响应返回 `diagnostics_file`。诊断区分读取阶段、浏览器模式、异常类型及 HTTP/API 状态，不保存请求头、Cookie、签名链接、接口消息或响应全文。诊断落盘失败时仍登记原采集失败，并返回 `diagnostics_write_failed`。旧冻结材料、意见和失败记录保持原样。
+
 ## 流程附件的原生文档读取
 
 2026-10-17 通过原生页面请求和同一会话前后对照核实：部分附件直接下载返回权限拒绝，先读取 `GET /api/doc/detail/basicInfo`，携带 `docid`、`isrequest=1` 和 `requestid` 后，OA 会补齐当前用户的文档授权，原下载 URL 即可读取。该入口来自实际原生页面观测，不作为对外接口文档合同。

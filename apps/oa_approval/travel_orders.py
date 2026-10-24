@@ -37,6 +37,7 @@ TRIP_ATTACHMENT_API_PATHS = {
 }
 TRIP_EXPENSE_API_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
 HOTEL_ORDER_DETAIL_PATH = "/hotel/fcc/hotel/order/b2ghotelzcd/getOrderDetail"
+OFFLINE_EXPENSE_DETAIL_PATH = "/fcecf/fcc/pcapi/COMM_B2G_bldDetail"
 TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE = "travel_attachment_discovery_failed"
 DEFAULT_TRAVEL_BROWSER_CAPACITY = 2
 MAX_TRAVEL_BROWSER_CAPACITY = 8
@@ -201,7 +202,6 @@ def _attachment_resources_from_api_payload(payload: Any) -> List[Dict[str, Any]]
 
 def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
     orders: List[Dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
 
     def walk(value: Any) -> None:
         if isinstance(value, dict):
@@ -211,17 +211,11 @@ def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
                 str(value.get("cpbh") or "").strip() == "0300"
                 and str(value.get("ddlx") or "").strip() == "03001"
                 and order_no
-                and expense_description
             ):
-                identity = (order_no, expense_description)
-                if identity not in seen:
-                    seen.add(identity)
-                    orders.append(
-                        {
-                            "order_no": order_no,
-                            "expense_description": expense_description,
-                        }
-                    )
+                order = {"order_no": order_no, "expense_description": expense_description,
+                         **{key: str(value.get(key) or "").strip() for key in ("sjly", "id", "bxpch")}}
+                if order not in orders:
+                    orders.append(order)
             for child in value.values():
                 walk(child)
         elif isinstance(value, list):
@@ -235,6 +229,7 @@ def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
 def _capture_attachment_response(
     response: Any,
     resources: List[Dict[str, Any]],
+    diagnostics: List[Dict[str, Any]] | None = None,
 ) -> None:
     parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
     trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
@@ -242,7 +237,10 @@ def _capture_attachment_response(
         return
     try:
         discovered = _attachment_resources_from_api_payload(response.json())
-    except Exception:
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.append({"stage": "attachment_api", "reason": "attachment_response_invalid",
+                                "http_status": getattr(response, "status", 200), "exception_type": type(error).__name__})
         return
     seen_urls = {str(item.get("downloadUrl") or "") for item in resources}
     for item in discovered:
@@ -256,25 +254,26 @@ def _capture_attachment_response(
 def _capture_hotel_order_response(
     response: Any,
     orders: List[Dict[str, str]],
+    diagnostics: List[Dict[str, Any]] | None = None,
 ) -> None:
     parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
     trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
     if parsed.hostname != trip_host or parsed.path != TRIP_EXPENSE_API_PATH:
         return
     try:
-        discovered = _hotel_orders_from_api_payload(response.json())
-    except Exception:
+        payload = response.json()
+        discovered = _hotel_orders_from_api_payload(payload)
+        if isinstance(payload, dict) and payload.get("success") is False and diagnostics is not None:
+            diagnostics.append({"stage": "expense_api", "reason": "expense_api_failed",
+                                "http_status": getattr(response, "status", 200), "api_success": False})
+    except Exception as error:
+        if diagnostics is not None:
+            diagnostics.append({"stage": "expense_api", "reason": "expense_response_invalid",
+                                "http_status": getattr(response, "status", 200), "exception_type": type(error).__name__})
         return
-    seen = {
-        (str(item.get("order_no") or ""), str(item.get("expense_description") or ""))
-        for item in orders
-    }
     for item in discovered:
-        identity = (item["order_no"], item["expense_description"])
-        if identity in seen:
-            continue
-        seen.add(identity)
-        orders.append(item)
+        if item not in orders:
+            orders.append(item)
 
 
 def _read_hotel_order_details(
@@ -291,42 +290,92 @@ def _read_hotel_order_details(
         if not order_no:
             continue
         if remaining <= 0:
-            details.append({**order, "read_status": "failed", "reason": "hotel_order_detail_timeout"})
+            details.append({**order, "read_status": "failed", "reason": "hotel_order_detail_timeout",
+                            "diagnostics": {"stage": "hotel_detail"}})
+            continue
+        offline = str(order.get("sjly") or "").strip() not in {"", "2"}
+        detail = {**order, "detail_source": "offline_expense" if offline else "online_order"}
+        diagnostics: Dict[str, Any] = {"stage": "hotel_detail"}
+        if offline and not all(str(order.get(key) or "").strip() for key in ("id", "bxpch")):
+            details.append({**detail, "read_status": "failed", "reason": "hotel_expense_identity_missing",
+                            "diagnostics": diagnostics})
             continue
         query = urllib.parse.urlencode({"ddbh": order_no})
-        referer = (
-            f"{TRIP_BASE_URL}/fcc/hotel/order/zcd/"
-            f"hotelOrderDetail.html?{query}"
-        )
+        url = f"{TRIP_BASE_URL}{OFFLINE_EXPENSE_DETAIL_PATH}" if offline else f"{TRIP_BASE_URL}{HOTEL_ORDER_DETAIL_PATH}?{query}"
+        referer = (f"{TRIP_BASE_URL}/fcc/fcecf/bxdHome/index.html" if offline else
+                   f"{TRIP_BASE_URL}/fcc/hotel/order/zcd/hotelOrderDetail.html?{query}")
+        reason = ""
+        payload = None
         try:
             response = context.request.post(
-                f"{TRIP_BASE_URL}{HOTEL_ORDER_DETAIL_PATH}?{query}",
+                url,
+                **({"data": {"id": order["id"], "ywdh": order_no, "bxpch": order["bxpch"]}} if offline else {}),
                 headers={"referer": referer, "x-requested-with": "XMLHttpRequest"},
                 timeout=max(500, min(int(remaining * 1000), 5000)),
+                max_redirects=0,
             )
-            payload = response.json()
-        except Exception:
-            details.append({**order, "read_status": "failed", "reason": "hotel_order_detail_read_failed"})
-            continue
+            status = getattr(response, "status", 200)
+            diagnostics["http_status"] = status
+            if status in {401, 403}:
+                reason = "hotel_order_authentication_failed"
+            elif 300 <= status < 400:
+                reason = "hotel_order_redirected"
+            elif not 200 <= status < 300:
+                reason = "hotel_order_http_failed"
+            else:
+                reason = "hotel_order_response_invalid"
+                payload = response.json()
+                reason = ""
+        except Exception as error:
+            diagnostics["exception_type"] = type(error).__name__
+            reason = ("hotel_order_detail_timeout" if type(error).__name__ == "TimeoutError" else
+                      reason or "hotel_order_detail_read_failed")
         result = payload.get("result") if isinstance(payload, dict) else None
-        if (
-            not isinstance(result, dict)
-            or str(result.get("ddbh") or "").strip() != order_no
-        ):
-            details.append({**order, "read_status": "failed", "reason": "hotel_order_identity_mismatch"})
+        diagnostics["result_type"] = type(result).__name__
+        if isinstance(payload, dict):
+            if isinstance(payload.get("success"), bool):
+                diagnostics["api_success"] = payload["success"]
+            code = payload.get("code")
+            if isinstance(code, int) and not isinstance(code, bool):
+                diagnostics["api_code"] = code
+        identities = {"id": order.get("id"), "ywdh": order_no, "bxpch": order.get("bxpch"),
+                      "sjly": order.get("sjly"), "cpbh": "0300", "ddlx": "03001"} if offline else {"ddbh": order_no}
+        if not reason:
+            if not isinstance(payload, dict):
+                reason = "hotel_order_response_invalid"
+            elif payload.get("success") is False:
+                reason = "hotel_order_api_failed"
+            elif ("success" in payload and not isinstance(payload["success"], bool)) or (offline and payload.get("success") is not True):
+                reason = "hotel_order_response_invalid"
+            elif result is None:
+                reason = "hotel_order_result_missing"
+            elif not isinstance(result, dict):
+                reason = "hotel_order_result_invalid"
+            elif not all(str(result.get(key) or "").strip() for key in identities):
+                reason = "hotel_order_identity_missing"
+            elif any(str(result[key]).strip() != value for key, value in identities.items()):
+                reason = "hotel_order_identity_mismatch"
+        if reason:
+            if isinstance(result, dict):
+                diagnostics["identity_present"] = all(bool(result.get(key)) for key in identities)
+                diagnostics["identity_matches"] = all(str(result.get(key) or "").strip() == value for key, value in identities.items())
+            details.append({**detail, "read_status": "failed", "reason": reason, "diagnostics": diagnostics})
             continue
-        address = str(result.get("jddz") or "").strip()
+        extension = result.get("fkFymxKzbBean") if offline else result
+        address = str((extension if isinstance(extension, dict) else {}).get("jddz") or "").strip()
         details.append(
             {
-                **order,
+                **detail,
                 "read_status": "read",
                 "order_detail": result,
                 "hotel_name": str(result.get("jdmc") or "").strip(),
                 "hotel_address": address,
-                "city": str(result.get("jdcszwmc") or "").strip(),
-                "district": str(result.get("xzqmc") or "").strip(),
-                "check_in": str(result.get("ydrzrq") or "").strip(),
-                "check_out": str(result.get("ydldrq") or "").strip(),
+                "city": str(result.get("ddcs" if offline else "jdcszwmc") or "").strip(),
+                "district": str(result.get("ddcsqx" if offline else "xzqmc") or "").strip(),
+                "check_in": str(result.get("xcrqs" if offline else "ydrzrq") or "").strip(),
+                "check_out": str(result.get("xcrqz" if offline else "ydldrq") or "").strip(),
+                "date_semantics": "declared" if offline else "reserved",
+                **({"location_semantics": "declared"} if offline else {}),
             }
         )
     return details
@@ -613,8 +662,8 @@ def _read_browser_trip_candidates_uncoordinated(
 ) -> List[Dict[str, Any]]:
     try:
         from playwright.sync_api import sync_playwright
-    except Exception:
-        return []
+    except Exception as error:
+        return [_trip_read_failure("browser", "browser_unavailable", headless=headless, error=error)]
 
     results: List[Dict[str, Any]] = []
     try:
@@ -631,26 +680,35 @@ def _read_browser_trip_candidates_uncoordinated(
                 page = context.new_page()
                 response_resources: List[Dict[str, Any]] = []
                 hotel_orders: List[Dict[str, str]] = []
+                response_diagnostics: List[Dict[str, Any]] = []
 
                 def capture_response(response: Any) -> None:
-                    _capture_attachment_response(response, response_resources)
-                    _capture_hotel_order_response(response, hotel_orders)
+                    _capture_attachment_response(response, response_resources, response_diagnostics)
+                    _capture_hotel_order_response(response, hotel_orders, response_diagnostics)
 
                 page.on("response", capture_response)
                 deadline = time.monotonic() + max(1, timeout_sec)
                 for index, url in enumerate(urls):
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
+                        results.append(_trip_read_failure("browser", "browser_deadline", headless=headless))
                         break
                     budget = max(1.0, remaining / max(1, len(urls) - index))
                     candidate_deadline = min(deadline, time.monotonic() + budget)
+                    stage = "navigation"
                     try:
-                        page.goto(
+                        response = page.goto(
                             url,
                             wait_until="domcontentloaded",
                             timeout=max(1000, int(budget * 1000)),
                         )
+                        status = getattr(response, "status", 200)
+                        if status >= 400:
+                            results.append(_trip_read_failure("navigation", "login_required" if status in {401, 403} else "page_http_failed",
+                                headless=headless, http_status=status))
+                            continue
                         page.wait_for_timeout(200)
+                        stage = "page"
                         initial_text = _read_stable_body_text(
                             page,
                             timeout_sec=max(
@@ -664,6 +722,7 @@ def _read_browser_trip_candidates_uncoordinated(
                                 0.5, candidate_deadline - time.monotonic()
                             ),
                         )
+                        stage = "attachment_scan"
                         snapshot = _read_attachment_snapshot(
                             page,
                             url=url,
@@ -707,6 +766,9 @@ def _read_browser_trip_candidates_uncoordinated(
                             "attachment_scan_status": status,
                             "hotel_order_details": hotel_order_details,
                             "source_url": str(getattr(page, "url", "") or url),
+                            "browser": "headless" if headless else "visible",
+                            "diagnostics": [{**item, "browser": "headless" if headless else "visible"}
+                                            for item in response_diagnostics],
                         }
                         results.append(candidate)
                         if _trip_candidate_complete(
@@ -715,19 +777,23 @@ def _read_browser_trip_candidates_uncoordinated(
                             expected_resource_count=expected_resource_count,
                         ):
                             break
-                    except Exception:
-                        results.append(
-                            {
-                                "text": "",
-                                "resources": [],
-                                "attachment_scan_status": "read_failed",
-                                "source_url": url,
-                            }
-                        )
+                    except Exception as error:
+                        results.append(_trip_read_failure(stage, f"{stage}_failed", headless=headless, error=error))
 
-    except (_TravelReadDeadline, Exception):
-        return results
+    except (_TravelReadDeadline, Exception) as error:
+        results.append(_trip_read_failure("browser", "browser_deadline" if isinstance(error, _TravelReadDeadline) else "browser_failed",
+            headless=headless, error=error))
     return results
+
+
+def _trip_read_failure(stage: str, reason: str, *, headless: bool | None = None,
+                       error: BaseException | None = None, **facts: Any) -> Dict[str, Any]:
+    diagnostic = {"stage": stage, "reason": reason, **facts}
+    if headless is not None:
+        diagnostic["browser"] = "headless" if headless else "visible"
+    if error is not None:
+        diagnostic["exception_type"] = type(error).__name__
+    return {"text": "", "resources": [], "attachment_scan_status": "read_failed", "diagnostics": [diagnostic]}
 
 
 def _read_browser_trip_candidates(
@@ -755,8 +821,8 @@ def _read_browser_trip_candidates(
                 expected_marker=expected_marker,
                 expected_resource_count=expected_resource_count,
             )
-    except resource_slots.ResourceSlotTimeout:
-        return []
+    except resource_slots.ResourceSlotTimeout as error:
+        return [_trip_read_failure("browser", "browser_slot_timeout", headless=headless, error=error)]
 
 
 def _trip_candidate_complete(
@@ -766,6 +832,8 @@ def _trip_candidate_complete(
     expected_resource_count: int | None,
 ) -> bool:
     text = str(candidate.get("text") or "")
+    if not text or "登录" in text[:100] or _trip_page_pending(text):
+        return False
     if expected_marker and expected_marker not in text:
         return False
     resources = candidate.get("resources")
@@ -792,7 +860,7 @@ def _read_trip_candidate_results(
 ) -> List[Dict[str, Any]]:
     state = attachments.rpa_storage_state(timeout_sec=timeout_sec)
     if not state:
-        return []
+        return [_trip_read_failure("session", "session_unavailable")]
     headless_results = _read_browser_trip_candidates(
         urls,
         timeout_sec=timeout_sec,
@@ -870,7 +938,7 @@ def _hotel_detail_fields(
             seen.add(identity)
             facts.append({"name": "商旅住宿订单详情", "value": body, "raw_value": body,
                           "table": "travel_order", "row": len(facts), "subject_ref": subject_ref})
-            if not address:
+            if not address or detail.get("location_semantics") == "declared":
                 continue
             facts.append(
                 {
@@ -903,10 +971,13 @@ def collect_evidence(
         message: str,
         *,
         counts: Dict[str, int] | None = None,
+        diagnostics: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         error: Dict[str, Any] = {"code": code, "message": message}
         if counts:
             error["counts"] = dict(counts)
+        if diagnostics:
+            error["diagnostics"] = diagnostics
         result["errors"] = [error]
         return result
 
@@ -914,12 +985,14 @@ def collect_evidence(
         return fail(
             TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
             "本轮未授权读取商旅附件信息",
+            diagnostics=[{"stage": "authorization", "reason": "browser_read_not_authorized"}],
         )
     flow_mark = _flow_mark(fields)
     if not flow_mark:
         return fail(
             TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
             "缺少流程编号，无法读取商旅附件信息",
+            diagnostics=[{"stage": "identity", "reason": "flow_marker_missing"}],
         )
     if runtime_control.stop_requested():
         return fail(runtime_control.STOP_CODE, "运行已请求停止，商旅附件信息未继续读取")
@@ -927,6 +1000,7 @@ def collect_evidence(
         return fail(
             TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
             "商旅附件读取浏览器不可用",
+            diagnostics=[{"stage": "browser", "reason": "browser_unavailable"}],
         )
 
     candidates: List[str] = []
@@ -951,18 +1025,34 @@ def collect_evidence(
             allow_visible_fallback=True,
             expected_resource_count=expected_resource_count,
         )
-    except Exception:
-        candidate_results = []
+    except Exception as error:
+        candidate_results = [_trip_read_failure("browser", "browser_failed", error=error)]
 
     valid_results: List[Dict[str, Any]] = []
     merged_resources: List[Dict[str, Any]] = []
     seen_resource_ids: set[str] = set()
+    diagnostics: List[Dict[str, Any]] = []
     for candidate in candidate_results:
         if not isinstance(candidate, dict):
             continue
         text = str(candidate.get("text") or "")
+        diagnostics.extend(candidate.get("diagnostics") or [])
         if not text or "登录" in text[:100] or flow_mark not in text:
+            if text:
+                diagnostics.append({"stage": "page", "reason": "login_required" if "登录" in text[:100] else "flow_marker_mismatch",
+                    **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
+            elif not candidate.get("diagnostics"):
+                diagnostics.append({"stage": "page", "reason": "page_empty",
+                    **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
             continue
+        if _trip_page_pending(text):
+            diagnostics.append({"stage": "page", "reason": "page_pending",
+                **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
+            continue
+        status = str(candidate.get("attachment_scan_status") or "")
+        if status not in {"empty", "resources_found"}:
+            diagnostics.append({"stage": "attachment_scan", "reason": "attachment_tab_unavailable" if status == "tab_unavailable" else "attachment_scan_unstable",
+                **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
         valid_results.append(candidate)
         for item in candidate.get("resources", []):
             if not isinstance(item, dict):
@@ -1017,4 +1107,5 @@ def collect_evidence(
     return fail(
         TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
         "商旅附件页面或附件信息页签未能完成稳定读取",
+        diagnostics=diagnostics or [{"stage": "browser", "reason": "no_candidate_result"}],
     )
