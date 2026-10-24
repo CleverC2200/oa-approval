@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -7,7 +9,19 @@ import sqlite3
 from typing import Any
 
 
-DEFAULT_DB_PATH = Path('runtime') / 'attachment-cache.sqlite3'
+from . import runtime_control
+
+
+_runtime_root = ContextVar('attachment_cache_runtime_root', default=None)
+
+
+@contextmanager
+def runtime_root(root: Path):
+    token = _runtime_root.set(Path(root).expanduser().resolve())
+    try:
+        yield
+    finally:
+        _runtime_root.reset(token)
 
 
 def is_enabled() -> bool:
@@ -16,7 +30,7 @@ def is_enabled() -> bool:
 
 def db_path() -> Path:
     configured = os.environ.get('OA_FINANCE_PREAUDIT_CACHE_DB', '').strip()
-    return Path(configured).expanduser() if configured else DEFAULT_DB_PATH
+    return Path(configured).expanduser() if configured else (_runtime_root.get() or runtime_control.RUNTIME_ROOT) / 'attachment-cache.sqlite3'
 
 
 def _connect() -> sqlite3.Connection:

@@ -7,6 +7,7 @@ from threading import Event
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+RUNTIME_ROOT = PROJECT_ROOT / 'runtime'
 STOP_CODE = 'oa_run_stopped'
 _stopped = Event()
 

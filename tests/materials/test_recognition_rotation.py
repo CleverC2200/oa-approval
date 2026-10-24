@@ -118,7 +118,7 @@ def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_
                     'manifest': [], 'structured_contents': [
                         {'resource_id': 'a:invoice.pdf', 'parent_resource_id': 'a', 'text': '原件 25.00'}]}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     baseline = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'baseline')
@@ -300,7 +300,7 @@ def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
                     'path': str(jpeg_source), 'content_sha256': hashlib.sha256(original).hexdigest()}],
                     'manifest': [], 'structured_contents': []}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     monkeypatch.setattr(attachment_recognition, 'MAX_FILE_BYTES', byte_limit)
@@ -488,7 +488,7 @@ def test_selected_observations_keep_sources_and_bind_to_real_attachments(
     _, material, _ = selected_material
     api = FakeOA()
     app = Approval(tmp_path / 'approval', api=api, configs=[], collector=lambda *args, **kwargs: material)
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     report = attachment_recognition.recognize(
         material_file=Path(task['material_file']), resource_id='b', prompt='读取原始金额',
         output_dir=tmp_path / 'selected')

@@ -16,7 +16,10 @@ import subprocess
 import sys
 
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[2] / 'runtime'
+from apps.oa_approval.runtime_control import RUNTIME_ROOT
+
+
+DEFAULT_ROOT = RUNTIME_ROOT
 
 
 def emit(value):
@@ -264,9 +267,9 @@ def main(argv=None):
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
     collect.add_argument('--workflow-key')
-    collect.add_argument('--agent-id')
-    collect.add_argument('--expected-task-id', type=int)
-    collect.add_argument('--agent-workflow-key')
+    collect.add_argument('--agent-id', required=True)
+    collect.add_argument('--expected-task-id', type=int, required=True)
+    collect.add_argument('--agent-workflow-key', required=True)
     submit = commands.add_parser('submit', help='保存意见，显式确认时提交并回查')
     submit.add_argument('--task-id', type=int, required=True)
     submit.add_argument('--opinion-file', type=Path)

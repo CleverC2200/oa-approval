@@ -15,6 +15,7 @@ from apps.oa_approval import (
     invoice_buyers,
     invoice_originals,
     official_sql,
+    runtime_control,
     travel_orders,
 )
 
@@ -583,7 +584,7 @@ def collect_case(
     prepared = {"images": [], "structured_contents": [], "manifest": []}
     if logical_resources:
         attachment_dir = Path(
-            attachment_root or Path("runtime/finance_preaudit_attachments")
+            attachment_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_attachments"
         ).expanduser().resolve()
         download_targets = []
         for resource, descriptor in zip(logical_resources, descriptors):
@@ -635,7 +636,7 @@ def collect_case(
             compact_pdf=config.get("flow_key") == "general_expense",
             compact_spreadsheet=config.get("flow_key") == "tpm_small_marketing_fee",
             out_dir=Path(
-                prepared_root or Path("runtime/finance_preaudit_prepared")
+                prepared_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_prepared"
             ).expanduser().resolve()
             / str(request_id),
         )

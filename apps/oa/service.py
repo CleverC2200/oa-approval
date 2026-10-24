@@ -9,7 +9,7 @@ from pathlib import Path
 import shutil
 from uuid import uuid4
 
-from apps.oa_approval import writer_outcomes
+from apps.oa_approval import attachment_cache, writer_outcomes
 
 from .store import Store, encoded, occurrence_key
 
@@ -90,7 +90,7 @@ def freeze_rules(workflow_key, directory):
 
 class Approval:
     def __init__(self, root, *, api=None, configs=None, collector=None, writer=None):
-        self.root = Path(root).absolute()
+        self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.root / "approval.sqlite3")
         self.api, self.configs, self.collector, self.writer = api, configs, collector, writer
@@ -139,21 +139,22 @@ class Approval:
         directory = self.root / "materials" / str(task["id"]) / uuid4().hex
         directory.mkdir(parents=True)
         try:
-            if task["workflow_key"] == "overseas_invoice":
-                from . import overseas
-                material = overseas.collect(self._api(),task["request_id"],directory)
-            else:
-                if self.collector is None:
-                    from apps.oa_finance_preaudit.case_bundle import collect_case
-                    self.collector = collect_case
-                material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
-                    allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared")
-                if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
-                    raise ValueError("material_identity_changed")
-                if task["workflow_key"] == "tpm_small_marketing_fee":
-                    from apps.oa_finance_preaudit import tpm_price_reference
-                    if tpm_price_reference.applies(material):
-                        material["tpm_price_reference"] = tpm_price_reference.snapshot(self.root / tpm_price_reference.REFERENCE_PATH)
+            with attachment_cache.runtime_root(self.root):
+                if task["workflow_key"] == "overseas_invoice":
+                    from . import overseas
+                    material = overseas.collect(self._api(),task["request_id"],directory)
+                else:
+                    if self.collector is None:
+                        from apps.oa_finance_preaudit.case_bundle import collect_case
+                        self.collector = collect_case
+                    material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
+                        allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared")
+                    if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
+                        raise ValueError("material_identity_changed")
+                    if task["workflow_key"] == "tpm_small_marketing_fee":
+                        from apps.oa_finance_preaudit import tpm_price_reference
+                        if tpm_price_reference.applies(material):
+                            material["tpm_price_reference"] = tpm_price_reference.snapshot(self.root / tpm_price_reference.REFERENCE_PATH)
             rule = freeze_rules(task["workflow_key"],directory / "rules")
             material_file = directory / "material.json"
             material_file.write_text(encoded(material),encoding="utf-8")

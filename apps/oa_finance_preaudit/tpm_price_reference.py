@@ -11,6 +11,7 @@ import re
 from openpyxl import load_workbook
 
 from apps import json_artifact
+from apps.oa_approval import runtime_control
 
 
 SUBJECT = "终端建设费-终端形象制作费"
@@ -128,7 +129,7 @@ def evidence_gap(item: dict, material: dict) -> str | None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import the approved reference sheet into local runtime data.")
     parser.add_argument("source", type=Path)
-    parser.add_argument("--runtime-root", type=Path, default=Path("runtime"))
+    parser.add_argument("--runtime-root", type=Path, default=runtime_control.RUNTIME_ROOT)
     args = parser.parse_args()
     catalog = read_workbook(args.source)
     destination = args.runtime_root / REFERENCE_PATH

@@ -290,7 +290,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
 
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
     app = Approval(tmp_path / 'runtime', api=Api(), configs=[])
-    task = app.collect(app.pending()['run_id'])
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
         reading(part['resource_id'], part['sha256'], '10.10', 'INV-' + part['resource_id'])
