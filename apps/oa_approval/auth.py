@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import errno
+import hashlib
 import json
 import os
 import stat
@@ -15,7 +16,14 @@ from apps.oa_approval import safe_http
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 TIMEOUT = 30
-REQUIRED_AUTH_ENV = ("OA_BASE_URL", "OA_APP_ID", "OA_APP_SECRET", "OA_UID")
+REQUIRED_AUTH_ENV = ("OA_BASE_URL", "OA_APP_ID", "OA_APP_SECRET", "OA_APP_PUBLIC_KEY", "OA_UID")
+
+
+class AuthFailure(RuntimeError):
+    def __init__(self, code: str, diagnostic: dict) -> None:
+        super().__init__(code)
+        self.counts = {}
+        self.diagnostics = [diagnostic]
 
 
 def stable_env_file() -> Path:
@@ -150,14 +158,6 @@ def _openssl_encrypt(pub_pem_path: str, plaintext: str) -> str:
     return base64.b64encode(proc.stdout).decode("utf-8")
 
 
-def _client_public_key(tmp_dir: str) -> str:
-    private_key = os.path.join(tmp_dir, "client.pem")
-    public_key = os.path.join(tmp_dir, "client_pub.pem")
-    subprocess.run(["openssl", "genrsa", "-out", private_key, "2048"], check=True, capture_output=True)
-    subprocess.run(["openssl", "rsa", "-in", private_key, "-pubout", "-out", public_key], check=True, capture_output=True)
-    return "".join(line.strip() for line in Path(public_key).read_text(encoding="utf-8").splitlines() if line.strip())
-
-
 def _pem_file_from_b64(spk_b64: str, tmp_dir: str) -> str:
     path = os.path.join(tmp_dir, "server.pem")
     chunks = [spk_b64[i : i + 64] for i in range(0, len(spk_b64), 64)]
@@ -168,29 +168,55 @@ def _pem_file_from_b64(spk_b64: str, tmp_dir: str) -> str:
     return path
 
 
-def server_public_key() -> str:
-    app_id, _secret = auth_pair()
-    with tempfile.TemporaryDirectory(prefix="oa_auth_") as tmp:
-        resp = _http_post(f"{host()}/api/ec/dev/auth/regist", {"appid": app_id, "cpk": _client_public_key(tmp)})
-    spk = resp.get("spk") or (resp.get("data") or {}).get("spk")
-    if not spk:
-        raise RuntimeError(f"regist 未返回 spk: {resp}")
-    return str(spk)
-
-
-def get_token() -> str:
-    app_id, secret = auth_pair()
-    with tempfile.TemporaryDirectory(prefix="oa_token_") as tmp:
-        encrypted_secret = _openssl_encrypt(_pem_file_from_b64(server_public_key(), tmp), secret)
-    resp = _http_post(f"{host()}/api/ec/dev/auth/applytoken", {"appid": app_id, "secret": encrypted_secret})
-    token = resp.get("token") or (resp.get("data") or {}).get("token")
-    if not token:
-        raise RuntimeError(f"applytoken 未返回 token: {resp}")
-    return str(token)
-
-
-def encrypt_user_id(oa_uid: str) -> str:
-    if not str(oa_uid or "").strip():
-        raise RuntimeError("缺少 OA_UID 或 --oa-uid")
-    with tempfile.TemporaryDirectory(prefix="oa_uid_") as tmp:
-        return _openssl_encrypt(_pem_file_from_b64(server_public_key(), tmp), str(oa_uid).strip())
+def credentials(oa_uid: str = "") -> tuple[str, str]:
+    try:
+        base_url = host()
+        app_id, secret = auth_pair()
+        user_id = str(oa_uid or env("OA_UID")).strip()
+        spk = env("OA_APP_PUBLIC_KEY")
+        public_key = base64.b64decode(spk, validate=True)
+        if not public_key or not user_id:
+            raise ValueError("registration_material_missing")
+    except Exception as error:
+        raise AuthFailure("oa_auth_configuration_invalid", {
+            "stage": "configuration", "reason": "registration_material_invalid",
+            "exception_type": type(error).__name__,
+        }) from None
+    fingerprint = hashlib.sha256(public_key).hexdigest()
+    stage = "secret_encrypt"
+    try:
+        with tempfile.TemporaryDirectory(prefix="oa_auth_") as tmp:
+            key_file = _pem_file_from_b64(spk, tmp)
+            encrypted_secret = _openssl_encrypt(key_file, secret)
+            stage = "userid_encrypt"
+            encrypted_user_id = _openssl_encrypt(key_file, user_id)
+    except Exception as error:
+        raise AuthFailure("oa_auth_encryption_failed", {
+            "stage": stage, "reason": "encryption_failed", "key_fingerprint": fingerprint,
+            "exception_type": type(error).__name__,
+        }) from None
+    try:
+        response = _http_post(f"{base_url}/api/ec/dev/auth/applytoken", {"appid": app_id, "secret": encrypted_secret})
+    except Exception as error:
+        diagnostic = {"stage": "applytoken", "reason": "transport_failed",
+                      "key_fingerprint": fingerprint, "exception_type": type(error).__name__}
+        status = getattr(error, "code", None)
+        if isinstance(status, int) and not isinstance(status, bool):
+            diagnostic["http_status"] = status
+        raise AuthFailure("oa_auth_applytoken_failed", diagnostic) from None
+    token = None
+    diagnostic = {"stage": "applytoken", "reason": "response_invalid", "key_fingerprint": fingerprint}
+    if isinstance(response, dict):
+        code = response.get("code")
+        if isinstance(code, int) and not isinstance(code, bool):
+            diagnostic["api_code"] = code
+        rejected = response.get("status") is False or (code is not None and code not in (0, "0"))
+        data = response.get("data")
+        token = response.get("token") or (data.get("token") if isinstance(data, dict) else None)
+        diagnostic["reason"] = ("secret_decryption_failed" if "secret解密失败" in str(response.get("msg") or "")
+                                else "token_rejected" if rejected else "token_missing")
+        if rejected:
+            token = None
+    if not isinstance(token, str) or not token.strip():
+        raise AuthFailure("oa_auth_applytoken_failed", diagnostic)
+    return token, encrypted_user_id

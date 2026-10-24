@@ -49,7 +49,7 @@ class InvoiceApi(OaApi):
 
 
 def build_api() -> InvoiceApi:
-    return InvoiceApi(auth.get_token(), auth.encrypt_user_id(auth.env('OA_UID')))
+    return InvoiceApi(*auth.credentials())
 
 
 def download_fresh(resources: list[dict], directory: Path, *, request_id: str) -> list[dict]:

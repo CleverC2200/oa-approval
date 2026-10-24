@@ -93,6 +93,4 @@ class FrozenWriterApi(OaApi):
 
 
 def build_writer_api() -> FrozenWriterApi:
-    token = auth.get_token()
-    oa_uid = auth.env("OA_UID")
-    return FrozenWriterApi(token, auth.encrypt_user_id(oa_uid))
+    return FrozenWriterApi(*auth.credentials())
