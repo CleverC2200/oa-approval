@@ -10,6 +10,11 @@ icon = "tool"
 command = "bash .codex/python.sh setup"
 
 [[actions]]
+name = "合成 CLI 演示"
+icon = "test"
+command = "bash .codex/python.sh -m pytest -q tests/serial/test_cli.py::test_demo_runs_collect_preview_submit_and_postcheck"
+
+[[actions]]
 name = "本地离线测试"
 icon = "test"
 command = "bash .codex/python.sh -m pytest -q"
