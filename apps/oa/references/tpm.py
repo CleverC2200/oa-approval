@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from decimal import Decimal, InvalidOperation
 import hashlib
 from io import BytesIO
@@ -8,10 +7,8 @@ import json
 from pathlib import Path
 import re
 
-from openpyxl import load_workbook
 
 from apps import json_artifact
-from apps.oa.runtime import control as runtime_control
 
 
 SUBJECT = "终端建设费-终端形象制作费"
@@ -70,8 +67,14 @@ def validate(catalog: object) -> dict:
 
 
 def read_workbook(path: Path) -> dict:
+    from openpyxl import load_workbook
+    from openpyxl.utils.exceptions import InvalidFileException
+
     raw = Path(path).read_bytes()
-    workbook = load_workbook(BytesIO(raw), read_only=True, data_only=True)
+    try:
+        workbook = load_workbook(BytesIO(raw), read_only=True, data_only=True)
+    except InvalidFileException:
+        raise ValueError('tpm_price_reference_invalid') from None
     try:
         sheet = workbook[SHEET]
         if tuple(sheet.cell(1, col).value for col in range(3, 9)) != HEADERS:
@@ -126,17 +129,9 @@ def evidence_gap(item: dict, material: dict) -> str | None:
     return None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Import the approved reference sheet into local runtime data.")
-    parser.add_argument("source", type=Path)
-    parser.add_argument("--runtime-root", type=Path, default=runtime_control.RUNTIME_ROOT)
-    args = parser.parse_args()
-    catalog = read_workbook(args.source)
-    destination = args.runtime_root / REFERENCE_PATH
+def import_workbook(source: Path, *, root: Path) -> dict:
+    catalog = read_workbook(source)
+    destination = Path(root).expanduser().resolve() / REFERENCE_PATH
     destination.parent.mkdir(parents=True, exist_ok=True)
     json_artifact.write_json_atomic(destination, catalog, indent=2)
-    print(json.dumps({"status": "imported", "row_count": len(catalog["rows"]), "path": str(destination)}, ensure_ascii=False))
-
-
-if __name__ == "__main__":
-    main()
+    return {"status": "imported", "row_count": len(catalog["rows"]), "path": str(destination)}

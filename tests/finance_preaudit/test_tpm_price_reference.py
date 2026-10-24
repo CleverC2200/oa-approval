@@ -38,6 +38,38 @@ def _material(subject: str = "终端建设费-终端形象制作费") -> dict:
     return {"declared_fields": [{"code": "yskm", "path": "detail[0].row[0].field[2]", "read_status": "present", "value": subject}]}
 
 
+def test_reference_cli_imports_into_selected_root(tmp_path, capsys):
+    from apps.oa.references.cli import main
+
+    expected = _catalog(tmp_path)
+    destination = tmp_path / 'selected-root'
+    assert main(['--root', str(destination), 'import-tpm', str(tmp_path / 'source.xlsx')]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result == {'status': 'imported', 'row_count': 1,
+                      'path': str(destination / prices.REFERENCE_PATH)}
+    assert prices.snapshot(Path(result['path']))['rows'] == expected['rows']
+
+
+@pytest.mark.parametrize('filename', ['broken.xlsx', 'unsupported.txt', 'malformed-xml.xlsx'])
+def test_reference_cli_bad_input_has_stable_error_without_catalog(tmp_path, capsys, filename):
+    from apps.oa.references.cli import main
+
+    source = tmp_path / filename
+    if filename == 'malformed-xml.xlsx':
+        from zipfile import ZipFile
+
+        with ZipFile(source, 'w') as archive:
+            archive.writestr('[Content_Types].xml', '<broken')
+    else:
+        source.write_text('invalid workbook')
+    destination = tmp_path / 'selected-root'
+    assert main(['--root', str(destination), 'import-tpm', str(source)]) == 1
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == {'status': 'failed', 'error_code': 'tpm_price_reference_import_failed'}
+    assert 'Traceback' not in captured.err
+    assert not destination.exists()
+
+
 def test_import_preserves_price_column_units_and_source(tmp_path: Path) -> None:
     catalog = _catalog(tmp_path)
     assert catalog["rows"] == [{"source_row": 2, "material_code": "001", "name": "测试板", "specification": "5mm", "unit": "㎡", "guide_price": "20"}]

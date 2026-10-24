@@ -11,6 +11,7 @@ from PIL import Image
 import pytest
 
 from apps.oa.materials import recognize as attachment_recognition
+from apps.oa.materials import cli as materials_cli
 
 
 @pytest.fixture
@@ -91,7 +92,7 @@ def test_cli_accepts_clockwise_rotation(tmp_path, requests, capsys):
     source = tmp_path / 'page.png'
     Image.new('RGB', (3, 2), (7, 0, 0)).save(source)
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize', 
         '--file', str(source), '--rotate', '270', '--output-dir', str(tmp_path / 'report')])
 
     assert code == 0
@@ -173,7 +174,7 @@ def test_cli_rejects_multiframe_rotation_and_keeps_default_reading(
     assert base64.b64decode(url.split(',', 1)[1]) == original
     requests.clear()
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize', 
         '--file', str(multiframe_source), '--rotate', str(rotate), '--output-dir', str(tmp_path / 'report')])
 
     assert code == 1
@@ -516,7 +517,7 @@ def test_selected_observations_keep_sources_and_bind_to_real_attachments(
 def test_cli_returns_selected_page_observations(tmp_path, requests, selected_material, capsys):
     material_file, _, _ = selected_material
 
-    code = attachment_recognition.main([
+    code = materials_cli.main(['recognize', 
         '--material-file', str(material_file), '--resource-id', 'b', '--page', '2',
         '--region', '1', '0', '4', '2', '--rotate', '90', '--output-dir', str(tmp_path / 'selected')])
 

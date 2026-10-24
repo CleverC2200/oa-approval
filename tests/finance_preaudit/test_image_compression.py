@@ -15,7 +15,7 @@ from apps.oa.materials.compress import compress_image
 
 
 def invoke(source, destination, *options):
-    result = subprocess.run([sys.executable, '-B', '-m', 'apps.oa.materials.compress',
+    result = subprocess.run([sys.executable, '-B', '-m', 'apps.oa.materials', 'compress',
         '--file', str(source), '--output-dir', str(destination), *options],
         capture_output=True, text=True, timeout=70)
     return result, json.loads(result.stdout)

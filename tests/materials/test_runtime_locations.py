@@ -130,8 +130,6 @@ def test_collection_preserves_cache_overrides_and_restores_context(
 
 
 def test_reference_import_default_is_anchored_outside_working_directory(tmp_path, monkeypatch):
-    import sys
-
     from openpyxl import Workbook
 
     from apps.oa.runtime import control as runtime_control
@@ -150,9 +148,9 @@ def test_reference_import_default_is_anchored_outside_working_directory(tmp_path
     cwd = tmp_path / 'unrelated-cwd'
     cwd.mkdir()
     monkeypatch.chdir(cwd)
-    monkeypatch.setattr(sys, 'argv', ['tpm-price-reference', str(source)])
+    from apps.oa.references import cli
 
-    tpm_price_reference.main()
+    cli.main(['import-tpm', str(source)])
 
     catalog = tpm_price_reference.snapshot(runtime / 'reference' / 'tpm-price-reference.json')
     assert catalog['status'] == 'ready'
