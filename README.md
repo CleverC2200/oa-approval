@@ -4,9 +4,29 @@
 
 代码仓库为 [oa-approval](https://github.com/CleverC2200/oa-approval)。正式主线、开发分支及审批启动前的核对要求统一见[项目约定](AGENTS.md)，提交材料边界见[安全约定](SECURITY.md)。
 
+## 离线开发入口
+
+首次使用时在 Codex Local environment 执行一次“准备共享 Python 依赖” Action，按 `requirements-dev.lock` 准备依赖；已有兼容共享环境的工作树直接复用。
+
+先运行完整的合成 CLI 演示，或选择 Codex 的“合成 CLI 演示” Action：
+
+```bash
+bash .codex/python.sh -m pytest -q tests/serial/test_cli.py::test_demo_runs_collect_preview_submit_and_postcheck
+```
+
+它通过公开 CLI 完成合成待办、带保护领取、材料准备、识别来源保存、预览、fake 提交及回查，并结束进程。SQLite 和文件使用真实实现，OA 与模型传输使用明确 fake，不访问真实服务；测试通过不代表业务验收。修改入口与首选测试见[开发导航](CONTRIBUTING.md#按任务定位)。
+
+需要逐步操作时，在开发分支启动交互演示：
+
+```bash
+bash .codex/python.sh -m apps.oa.cli --root runtime/demo pending --demo
+```
+
+保持前台进程的标准输入打开，在另一终端使用相同 `--root runtime/demo`，按下文参数领取和预览，身份与流程取本次输出。演示意见标明是合成内容。结束时向原进程输入 `{"operation":"finish"}`，或关闭标准输入；等待进程退出，socket 和 `approval.lock` 随本轮关闭。再次启动会新建一轮，不续跑旧审核对话。
+
 ## 启动与操作
 
-运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。首次使用时在 Codex Local environment 执行一次“准备共享 Python 依赖” Action，按 `requirements-dev.lock` 准备依赖；其余工作树直接复用。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。定时任务使用同一入口，demo 仍可在开发分支离线执行：
+运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。定时任务使用同一入口：
 
 ```bash
 bash .codex/python.sh -m apps.oa.cli --root runtime pending --batch-size 50 --limit 50
@@ -23,25 +43,25 @@ bash .codex/python.sh -m apps.oa.cli --root runtime pending --batch-size 50 --li
 ```bash
 bash .codex/python.sh -m apps.oa.cli --root runtime collect \
   --agent-id "$OA_REVIEW_AGENT_ID" \
-  --expected-task-id 1 --agent-workflow-key travel_expense
-bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id 1 --opinion-file /absolute/path/opinion.txt
-bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id 1 --opinion-file /absolute/path/opinion.txt --confirm-write YES
-bash .codex/python.sh -m apps.oa.cli --root runtime postcheck --task-id 1
+  --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"
+bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
+bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt --confirm-write YES
+bash .codex/python.sh -m apps.oa.cli --root runtime postcheck --task-id "$OA_TASK_ID"
 ```
 
 不传 `--confirm-write YES` 时只保存预览结果，不写 OA。海外回填使用 `--recognition-file`，真实提交还需独立的 `--allow-overseas YES`。实际授权以当前任务为准。
 
-`OA_REVIEW_AGENT_ID` 填原生工具返回的实际 Agent 标识，预期任务和类型按本轮实际值填写。审核技术失败登记使用本地 `fail` 入口：
+`OA_REVIEW_AGENT_ID` 使用原生工具返回的实际 Agent 标识，`OA_TASK_ID` 和 `OA_WORKFLOW_KEY` 使用本轮下一张任务的实际值；领取返回后再次核对身份。三个保护参数必需，省略或错配时拒绝领取。审核技术失败登记使用本地 `fail` 入口：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime fail --task-id 1 --reason 'native reviewer failed: concrete reason'
+bash .codex/python.sh -m apps.oa.cli --root runtime fail --task-id "$OA_TASK_ID" --reason 'native reviewer failed: concrete reason'
 ```
 
 `fail` 由运行中的服务校验，只接受当前轮 `preparing`/`reviewing` 任务，不访问 OA。使用条件及批次收尾见下文 Skill。
 
 socket `collect` 由唯一采集工作进程执行，原客户端等待最终结果时，服务主循环仍可受理其他单据的提交和回查。完整等待及补位方式见[Skill](.agents/skills/oa-finance-preaudit/SKILL.md#准备审核与补位)。
 
-原 `pending` 进程也接受逐行 JSON，例如 `{"operation":"collect","agent_id":"<actual-native-agent-id>","expected_task_id":1,"agent_workflow_key":"travel_expense"}`，标准输入操作保持顺序执行。`{"operation":"finish"}` 或标准输入 EOF 先等待当前采集结束并落盘，再关闭本轮、socket 和 `approval.lock`。在 Agent 工具中启动长期入口时保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`，再用原 `write_stdin` 发送请求；不启动第二个队列进程。
+原 `pending` 进程也接受逐行 JSON，`collect` 请求必须包含实际 `agent_id`、数值 `expected_task_id` 和 `agent_workflow_key`，标准输入操作保持顺序执行。`{"operation":"finish"}` 或标准输入 EOF 先等待当前采集结束并落盘，再关闭本轮、socket 和 `approval.lock`。在 Agent 工具中启动长期入口时保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`，再用原 `write_stdin` 发送请求；不启动第二个队列进程。
 
 ## Agent 分工
 
@@ -68,13 +88,7 @@ bash .codex/python.sh -m apps.oa_finance_preaudit.tpm_price_reference /absolute/
 - [OA 接口合同](docs/agents/oa-api.md)
 - [海外回填规则](docs/overseas-invoice.md)
 
-## 本地演示与验证
-
-```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime/demo pending --demo
-```
-
-该模式使用合成 OA 待办及合成 PDF，真实执行本地 SQLite、附件准备、队列和提交代码；OA 提交由本地 fake 完成，不访问网络、不调用模型。可在另一终端使用相同 `--root` 调用 `collect`、`submit`，或直接向原进程输入 JSON。演示意见须标明是合成测试内容，不能作为真实业务验收。
+## 校验与验收
 
 ```bash
 bash .codex/python.sh check

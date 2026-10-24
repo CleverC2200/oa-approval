@@ -6,7 +6,6 @@ import sys
 import pytest
 
 from apps.oa import cli
-from tests.serial.test_quality_entry import repository
 
 
 @pytest.mark.parametrize('name,content,kind', [

@@ -17,7 +17,7 @@ import pytest
 from apps.oa_approval import api, attachments, auth, flow, invoice_buyers, official_sql
 
 from apps.oa_finance_preaudit.case_bundle import collect_case
-from tests.finance_preaudit.test_invoice_evidence_coverage import CONFIG, NUMBER, InvoiceApi
+from tests.finance_preaudit.invoice_fakes import CONFIG, NUMBER, InvoiceApi
 
 @pytest.fixture
 def original_transport(monkeypatch, tmp_path):
