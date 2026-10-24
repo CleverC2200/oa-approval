@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+import os
+from apps.oa.approvals.sources.invoices import _positive_id
 import hashlib
 from collections.abc import Callable
 from pathlib import Path
@@ -24,38 +26,8 @@ _FINANCE_FLOWS = {
 }
 
 
-def _positive_id(value: object) -> str:
-    text = str(value) if type(value) in (str, int) else ''
-    return text if re.fullmatch(r'[1-9][0-9]*', text) else ''
-
-
-def original_source(data: dict, invoice_number: str) -> dict:
-    record_id = _positive_id(data.get('id'))
-    if not record_id or str(data.get('number')) != invoice_number:
-        return {}
-    if data.get('fid') is not None and str(data['fid']) != record_id:
-        return {}
-    active = [item for item in data.get('flist') or [] if isinstance(item, dict)
-              and item.get('del', 0) in (0, '0') and item.get('type') == 'pdf']
-    if len(active) != 1:
-        return {}
-    cloud_file = _positive_id(active[0].get('id'))
-    modified = data.get('modify_info')
-    native = data.get('oa')
-    if not cloud_file or not isinstance(modified, dict) or not isinstance(native, dict):
-        return {}
-    doc_id = _positive_id(native.get('doc_id'))
-    file_id = _positive_id(native.get('img_id'))
-    if (not doc_id or not file_id or str(modified.get('pdf')) != cloud_file
-            or str(modified.get('furl')) != cloud_file):
-        return {}
-    return {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
-            'document_id': doc_id, 'native_file_id': file_id}
-
-
-def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict) -> list[dict]:
-    from apps.oa.approvals.collection import downloads as attachments
-
+def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict, *, base_url: str) -> list[dict]:
+    
     invoices = evidence.get('invoices') or []
     originals = [(invoice, file) for invoice in invoices for file in invoice.get('files', [])
                  if file.get('original_source')]
@@ -78,7 +50,7 @@ def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict
             raise RuntimeError('resource_ownership_untrusted')
         result.append({
             'id': file_id, 'name': f'invoice-original-{file_id}.pdf',
-            'downloadUrl': attachments.OA_HOST + '/weaver/weaver.file.FileDownload?fileid=' + file_id,
+            'downloadUrl': base_url + '/weaver/weaver.file.FileDownload?fileid=' + file_id,
             '_trusted_source_field_path': paths[0],
             '_trusted_source_field_name': '关联发票原件',
             '_invoice_original': dict(source),
@@ -103,7 +75,8 @@ def _download_contexts(request_id: str):
         include_evidence=True,
     )
     evidence = result.get('invoice_evidence') or {}
-    trusted = resources(request_id, workflow, workflow_key, evidence)
+    trusted = resources(request_id, workflow, workflow_key, evidence,
+                        base_url=getattr(client, "base_url", os.environ.get("OA_BASE_URL", "")))
     candidates = {item['id']: [] for item in trusted}
     for invoice in evidence.get('invoices', []):
         for file in invoice['files']:
@@ -134,11 +107,11 @@ class DownloadBatch:
         return self.client, source, data_id
 
     def _checked_resource(self, resource: dict) -> dict:
-        from apps.oa.approvals.collection.downloads import normalize_download_url
+        from apps.oa.materials.resources import normalize_download_url
 
         url = normalize_download_url(
             str(resource.get('downloadUrl') or resource.get('download_url') or ''),
-            oa_host=self.base_url,
+            oa_host=self.base_url, allowed_hosts={urllib.parse.urlsplit(self.base_url).hostname},
         )
         return dict(resource, downloadUrl=url, _ephemeral_cookie_header=self._cookie_header(
             urllib.parse.urlsplit(self.base_url).hostname or ''))
@@ -199,7 +172,7 @@ class DownloadBatch:
             return None, runtime_control.STOP_CODE
         path, retry_error = self._native_read(checked, url, dest_dir=dest_dir, timeout_sec=timeout_sec)
         if path is None and retry_error.startswith('attachment_access_denied'):
-            from apps.oa.approvals.collection.downloads import deterministic_filename
+            from apps.oa.materials.resources import deterministic_filename
 
             path, cloud_error = self._download_cloud(
                 checked, dest=dest_dir / deterministic_filename(resource), timeout_sec=timeout_sec,

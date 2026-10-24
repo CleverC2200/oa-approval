@@ -127,6 +127,7 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     import fitz
     from openpyxl import Workbook
     from apps.oa.approvals.collection import downloads as attachments
+    from apps.oa.materials import archives
     from apps.oa.materials import formats as attachment_extractors
 
     pdf = tmp_path / 'invoice.pdf'
@@ -144,7 +145,7 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     archive = tmp_path / 'files.zip'
     with zipfile.ZipFile(archive, 'w') as output:
         output.write(pdf, 'receipts/invoice.pdf')
-    children, error = attachments.extract_zip_safely(
+    children, error = archives.extract_zip_safely(
         archive, dest_dir=tmp_path / 'downloads', resource={'id': 'archive', 'name': 'files.zip'})
     assert error == ''
     images, manifest, contents = attachment_extractors.prepare_materials([
@@ -243,7 +244,7 @@ with fitz.open() as document:
 
 def test_zip_member_cannot_escape_output_directory(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
-    from apps.oa.approvals.collection.downloads import extract_zip_safely
+    from apps.oa.materials.archives import extract_zip_safely
 
     archive = tmp_path / 'unsafe.zip'
     with zipfile.ZipFile(archive, 'w') as output:

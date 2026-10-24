@@ -1,5 +1,6 @@
 import pytest
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals import forms as evidence_packet
 
 
@@ -52,13 +53,13 @@ def test_rejected_field_link_cannot_assign_log_attachment_to_detail():
     "https://oa.example.com:444/news/download.do?fileid=101&filename=a.xlsx",
 ])
 def test_raw_origin_is_validated_before_native_url_conversion(monkeypatch, url):
-    monkeypatch.setattr(attachments, 'OA_HOST', 'https://oa.example.com')
+    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.com')
     data = workflow(f"<a href='{url}'>bad</a>")
     assert evidence_packet.logical_attachment_resources(data, []) == []
 
 
 def test_same_origin_absolute_link_and_fileid_only_are_kept(monkeypatch):
-    monkeypatch.setattr(attachments, 'OA_HOST', 'https://oa.example.com')
+    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.com')
     data = workflow("<a href='HTTPS://oa.example.com/news/download.do?fileid=101'>attachment</a>")
     rows = evidence_packet.logical_attachment_resources(data, [])
     assert rows[0]['downloadUrl'] == '/weaver/weaver.file.FileDownload?fileid=101'
