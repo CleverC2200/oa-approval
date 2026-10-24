@@ -254,6 +254,19 @@ def test_multiple_file_records_keep_partial_body_coverage(original_transport, tm
     from apps.oa.approvals.collection.invoice_originals import body_coverage
     assert body_coverage(invoice, material['resources'], material['prepared']) == 'partial_read'
 
+
+def test_invoice_body_rejects_parent_only_prepared_pages():
+    from apps.oa.materials.prepared import read_prepared
+    from apps.oa.approvals.collection.invoice_originals import bind_prepared_bodies
+
+    evidence = {'invoices': [{'files': [{'original_source': {'native_file_id': 'receipt'}}]}]}
+    prepared = read_prepared({
+        'manifest': [{'resource_id': 'receipt', 'status': 'pdf_rendered', 'page_count': 1, 'image_count': 1}],
+        'images': [{'resource_id': 'child', 'parent_resource_id': 'receipt', 'source_content_sha256': 'a' * 64}],
+    })
+    with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+        bind_prepared_bodies(evidence, [{'resource_id': 'receipt', 'media_type': 'application/pdf'}], prepared)
+
 @pytest.mark.parametrize('mapping', ['missing_document', 'multiple_pdfs', 'deleted_pdf'])
 def test_unmapped_original_keeps_authoritative_invoice_without_guessing_download(original_transport, tmp_path, mapping):
     state = original_transport

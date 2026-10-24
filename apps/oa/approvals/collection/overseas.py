@@ -30,11 +30,12 @@ def collect(api, request_id, directory):
     attachments = [{"resource_id":str(item["resource_id"]),"name":item.get("name") or Path(item["path"]).name,
         "path":str(Path(item["path"]).absolute()),"sha256":hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest(),"pages":item["pages"]} for item in files]
     business._require({item["resource_id"] for item in attachments} == selected_ids,"invoice_download_incomplete")
-    images,manifest,structured = attachment_extractors.prepare_materials(files,out_dir=directory / "prepared") if files else ([],[],[])
+    prepared = (attachment_extractors.prepare_materials(files,out_dir=directory / "prepared")
+        if files else attachment_extractors.PreparedMaterial({"images":[],"manifest":[],"structured_contents":[]}))
     return {"kind":"overseas_invoice_material","request_id":request_id,"workflow_key":"overseas_invoice",
         "snapshot":snap,"workflow":data,"attachments":attachments,
         "resources":[{**item,"local_readonly_path":item["path"]} for item in attachments],
-        "prepared":{"images":images,"manifest":manifest,"structured_contents":structured}}
+        "prepared":prepared.to_record()}
 
 
 def download_fresh(resources: list[dict], directory: Path, *, request_id: str) -> list[dict]:

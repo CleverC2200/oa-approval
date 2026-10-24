@@ -582,7 +582,7 @@ def collect_case(
         _resource_descriptor(item, request_id=str(request_id))
         for item in logical_resources
     ]
-    prepared = {"images": [], "structured_contents": [], "manifest": []}
+    prepared_result = attachment_extractors.PreparedMaterial({"images": [], "structured_contents": [], "manifest": []})
     if logical_resources:
         attachment_dir = Path(
             attachment_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_attachments"
@@ -632,7 +632,7 @@ def collect_case(
             ):
                 bound_item["parent_resource_id"] = descriptor["resource_id"]
             bound_downloads.append(bound_item)
-        images, manifest, structured_contents = attachment_extractors.prepare_materials(
+        prepared_result = attachment_extractors.prepare_materials(
             bound_downloads,
             compact_pdf=config.get("flow_key") == "general_expense",
             compact_spreadsheet=config.get("flow_key") == "tpm_small_marketing_fee",
@@ -641,13 +641,8 @@ def collect_case(
             ).expanduser().resolve()
             / str(request_id),
         )
-        prepared = {
-            "images": images,
-            "structured_contents": structured_contents,
-            "manifest": manifest,
-        }
-
-    invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared)
+    prepared = prepared_result.to_record()
+    invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared_result)
     warnings = [
         {
             "code": "invoice_document_reference_unresolved",

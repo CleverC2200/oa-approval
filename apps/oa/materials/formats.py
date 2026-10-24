@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
 import os
@@ -42,25 +43,10 @@ MAX_OFD_XML_FILES = 30
 MAX_OFD_XML_BYTES = 5_000_000
 
 
-SUCCESSFUL_PREPARATION_STATUSES = {
-    "archive_extracted",
-    "docx_read",
-    "image",
-    "image_converted",
-    "legacy_spreadsheet_read",
-    "ofd_invoice_read",
-    "pdf_rendered",
-    "spreadsheet_read",
-    "video_rendered",
-    "xml_invoice_read",
-}
-SKIPPED_PREPARATION_STATUSES = {"video_skipped"}
-
-
-def skipped_video_sources(manifest: list[dict]) -> list[dict]:
-    return [source for entry in manifest for source in (
-        [entry] if entry.get("status") == "video_skipped" else entry.get("skipped_videos", [])
-    )]
+from apps.oa.materials.prepared import (
+    PreparedMaterial, SUCCESSFUL_PREPARATION_STATUSES, SKIPPED_PREPARATION_STATUSES,
+    skipped_video_sources,
+)
 
 
 def safe_name(value: str, fallback: str) -> str:
@@ -291,7 +277,7 @@ def _amount_value(value: Any) -> float | None:
     return amount
 
 
-def spreadsheet_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, Any]:
+def spreadsheet_fact(path: Path) -> Dict[str, Any]:
     import openpyxl
 
     with path.open("rb") as source:
@@ -329,8 +315,6 @@ def spreadsheet_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, An
             workbook.close()
     summary = f"Excel工作簿，包含工作表：{', '.join(sheet_summaries)}。"
     return {
-        "resource_id": resource_id,
-        "name": name,
         "document_type": "spreadsheet",
         "summary": summary,
         "key_text": key_text,
@@ -347,9 +331,7 @@ def _is_ooxml_spreadsheet(path: Path) -> bool:
     return True
 
 
-def legacy_spreadsheet_fact(
-    path: Path, *, resource_id: str, name: str
-) -> Dict[str, Any]:
+def legacy_spreadsheet_fact(path: Path) -> Dict[str, Any]:
     try:
         import xlrd
     except Exception as err:
@@ -377,8 +359,6 @@ def legacy_spreadsheet_fact(
             release()
     summary = f"旧Excel工作簿，包含工作表：{', '.join(sheet_summaries)}。"
     return {
-        "resource_id": resource_id,
-        "name": name,
         "document_type": "legacy_spreadsheet",
         "summary": summary,
         "key_text": key_text,
@@ -428,12 +408,11 @@ def docx_fact_and_images(
     path: Path,
     *,
     resource_id: str,
-    name: str,
     out_dir: Path,
-) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+) -> tuple[dict, list[_ImageDraft]]:
     if not zipfile.is_zipfile(path):
         raise ValueError("DOCX不是有效ZIP容器")
-    images: List[Dict[str, Any]] = []
+    images: list[_ImageDraft] = []
     with zipfile.ZipFile(path) as archive:
         try:
             document_info = archive.getinfo("word/document.xml")
@@ -461,16 +440,11 @@ def docx_fact_and_images(
                 out_dir / f"{safe_name(resource_id, path.stem)}_docx_{index}{suffix}"
             )
             material_store.write_bytes(target, archive.read(item), source={'resource_id': resource_id, 'kind': 'docx_media'})
-            images.append(
-                {
-                    "path": target,
-                    "resource_id": f"{resource_id}::docx_media::{index}",
-                    "parent_resource_id": resource_id,
-                    "name": f"{name}::{item.filename}",
-                    "kind": "docx_image",
-                    "content_sha256": _file_sha256(target),
-                }
-            )
+            images.append(_ImageDraft(
+                {'path': target, 'kind': 'docx_image', 'content_sha256': _file_sha256(target)},
+                resource_suffix=f'::docx_media::{index}', name_suffix=f'::{item.filename}',
+                parent_is_resource=True,
+            ))
     if not texts and not images:
         raise ValueError("DOCX未抽取到正文、表格或内嵌图片")
     summary = f"Word文档，读取到{len(texts)}条正文/表格文本"
@@ -478,8 +452,6 @@ def docx_fact_and_images(
         summary += f"和{len(images)}张内嵌图片"
     return (
         {
-            "resource_id": resource_id,
-            "name": name,
             "document_type": "word_document",
             "summary": summary + "。",
             "key_text": texts,
@@ -522,7 +494,7 @@ def _invoice_key_text(label_values: List[Tuple[str, str]]) -> List[str]:
     return [f"{label}: {value}" for label, value in label_values if value]
 
 
-def xml_invoice_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, Any]:
+def xml_invoice_fact(path: Path) -> Dict[str, Any]:
     root = ET.parse(path).getroot()
     values = _xml_values(root)
     invoice_id = _first_xml_value(values, "EIid", "InvoiceNumber", "InvoiceNo")
@@ -572,8 +544,6 @@ def xml_invoice_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, An
     if total_with_tax:
         summary_parts.append(f"价税合计{total_with_tax}")
     return {
-        "resource_id": resource_id,
-        "name": name,
         "document_type": "电子发票XML",
         "summary": "，".join(summary_parts) + "。",
         "amounts": amounts,
@@ -684,7 +654,7 @@ def _ofd_key_text_tail(texts: List[str], existing: List[str]) -> List[str]:
     return out
 
 
-def ofd_invoice_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, Any]:
+def ofd_invoice_fact(path: Path) -> Dict[str, Any]:
     texts = _ofd_texts(path)
     if not texts:
         raise ValueError("OFD未抽取到文本内容")
@@ -719,8 +689,6 @@ def ofd_invoice_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, An
             "金额候选" + "、".join(f"{amount:.2f}" for amount in amounts[:6])
         )
     return {
-        "resource_id": resource_id,
-        "name": name,
         "document_type": "电子发票OFD",
         "summary": "，".join(summary_parts) + "。",
         "amounts": amounts,
@@ -728,391 +696,238 @@ def ofd_invoice_fact(path: Path, *, resource_id: str, name: str) -> Dict[str, An
     }
 
 
-def _prepare_one_attachment(
-    item: Dict[str, Any],
-    *,
-    out_dir: Path,
-    images: List[Dict[str, Any]],
-    manifest: List[Dict[str, Any]],
-    structured_contents: List[Dict[str, Any]],
-    compact_pdf: bool = False,
-    compact_spreadsheet: bool = False,
-) -> None:
-    path = Path(str(item.get("path") or "")).expanduser()
-    resource_id = str(item.get("resource_id") or "")
-    name = str(item.get("name") or path.name)
-    parent_resource_id = str(item.get("parent_resource_id") or "")
-    image_count_before = len(images)
-    structured_count_before = len(structured_contents)
-    if not path.exists():
-        manifest.append(
-            {
-                "resource_id": resource_id,
-                "name": name,
-                "status": "missing_file",
-                "path": str(path),
-            }
-        )
-        return
+@dataclass(frozen=True, slots=True)
+class _ImageDraft:
+    record: dict
+    resource_suffix: str = ''
+    name_suffix: str = ''
+    parent_is_resource: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class _ConversionSource:
+    path: Path
+    resource_id: str
+    parent_resource_id: str
+    source_content_sha256: str
+    suffix: str
+
+    def image(self, path: Path, kind: str, content_sha256: str, **metadata) -> _ImageDraft:
+        return _ImageDraft({'path': path, 'kind': kind, 'source_content_sha256': self.source_content_sha256,
+                            'content_sha256': content_sha256, **metadata})
+
+    def result(self, status: str, *, images=(), structured=(), manifest_parent=False, **metadata) -> _ConversionResult:
+        return _ConversionResult(tuple(images), ({'status': status, **metadata},),
+                                 tuple(structured), manifest_parent)
+
+
+@dataclass(frozen=True, slots=True)
+class _ResourceResult:
+    images: tuple[dict, ...]
+    manifest: tuple[dict, ...]
+    structured_contents: tuple[dict, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class _ConversionResult:
+    images: tuple[_ImageDraft, ...]
+    manifest: tuple[dict, ...]
+    structured_contents: tuple[dict, ...]
+    manifest_parent: bool = False
+
+    def bind(self, item: dict) -> _ResourceResult:
+        resource_id = str(item.get('resource_id') or '')
+        name = str(item.get('name') or Path(str(item.get('path') or '')).name)
+        parent = str(item.get('parent_resource_id') or '')
+
+        def bind_record(record, *, resource_suffix='', name_suffix='', parent_id=''):
+            return {'resource_id': resource_id + resource_suffix, 'name': name + name_suffix,
+                    **({'parent_resource_id': parent_id} if parent_id else {}), **deepcopy(record)}
+
+        return _ResourceResult(
+            tuple(bind_record(image.record, resource_suffix=image.resource_suffix, name_suffix=image.name_suffix,
+                              parent_id=parent or (resource_id if image.parent_is_resource else ''))
+                  for image in self.images),
+            tuple(bind_record(row, parent_id=parent if self.manifest_parent else '') for row in self.manifest),
+            tuple(bind_record(row, parent_id=parent) for row in self.structured_contents))
+
+
+def _conversion_source(item: dict) -> _ConversionSource:
+    path = Path(str(item.get('path') or '')).expanduser()
     suffix = path.suffix.lower()
-    if not suffix:
+    if path.exists() and not suffix:
         try:
             with Image.open(path) as image:
-                suffix = {
-                    "PNG": ".png", "JPEG": ".jpg", "WEBP": ".webp",
-                    "BMP": ".bmp", "TIFF": ".tiff",
-                }.get(image.format, "")
+                suffix = {'PNG': '.png', 'JPEG': '.jpg', 'WEBP': '.webp',
+                          'BMP': '.bmp', 'TIFF': '.tiff'}.get(image.format, '')
                 image.verify()
             if suffix:
                 with Image.open(path) as image:
                     image.load()
         except (OSError, ValueError, SyntaxError):
-            suffix = ""
-    source_content_sha256 = _file_sha256(path)
-    base = {
-        "path": path,
-        "resource_id": resource_id,
-        "name": name,
-        "source_content_sha256": source_content_sha256,
-    }
-    if parent_resource_id:
-        base["parent_resource_id"] = parent_resource_id
+            suffix = ''
+    return _ConversionSource(path, str(item.get('resource_id') or ''),
+        str(item.get('parent_resource_id') or ''),
+        _file_sha256(path) if path.exists() else '', suffix)
+
+
+def _convert_image(source: _ConversionSource, *, out_dir: Path) -> _ConversionResult:
+    image_path, status = source.path, 'image'
+    digest = source.source_content_sha256
+    if _is_heic_content(source.path):
+        image_path = _convert_heic_to_png(source.path, out_dir=out_dir,
+                                        resource_id=source.resource_id or source.path.stem)
+        status, digest = 'image_converted', _file_sha256(image_path)
+    elif source.parent_resource_id or not source.path.suffix:
+        image_path = out_dir / f'{safe_name(source.resource_id, source.path.stem)}_archive{source.suffix}'
+        with source.path.open('rb') as original:
+            material_store.copy_stream(image_path, original, expected_bytes=source.path.stat().st_size,
+                source={'resource_id': source.resource_id, 'kind': 'image_copy'})
+    return source.result(status, images=[source.image(image_path, 'image', digest)], image_count=1)
+
+
+def _convert_pages(source: _ConversionSource, *, out_dir: Path, compact: bool) -> _ConversionResult:
+    renderer = render_office_document if source.suffix in {'.doc', '.pptx'} else render_pdf
+    try:
+        rendered, page_count, page_texts = renderer(
+            source.path, out_dir=out_dir, resource_id=source.resource_id or source.path.stem,
+            **({'compact': True} if compact and source.suffix in PDF_EXTS else {}))
+    except subprocess.TimeoutExpired:
+        if source.suffix == '.pptx':
+            raise RuntimeError('attachment_content_incomplete') from None
+        raise RuntimeError('legacy_doc_conversion_timeout') from None
+    except RuntimeError:
+        if source.suffix == '.pptx':
+            raise RuntimeError('attachment_content_incomplete') from None
+        raise
+    structured = [{'document_type': 'pdf_text',
+                   'summary': f'PDF文档，读取到{len(page_texts)}页文本。',
+                   'key_text': page_texts, 'source_content_sha256': source.source_content_sha256}] if page_texts else []
+    return source.result('pdf_rendered',
+        images=[source.image(path, kind, digest) for path, kind, digest in rendered],
+        structured=structured, image_count=len(rendered), page_count=page_count)
+
+
+def _convert_spreadsheet(source: _ConversionSource, *, out_dir: Path, compact: bool) -> _ConversionResult:
+    from apps.oa.materials import spreadsheet_images
+
+    images = []
+    try:
+        extracted = spreadsheet_images.extract(source.path, out_dir,
+                    safe_name(source.resource_id, source.path.stem), compact=compact)
+        fact = spreadsheet_fact(source.path)
+        for number, (path, cell) in enumerate(extracted, 1):
+            images.append(source.image(path, f'spreadsheet_image_{number}', _file_sha256(path),
+                                       spreadsheet_cell=cell))
+            fact['key_text'].append(f'{cell}: embedded image {number}')
+    except Exception as error:
+        return source.result('spreadsheet_failed', images=images, path=str(source.path),
+                             error_message=str(error)[:500])
+    return source.result('spreadsheet_read', images=images, structured=[fact],
+                         image_count=len(images), path=str(source.path))
+
+
+def _convert_structured(source: _ConversionSource, *, reader, success: str, failure: str) -> _ConversionResult:
+    try:
+        fact = reader(source.path)
+    except Exception as error:
+        return source.result(failure, path=str(source.path), error_message=str(error)[:500])
+    return source.result(success, structured=[fact], path=str(source.path))
+
+
+def _convert_docx(source: _ConversionSource, *, out_dir: Path) -> _ConversionResult:
+    try:
+        fact, images = docx_fact_and_images(source.path, resource_id=source.resource_id, out_dir=out_dir)
+    except Exception as error:
+        return source.result('docx_failed', path=str(source.path), error_message=str(error)[:500])
+    return source.result('docx_read', images=images, structured=[fact],
+                         path=str(source.path), image_count=len(images))
+
+
+_STRUCTURED_READERS = {
+    '.xls': (legacy_spreadsheet_fact, 'legacy_spreadsheet_read', 'legacy_spreadsheet_unsupported'),
+    '.xml': (xml_invoice_fact, 'xml_invoice_read', 'xml_failed'),
+    '.ofd': (ofd_invoice_fact, 'ofd_invoice_read', 'ofd_failed'),
+}
+
+
+def _convert_attachment(source: _ConversionSource, *, out_dir: Path,
+                        compact_pdf: bool, compact_spreadsheet: bool) -> _ConversionResult:
+    if not source.path.exists():
+        return source.result('missing_file', path=str(source.path))
+    suffix = source.suffix
     if suffix in PREPARABLE_IMAGE_EXTS:
-        image_path = path
-        image_status = "image"
-        image_content_sha256 = source_content_sha256
-        if _is_heic_content(path):
-            image_path = _convert_heic_to_png(
-                path,
-                out_dir=out_dir,
-                resource_id=resource_id or path.stem,
-            )
-            image_status = "image_converted"
-            image_content_sha256 = _file_sha256(image_path)
-        elif parent_resource_id or not path.suffix:
-            image_path = out_dir / (
-                f"{safe_name(resource_id, path.stem)}_archive{suffix}"
-            )
-            with path.open('rb') as source:
-                material_store.copy_stream(image_path, source, expected_bytes=path.stat().st_size,
-                                           source={'resource_id': resource_id, 'kind': 'image_copy'})
-        images.append(
-            {
-                **base,
-                "path": image_path,
-                "kind": "image",
-                "content_sha256": image_content_sha256,
-            }
-        )
-        manifest.append(
-            {
-                "resource_id": resource_id,
-                "name": name,
-                "status": image_status,
-                "image_count": 1,
-            }
-        )
-    elif suffix in VIDEO_EXTS:
-        manifest.append({
-            "resource_id": resource_id, "name": name,
-            **({"parent_resource_id": parent_resource_id} if parent_resource_id else {}),
-            "source_content_sha256": source_content_sha256,
-            "status": "video_skipped", "body_read_status": "not_read", "image_count": 0,
-            "reason": "video_content_excluded",
-        })
-    elif suffix in PDF_EXTS or suffix in {".doc", ".pptx"}:
-        renderer = render_office_document if suffix in {".doc", ".pptx"} else render_pdf
-        try:
-            rendered, page_count, page_texts = renderer(
-                path, out_dir=out_dir, resource_id=resource_id or path.stem,
-                **({"compact": True} if compact_pdf and suffix in PDF_EXTS else {}),
-            )
-        except subprocess.TimeoutExpired:
-            if suffix == ".pptx":
-                raise RuntimeError("attachment_content_incomplete") from None
-            raise RuntimeError("legacy_doc_conversion_timeout") from None
-        except RuntimeError:
-            if suffix == ".pptx":
-                raise RuntimeError("attachment_content_incomplete") from None
-            raise
-        for rendered_path, kind, page_sha256 in rendered:
-            images.append(
-                {
-                    **base,
-                    "path": rendered_path,
-                    "kind": kind,
-                    "content_sha256": page_sha256,
-                }
-            )
-        if page_texts:
-            structured_contents.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "document_type": "pdf_text",
-                    "summary": f"PDF文档，读取到{len(page_texts)}页文本。",
-                    "key_text": page_texts,
-                    "source_content_sha256": source_content_sha256,
-                }
-            )
-        manifest.append(
-            {
-                "resource_id": resource_id,
-                "name": name,
-                "status": "pdf_rendered",
-                "image_count": len(rendered),
-                "page_count": page_count,
-            }
-        )
-    elif suffix in SPREADSHEET_EXTS or (
-        suffix in LEGACY_SPREADSHEET_EXTS and _is_ooxml_spreadsheet(path)
-    ):
-        try:
-            from apps.oa.materials import spreadsheet_images
-
-            extracted_images = spreadsheet_images.extract(
-                path, out_dir, safe_name(resource_id, path.stem),
-                compact=compact_spreadsheet,
-            )
-            fact = spreadsheet_fact(path, resource_id=resource_id, name=name)
-            for number, (image_path, cell) in enumerate(extracted_images, 1):
-                images.append({
-                    **base, "path": image_path, "kind": f"spreadsheet_image_{number}",
-                    "content_sha256": _file_sha256(image_path), "spreadsheet_cell": cell,
-                })
-                fact["key_text"].append(f"{cell}: embedded image {number}")
-            structured_contents.append(fact)
-        except Exception as err:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "spreadsheet_failed",
-                    "path": str(path),
-                    "error_message": str(err)[:500],
-                }
-            )
-        else:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "spreadsheet_read",
-                    "image_count": len(images) - image_count_before,
-                    "path": str(path),
-                }
-            )
-    elif suffix in LEGACY_SPREADSHEET_EXTS:
-        try:
-            structured_contents.append(
-                legacy_spreadsheet_fact(path, resource_id=resource_id, name=name)
-            )
-        except Exception as err:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "legacy_spreadsheet_unsupported",
-                    "path": str(path),
-                    "error_message": str(err)[:500],
-                }
-            )
-        else:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "legacy_spreadsheet_read",
-                    "path": str(path),
-                }
-            )
-    elif suffix in DOCX_EXTS:
-        try:
-            fact, docx_images = docx_fact_and_images(
-                path,
-                resource_id=resource_id,
-                name=name,
-                out_dir=out_dir,
-            )
-            structured_contents.append(fact)
-            images.extend(docx_images)
-        except Exception as err:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "docx_failed",
-                    "path": str(path),
-                    "error_message": str(err)[:500],
-                }
-            )
-        else:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "docx_read",
-                    "path": str(path),
-                    "image_count": len(docx_images),
-                }
-            )
-    elif suffix in RAR_EXTS:
-        manifest.append(
-            {
-                "resource_id": resource_id,
-                "name": name,
-                "status": "rar_archive_unsupported",
-                "path": str(path),
-                "error_message": "RAR 压缩包未完成安全展开，请确认 RAR 工具可用或展开为 PDF/图片后上传",
-            }
-        )
-    elif suffix in XML_EXTS:
-        try:
-            structured_contents.append(
-                xml_invoice_fact(path, resource_id=resource_id, name=name)
-            )
-        except Exception as err:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "xml_failed",
-                    "path": str(path),
-                    "error_message": str(err)[:500],
-                }
-            )
-        else:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "xml_invoice_read",
-                    "path": str(path),
-                }
-            )
-    elif suffix in OFD_EXTS:
-        try:
-            structured_contents.append(
-                ofd_invoice_fact(path, resource_id=resource_id, name=name)
-            )
-        except Exception as err:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "ofd_failed",
-                    "path": str(path),
-                    "error_message": str(err)[:500],
-                }
-            )
-        else:
-            manifest.append(
-                {
-                    "resource_id": resource_id,
-                    "name": name,
-                    "status": "ofd_invoice_read",
-                    "path": str(path),
-                }
-            )
-    else:
-        manifest.append(
-            {
-                "resource_id": resource_id,
-                "name": name,
-                "status": "unsupported_file",
-                "path": str(path),
-            }
-        )
-    if parent_resource_id:
-        for image in images[image_count_before:]:
-            image["parent_resource_id"] = parent_resource_id
-        for item in structured_contents[structured_count_before:]:
-            item["parent_resource_id"] = parent_resource_id
+        return _convert_image(source, out_dir=out_dir)
+    if suffix in VIDEO_EXTS:
+        return source.result('video_skipped',
+            manifest_parent=True,
+            source_content_sha256=source.source_content_sha256,
+            body_read_status='not_read', image_count=0, reason='video_content_excluded')
+    if suffix in PDF_EXTS | {'.doc', '.pptx'}:
+        return _convert_pages(source, out_dir=out_dir, compact=compact_pdf)
+    if suffix in SPREADSHEET_EXTS or (suffix in LEGACY_SPREADSHEET_EXTS and _is_ooxml_spreadsheet(source.path)):
+        return _convert_spreadsheet(source, out_dir=out_dir, compact=compact_spreadsheet)
+    if suffix in DOCX_EXTS:
+        return _convert_docx(source, out_dir=out_dir)
+    if suffix in RAR_EXTS:
+        return source.result('rar_archive_unsupported', path=str(source.path),
+            error_message='RAR 压缩包未完成安全展开，请确认 RAR 工具可用或展开为 PDF/图片后上传')
+    if suffix in _STRUCTURED_READERS:
+        reader, success, failure = _STRUCTURED_READERS[suffix]
+        return _convert_structured(source, reader=reader, success=success, failure=failure)
+    return source.result('unsupported_file', path=str(source.path))
 
 
-def prepare_materials(
-    attachments: List[Dict[str, Any]],
-    *,
-    out_dir: Path,
-    compact_pdf: bool = False,
-    compact_spreadsheet: bool = False,
-) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    images: List[Dict[str, Any]] = []
-    manifest: List[Dict[str, Any]] = []
-    validation_manifest: List[Dict[str, Any]] = []
-    structured_contents: List[Dict[str, Any]] = []
+class _Preparation:
+    def __init__(self, *, out_dir: Path, compact_pdf: bool, compact_spreadsheet: bool):
+        self.out_dir = out_dir
+        self.compact_pdf = compact_pdf
+        self.compact_spreadsheet = compact_spreadsheet
+        self._spreadsheet_contents: dict[tuple[str, str], _ConversionResult] = {}
+
+    def convert(self, item: dict) -> _ResourceResult:
+        source = _conversion_source(item)
+        key = ((source.path.suffix.lower(), source.source_content_sha256)
+               if source.path.suffix.lower() in SPREADSHEET_EXTS | LEGACY_SPREADSHEET_EXTS
+               and source.path.is_file() else None)
+        result = self._spreadsheet_contents.get(key) if key is not None else None
+        if result is None:
+            result = _convert_attachment(source, out_dir=self.out_dir, compact_pdf=self.compact_pdf,
+                                         compact_spreadsheet=self.compact_spreadsheet)
+            if key is not None and all(entry.get('status') in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
+                                       for entry in result.manifest):
+                self._spreadsheet_contents[key] = result
+        return result.bind(item)
+
+    def run(self, attachments: list[dict]) -> PreparedMaterial:
+        images, manifest, structured, validation = [], [], [], []
+        for item in attachments:
+            extracted = item.get('extracted_files') if isinstance(item.get('extracted_files'), list) else []
+            results = [self.convert(child) for child in extracted if isinstance(child, dict)] if extracted else [self.convert(item)]
+            for result in results:
+                images.extend(result.images)
+                structured.extend(result.structured_contents)
+                validation.extend(result.manifest)
+            if extracted:
+                children = [entry for result in results for entry in result.manifest]
+                manifest.append({'resource_id': str(item.get('resource_id') or ''),
+                    'name': str(item.get('name') or ''), 'status': 'archive_extracted',
+                    'archive_extracted_count': len(extracted),
+                    'image_count': sum(len(result.images) for result in results),
+                    'skipped_videos': skipped_video_sources(children)})
+            else:
+                manifest.extend(results[0].manifest)
+        if any(str(entry.get('status') or '') not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
+               or (entry.get('status') == 'pdf_rendered' and (
+                   int(entry.get('image_count') or 0) < 1
+                   or int(entry.get('image_count') or 0) != int(entry.get('page_count') or 0)))
+               for entry in validation):
+            raise RuntimeError('attachment_content_incomplete')
+        return PreparedMaterial({'images': images, 'manifest': manifest, 'structured_contents': structured})
+
+
+def prepare_materials(attachments: List[Dict[str, Any]], *, out_dir: Path,
+                      compact_pdf: bool = False, compact_spreadsheet: bool = False) -> PreparedMaterial:
     out_dir.mkdir(parents=True, exist_ok=True)
-    prepared_contents: dict[tuple[str, str], tuple[list, list, list]] = {}
-
-    def prepare(item: Dict[str, Any], target_manifest: list) -> None:
-        path = Path(str(item.get("path") or "")).expanduser()
-        key = None
-        if path.suffix.lower() in SPREADSHEET_EXTS | LEGACY_SPREADSHEET_EXTS and path.is_file():
-            key = (path.suffix.lower(), _file_sha256(path))
-        cached = prepared_contents.get(key) if key is not None else None
-        destinations = (images, target_manifest, structured_contents)
-        if cached is not None:
-            for sources, destination in zip(cached, destinations):
-                for source in sources:
-                    entry = deepcopy(source)
-                    entry["resource_id"] = str(item.get("resource_id") or "")
-                    entry["name"] = str(item.get("name") or path.name)
-                    entry.pop("parent_resource_id", None)
-                    if destination is not target_manifest and item.get("parent_resource_id"):
-                        entry["parent_resource_id"] = str(item["parent_resource_id"])
-                    destination.append(entry)
-            return
-        starts = [len(destination) for destination in destinations]
-        _prepare_one_attachment(
-            item, out_dir=out_dir, images=images, manifest=target_manifest,
-            structured_contents=structured_contents, compact_pdf=compact_pdf,
-            compact_spreadsheet=compact_spreadsheet,
-        )
-        if key is not None and all(
-            entry.get("status") in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
-            for entry in target_manifest[starts[1]:]
-        ):
-            prepared_contents[key] = tuple(
-                deepcopy(destination[start:]) for destination, start in zip(destinations, starts)
-            )
-
-    for item in attachments:
-        extracted = (
-            item.get("extracted_files")
-            if isinstance(item.get("extracted_files"), list)
-            else []
-        )
-        if extracted:
-            child_manifest: List[Dict[str, Any]] = []
-            image_count_before = len(images)
-            for child in extracted:
-                if isinstance(child, dict):
-                    prepare(child, child_manifest)
-            validation_manifest.extend(child_manifest)
-            manifest.append(
-                {
-                    "resource_id": str(item.get("resource_id") or ""),
-                    "name": str(item.get("name") or ""),
-                    "status": "archive_extracted",
-                    "archive_extracted_count": len(extracted),
-                    "image_count": len(images) - image_count_before,
-                    "skipped_videos": skipped_video_sources(child_manifest),
-                }
-            )
-        else:
-            manifest_count_before = len(manifest)
-            prepare(item, manifest)
-            validation_manifest.extend(manifest[manifest_count_before:])
-    if any(
-        str(item.get("status") or "") not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
-        for item in validation_manifest
-    ) or any(
-        str(item.get("status") or "") == "pdf_rendered"
-        and (
-            int(item.get("image_count") or 0) < 1
-            or int(item.get("image_count") or 0) != int(item.get("page_count") or 0)
-        )
-        for item in validation_manifest
-    ):
-        raise RuntimeError("attachment_content_incomplete")
-    return images, manifest, structured_contents
+    return _Preparation(out_dir=out_dir, compact_pdf=compact_pdf,
+                        compact_spreadsheet=compact_spreadsheet).run(attachments)

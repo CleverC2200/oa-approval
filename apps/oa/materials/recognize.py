@@ -20,6 +20,7 @@ from PIL import Image, JpegImagePlugin
 
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.materials import resources as attachment_locations
+from apps.oa.materials.prepared import read_prepared
 from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
 
@@ -293,32 +294,6 @@ def _parts(prepared: dict):
                'evidence_ref': f'material:prepared.structured_contents[{index}]'}, json.dumps(content, ensure_ascii=False)
 
 
-def _validate_prepared(prepared: dict, *, frozen: bool, confirmed_empty: bool = False) -> None:
-    if not isinstance(prepared, dict) or any(not isinstance(prepared.get(key, []), list)
-                                           for key in ('images', 'manifest', 'structured_contents')):
-        raise ValueError('attachment_content_incomplete')
-    images = prepared.get('images', [])
-    if not confirmed_empty and not images and not prepared.get('structured_contents') and not attachment_extractors.skipped_video_sources(prepared.get('manifest', [])):
-        raise ValueError('attachment_content_empty')
-    for entry in prepared.get('manifest', []):
-        if entry.get('status') not in attachment_extractors.SUCCESSFUL_PREPARATION_STATUSES | attachment_extractors.SKIPPED_PREPARATION_STATUSES:
-            raise ValueError('attachment_content_incomplete')
-        if 'image_count' in entry:
-            expected = entry['image_count']
-            actual = sum(entry.get('resource_id') in {page.get('resource_id'), page.get('parent_resource_id')}
-                         for page in images)
-            if type(expected) is not int or expected != actual:
-                raise ValueError('attachment_page_coverage_incomplete')
-            if entry['status'] == 'pdf_rendered' and (expected < 1 or expected != entry.get('page_count')):
-                raise ValueError('attachment_page_coverage_incomplete')
-    if frozen:
-        for page in images:
-            digest = page.get('content_sha256')
-            if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
-                raise ValueError('attachment_page_digest_missing')
-
-
-
 def recognize(*, files: list[Path] | None = None, material_file: Path | None = None,
               prompt: str = DEFAULT_PROMPT, output_dir: Path | None = None,
               timeout_seconds: float = 90, budget_seconds: float = 1800,
@@ -402,7 +377,10 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
                 manifest, structured = [], []
                 native = attachments
             else:
-                images, manifest, structured = attachment_extractors.prepare_materials(native, out_dir=output_dir / 'prepared')
+                local_prepared = attachment_extractors.prepare_materials(native, out_dir=output_dir / 'prepared').to_record()
+                images = local_prepared['images']
+                manifest = local_prepared['manifest']
+                structured = local_prepared['structured_contents']
             for item in attachments:
                 if item in native:
                     continue
@@ -412,7 +390,8 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
                     structured.append({'resource_id': item['resource_id'], 'name': item['name'],
                                        'text': _read(Path(item['path'])).decode('utf-8')})
             prepared = {'images': images, 'manifest': manifest, 'structured_contents': structured}
-        _validate_prepared(prepared, frozen=material_file is not None, confirmed_empty=confirmed_empty)
+        prepared = read_prepared(prepared, reading='frozen' if material_file else 'local',
+                                 confirmed_empty=confirmed_empty).to_record()
         parts = list(_parts(prepared))
         if resource_id is not None:
             parts = [(part, source) for part, source in parts if part['resource_id'] == resource_id]
