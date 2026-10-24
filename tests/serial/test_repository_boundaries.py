@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from apps.oa.approvals import cli
+from apps.oa.approvals import cli, owner
 
 
 @pytest.mark.parametrize('name,content,kind', [
@@ -126,7 +126,7 @@ def test_production_requires_clean_published_main(repository, monkeypatch, state
     assert run('git', 'push', '-q', 'origin', 'main').returncode == 0
     monkeypatch.setenv('GIT_DIR', str(root.parent / 'different.git'))
     monkeypatch.setenv('GIT_WORK_TREE', str(root.parent / 'different-checkout'))
-    cli.require_production_main(root)
+    owner.require_production_main(root)
     if state == 'branch':
         assert run('git', 'switch', '-c', 'codex/test').returncode == 0
     elif state == 'dirty':
@@ -142,7 +142,7 @@ def test_production_requires_clean_published_main(repository, monkeypatch, state
     else:
         assert run('git', 'remote', 'set-url', 'origin', str(root.parent / 'missing.git')).returncode == 0
     with pytest.raises(ValueError, match=error):
-        cli.require_production_main(root)
+        owner.require_production_main(root)
 
 
 def test_production_guard_stops_before_api_or_queue_creation(tmp_path, monkeypatch, capsys):
@@ -151,7 +151,7 @@ def test_production_guard_stops_before_api_or_queue_creation(tmp_path, monkeypat
     def refuse():
         raise ValueError('production_main_required')
 
-    monkeypatch.setattr(cli, 'require_production_main', refuse)
+    monkeypatch.setattr(owner, 'require_production_main', refuse)
     monkeypatch.setattr(Approval, '_api', lambda self: pytest.fail('API must not be reached'))
     monkeypatch.setattr(sys, 'stdin', io.StringIO('{"operation":"finish"}\n'))
     root = tmp_path / 'runtime'
