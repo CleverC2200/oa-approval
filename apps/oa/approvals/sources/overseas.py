@@ -53,5 +53,5 @@ class InvoiceApi(OaApi):
             return _decode_json(response.read().decode('utf-8'))
 
 
-def build_api() -> InvoiceApi:
-    return InvoiceApi(*auth.credentials())
+def build_api(*, source_policy) -> InvoiceApi:
+    return InvoiceApi(*auth.credentials(base_url=source_policy.attachments.oa_origin), base_url=source_policy.attachments.oa_origin)

@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+from tests.approvals.source_fakes import POLICY
+
 
 PROJECT = Path(__file__).resolve().parents[2]
 
@@ -26,8 +28,9 @@ def pending_output(tmp_path, monkeypatch, capsys):
          'request_name': f'测试单据 {index + 1}'}
         for index in reversed(range(23))
     ]
-    monkeypatch.setattr(api, 'build_api', lambda _config: fake)
+    monkeypatch.setattr(api, 'build_api', lambda _config, **kwargs: fake)
     monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner, 'load_source_policy', lambda: POLICY)
     monkeypatch.setattr(owner.socket.socket, 'bind', lambda _socket, address: Path(address).touch())
     monkeypatch.setattr(owner.socket.socket, 'listen', lambda _socket: None)
 
@@ -565,6 +568,34 @@ def test_socket_finish_waits_for_collection_and_refuses_new_claims(blocked_colle
     status = invoke('status')
     assert status['run']['status'] == 'closed'
     assert status['summary'] == {'reviewing': 2, 'queued': 1}
+    assert not Path(started['socket']).exists()
+
+
+def test_all_finish_clients_receive_closed_after_collection_drains(blocked_collection):
+    import socket
+
+    process, started, first, invoke, collector, channel = blocked_collection
+    finishers = [socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) for _ in range(2)]
+    try:
+        for client in finishers:
+            client.settimeout(15)
+            client.connect(started['socket'])
+            client.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+            assert invoke('status')['owner']['reachable'] is True
+        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
+                      '--agent-workflow-key', 'general_expense')['reason'] == 'run_finishing'
+        channel.sendall(b'r')
+        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        closed = [json.loads(client.makefile().readline()) for client in finishers]
+        assert closed[0] == closed[1]
+        assert closed[0]['status'] == 'closed'
+        assert closed[0]['run_id'] == started['run_id']
+        assert all(client.recv(1) == b'' for client in finishers)
+    finally:
+        for client in finishers:
+            client.close()
+    process.wait(timeout=5)
+    assert process.returncode == 0, process.stderr.read()
     assert not Path(started['socket']).exists()
 
 

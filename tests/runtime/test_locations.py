@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
+
 import json
 import os
 from pathlib import Path
@@ -21,15 +24,18 @@ def test_collection_cache_follows_runtime_root_across_working_directories(tmp_pa
         path = dest_dir / 'source.txt'
         path.write_text('synthetic source')
         calls.append(path)
-        return path, ''
+        return Downloaded(path)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
 
     def collect(request_id, *, attachment_root, **_options):
-        files, errors = attachments.download_resources(
+        download_result = attachments.download_resources(
             [{'id': 'source', 'name': 'source.txt', 'downloadUrl': '/download?fileid=source'}],
             dest_dir=attachment_root, timeout_sec=1, allow_browser_download=True,
-            request_id=request_id, flow_key='general_expense', reuse_cache=True)
+            request_id=request_id, flow_key='general_expense', reuse_cache=True, sources=attachments.build_download_sources(POLICY))
+        files = list(download_result.items)
+        errors = [error.to_record() for error in download_result.errors]
         assert errors == []
         return {'request_id': request_id, 'workflow_key': 'general_expense',
                 'resources': [{'resource_id': 'source', 'path': files[0]['path']}],
@@ -43,7 +49,7 @@ def test_collection_cache_follows_runtime_root_across_working_directories(tmp_pa
         api = SimpleNamespace(pending_rows=lambda: [{
             'request_id': '101', 'received_at': f'2026-10-24 10:0{index}:00',
             'operator_id': 'synthetic', 'workflow_key': 'general_expense'}])
-        approval = Approval(root, api=api, configs=[], collector=collect)
+        approval = Approval(root, api=api, configs=[], collector=collect, source_policy=POLICY)
         try:
             run = approval.pending()
             task = next(item for item in run['tasks'] if item['status'] == 'queued')
@@ -109,11 +115,11 @@ def test_collection_preserves_cache_overrides_and_restores_context(
         return {'request_id': request_id, 'workflow_key': workflow, 'resources': [],
                 'prepared': {'images': [], 'structured_contents': [], 'manifest': []}}
 
-    monkeypatch.setattr(overseas, 'collect', lambda _api, request_id, _directory: collect(request_id))
+    monkeypatch.setattr(overseas, 'collect', lambda _api, request_id, _directory, **kwargs: collect(request_id))
     api = SimpleNamespace(pending_rows=lambda: [{
         'request_id': '101', 'received_at': '2026-10-24 10:00:00',
         'operator_id': 'synthetic', 'workflow_key': workflow}])
-    approval = Approval(root, api=api, configs=[], collector=collect)
+    approval = Approval(root, api=api, configs=[], collector=collect, source_policy=POLICY)
     try:
         run = approval.pending()
         result = approval.collect(run['run_id'], agent_id='synthetic-agent',

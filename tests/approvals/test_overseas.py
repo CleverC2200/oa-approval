@@ -1,3 +1,5 @@
+
+from tests.approvals.source_fakes import POLICY
 from copy import deepcopy
 from datetime import datetime, timezone
 import hashlib
@@ -46,7 +48,7 @@ def case(tmp_path):
                     {'fieldName': 'bz', 'fieldValue': 'USD'}]}]},
                 'workflowDetailTableInfos': [{'tableDBName': 'formtable_main_1295_dt1',
                                              'workflowRequestTableRecords': records}]}
-        material = {'snapshot': invoice.snapshot(data, resources), 'attachments': [
+        material = {'snapshot': invoice.snapshot(data, resources, origins=POLICY.attachments), 'attachments': [
             {'resource_id': item['resource_id'], 'sha256': hashlib.sha256(Path(item['path']).read_bytes()).hexdigest(),
              'pages': item['pages']} for item in files]}
         recognized = {'material_digest': invoice.digest(material), 'invoices': [
@@ -158,13 +160,13 @@ def test_attachment_list_must_cover_every_declared_file(case):
     data, _, _, _, _ = case()
     data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]['fieldValue'] += ',103'
     with pytest.raises(ValueError, match='invoice_attachment_unbound'):
-        invoice.snapshot(data, [])
+        invoice.snapshot(data, [], origins=POLICY.attachments)
 
 
 def test_trusted_single_attachment_keeps_legacy_empty_raw_value(case):
     data, resources, _, _, _ = case((('101',),))
     data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]['fieldValue'] = ''
-    assert invoice.snapshot(data, resources)['rows'][0]['resource_ids'] == ['101']
+    assert invoice.snapshot(data, resources, origins=POLICY.attachments)['rows'][0]['resource_ids'] == ['101']
 
 
 def test_attachment_binding_rejects_same_count_with_wrong_id(case):
@@ -172,14 +174,14 @@ def test_attachment_binding_rejects_same_count_with_wrong_id(case):
     field = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
     field['fieldValue'] = '101,103'
     with pytest.raises(ValueError, match='invoice_attachment_unbound'):
-        invoice.snapshot(data, resources)
+        invoice.snapshot(data, resources, origins=POLICY.attachments)
 
 
 def test_first_invoice_follows_declared_attachment_order(case):
     data, resources, _, material, recognized = case()
     field = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
     field['fieldValue'] = '102,101'
-    material['snapshot'] = invoice.snapshot(data, resources)
+    material['snapshot'] = invoice.snapshot(data, resources, origins=POLICY.attachments)
     recognized['material_digest'] = invoice.digest(material)
     recognized['invoices'][1]['invoice_date']['value'] = '2026-10-22'
     recognized['invoices'][1]['fpdqr']['value'] = '2026-12-22'
@@ -214,14 +216,14 @@ def test_exact_field_mapping_required_for_new_fields(case, problem):
     else:
         target['edit'] = False
     with pytest.raises(ValueError, match='invoice_field'):
-        invoice.snapshot(data, resources)
+        invoice.snapshot(data, resources, origins=POLICY.attachments)
 
 
 def test_unresolved_human_selection_is_reported_without_using_browser_id(case):
     data, resources, _, material, recognized = case()
     fields = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']
     next(field for field in fields if field['fieldName'] == 'chosen_po').pop('fieldShowValue')
-    material['snapshot'] = invoice.snapshot(data, resources)
+    material['snapshot'] = invoice.snapshot(data, resources, origins=POLICY.attachments)
     recognized['material_digest'] = invoice.digest(material)
     assert '人工所选采购订单号未确认' in invoice.build_plan(material, recognized)['remark']
 
@@ -290,7 +292,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
             return {'code': 'SUCCESS'}
 
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
-    app = Approval(tmp_path / 'runtime', api=Api(), configs=[])
+    app = Approval(tmp_path / 'runtime', api=Api(), configs=[], source_policy=POLICY)
     task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
@@ -359,7 +361,7 @@ def test_overseas_submit_preserves_response_and_completion_evidence(case, respon
                      if fresh else '2020-01-01T12:00:00+00:00'}]
 
     api = Api()
-    result = submit_overseas(api, api, '201', material, plan)
+    result = submit_overseas(api, api, '201', material, plan, origins=POLICY.attachments)
     assert result['failure_code'] == expected_code
     assert result['submit_ok'] is (response == 'SUCCESS')
     assert result['done_hit'] is (response == 'SUCCESS' and fresh)
@@ -379,7 +381,7 @@ def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_
 
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
     monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda: pytest.fail('injected adapter must not fall back to real credentials'))
-    app = Approval(tmp_path / 'runtime', api=Api(), writer=object(), configs=[])
+    app = Approval(tmp_path / 'runtime', api=Api(), writer=object(), configs=[], source_policy=POLICY)
     started = app.pending()
     task = app.collect(started['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
@@ -387,7 +389,7 @@ def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_
         reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
         for item in material['attachments']]}
     with pytest.raises(ValueError, match='invoice_write_adapter_required'):
-        submit_overseas(app.api, app.writer, '201', material, invoice.build_plan(material, recognition))
+        submit_overseas(app.api, app.writer, '201', material, invoice.build_plan(material, recognition), origins=POLICY.attachments)
     result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
     assert result['status'] == 'unknown'
     assert len(app.inspect(task['task_id'])['submissions']) == 1
@@ -439,10 +441,10 @@ def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verific
         live['token'] += 1
         return client_type(live['token'])
 
-    monkeypatch.setattr(oa, 'build_api', lambda config: fresh(ReadApi))
-    monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda: fresh(InvoiceApi))
+    monkeypatch.setattr(oa, 'build_api', lambda config, **kwargs: fresh(ReadApi))
+    monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda **kwargs: fresh(InvoiceApi))
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
-    app = Approval(tmp_path / 'runtime', configs=[{}])
+    app = Approval(tmp_path / 'runtime', configs=[{}], source_policy=POLICY)
     task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognition = {'material_digest': invoice.digest(material), 'invoices': [

@@ -50,7 +50,7 @@ def collect_demo(request_id, *, oa_api, configs, attachment_root, prepared_root,
         document.save(source)
     digest = hashlib.sha256(source.read_bytes()).hexdigest()
     from apps.oa.materials.formats import prepare_materials
-    images, manifest, structured = prepare_materials(
+    prepared = prepare_materials(
         [{'path': str(source), 'resource_id': 'demo-pdf', 'name': 'demo.pdf'}], out_dir=Path(prepared_root))
     return {
         'schema_version': 1, 'kind': 'preaudit_material', 'request_id': request_id,
@@ -59,7 +59,7 @@ def collect_demo(request_id, *, oa_api, configs, attachment_root, prepared_root,
                              'read_status': 'present', 'value_source': 'raw'}],
         'resources': [{'resource_id': 'demo-pdf', 'name': 'demo.pdf', 'local_readonly_path': str(source),
                        'source_content_sha256': digest, 'source_field_path': 'main[0].field[1]'}],
-        'prepared': {'images': images, 'manifest': manifest, 'structured_contents': structured},
+        'prepared': prepared.to_record(),
         'authority_facts': [], 'warnings': [],
     }
 
@@ -67,4 +67,9 @@ def collect_demo(request_id, *, oa_api, configs, attachment_root, prepared_root,
 def create_demo(root):
     from apps.oa.approvals.operations import Approval
     api = DemoApi()
-    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api)
+    from apps.oa.approvals.source_policy import AttachmentOrigins, BrowserLocation, SourcePolicy
+    source_policy = SourcePolicy(
+        AttachmentOrigins('', frozenset()), '',
+        BrowserLocation(Path('/synthetic/chrome'), Path('/synthetic/profile'), 'Default', 'http://127.0.0.1:9223'),
+    )
+    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api, source_policy=source_policy)

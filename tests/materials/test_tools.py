@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
+
 import hashlib
 import json
 from pathlib import Path
@@ -126,7 +129,6 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     import fitz
     from openpyxl import Workbook
-    from apps.oa.approvals.collection import downloads as attachments
     from apps.oa.materials import archives
     from apps.oa.materials import formats as attachment_extractors
 
@@ -148,11 +150,14 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     children, error = archives.extract_zip_safely(
         archive, dest_dir=tmp_path / 'downloads', resource={'id': 'archive', 'name': 'files.zip'})
     assert error == ''
-    images, manifest, contents = attachment_extractors.prepare_materials([
+    prepared_record = attachment_extractors.prepare_materials([
         {'resource_id': 'archive', 'path': str(archive), 'extracted_files': children},
         {'resource_id': 'detail-a', 'path': str(excel)},
         {'resource_id': 'detail-b', 'path': str(excel)},
-    ], out_dir=tmp_path / 'prepared')
+    ], out_dir=tmp_path / 'prepared').to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    contents = prepared_record['structured_contents']
     assert len(images) == 2
     assert all(item['parent_resource_id'] == 'archive' for item in images)
     assert manifest[0]['image_count'] == 2
@@ -165,16 +170,19 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     from apps.oa.approvals.collection import downloads as attachments
 
-    def download(resource, *, dest_dir, timeout_sec, original_batch=None):
+    def download(resource, *, dest_dir, timeout_sec):
         target = dest_dir / (resource['id'] + '.png')
         Image.new('RGB', (10, 10), 'white').save(target)
-        return target, ''
+        return Downloaded(target)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
     resources = [{'id': 'a', 'name': 'A.png', 'downloadUrl': 'https://example.invalid/a'},
                  {'id': 'b', 'name': 'B.png', 'downloadUrl': 'https://example.invalid/b'}]
-    downloaded, errors = attachments.download_resources(resources, dest_dir=tmp_path / 'files',
-        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False)
+    download_result = attachments.download_resources(resources, dest_dir=tmp_path / 'files',
+        allow_browser_download=True, timeout_sec=5, request_id='12', flow_key='general_expense', reuse_cache=False, sources=attachments.build_download_sources(POLICY))
+    downloaded = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert [item['resource_id'] for item in downloaded] == ['a', 'b']
     assert [item['name'] for item in downloaded] == ['A.png', 'B.png']

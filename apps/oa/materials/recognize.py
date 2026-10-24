@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 from io import BytesIO
@@ -20,6 +21,7 @@ from PIL import Image, JpegImagePlugin
 
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.materials import resources as attachment_locations
+from apps.oa.materials.prepared import PreparedMaterial, read_prepared
 from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
 
@@ -293,30 +295,319 @@ def _parts(prepared: dict):
                'evidence_ref': f'material:prepared.structured_contents[{index}]'}, json.dumps(content, ensure_ascii=False)
 
 
-def _validate_prepared(prepared: dict, *, frozen: bool, confirmed_empty: bool = False) -> None:
-    if not isinstance(prepared, dict) or any(not isinstance(prepared.get(key, []), list)
-                                           for key in ('images', 'manifest', 'structured_contents')):
-        raise ValueError('attachment_content_incomplete')
-    images = prepared.get('images', [])
-    if not confirmed_empty and not images and not prepared.get('structured_contents') and not attachment_extractors.skipped_video_sources(prepared.get('manifest', [])):
-        raise ValueError('attachment_content_empty')
-    for entry in prepared.get('manifest', []):
-        if entry.get('status') not in attachment_extractors.SUCCESSFUL_PREPARATION_STATUSES | attachment_extractors.SKIPPED_PREPARATION_STATUSES:
-            raise ValueError('attachment_content_incomplete')
-        if 'image_count' in entry:
-            expected = entry['image_count']
-            actual = sum(entry.get('resource_id') in {page.get('resource_id'), page.get('parent_resource_id')}
-                         for page in images)
-            if type(expected) is not int or expected != actual:
-                raise ValueError('attachment_page_coverage_incomplete')
-            if entry['status'] == 'pdf_rendered' and (expected < 1 or expected != entry.get('page_count')):
-                raise ValueError('attachment_page_coverage_incomplete')
-    if frozen:
-        for page in images:
-            digest = page.get('content_sha256')
-            if not isinstance(digest, str) or len(digest) != 64 or any(c not in '0123456789abcdef' for c in digest):
-                raise ValueError('attachment_page_digest_missing')
+@dataclass(frozen=True, slots=True)
+class _Selection:
+    resource_id: str | None
+    page: int | None
+    region: list[int] | tuple[int, int, int, int] | None
+    rotate: int
 
+    def report_fields(self) -> dict:
+        fields = {}
+        if self.resource_id is not None:
+            fields.update(selection={'resource_id': self.resource_id}, coverage='selected_resource')
+            if self.page is not None:
+                fields['selection']['page'] = self.page
+                fields['coverage'] = 'selected_page'
+        if self.region is not None:
+            fields.update(coverage='image_region', region=list(self.region))
+        return fields
+
+
+@dataclass(frozen=True, slots=True)
+class _RecognitionOptions:
+    files: list[Path] | None
+    material_file: Path | None
+    prompt: str
+    output_dir: Path
+    timeout_seconds: float
+    budget_seconds: float
+    selection: _Selection
+
+
+@dataclass(slots=True)
+class _InputSnapshot:
+    prepared: PreparedMaterial | None = None
+    binding: dict | None = None
+    sources: list[dict] = field(default_factory=list)
+    confirmed_empty: bool = False
+    attachment_presence: dict | None = None
+
+    def load(self, options: _RecognitionOptions) -> None:
+        if options.material_file:
+            material, self.binding = _material(options.material_file)
+            prepared = material.get('prepared') or {}
+            presence = material.get('attachment_presence')
+            if presence is not None:
+                if (not isinstance(presence, dict) or presence.get('status') != 'confirmed_empty'
+                        or not isinstance(presence.get('evidence_refs'), list) or not presence['evidence_refs']
+                        or any(not isinstance(ref, str) or not ref.startswith('material:') for ref in presence['evidence_refs'])
+                        or material.get('resources') != []
+                        or any(prepared.get(name) != [] for name in ('images', 'manifest', 'structured_contents'))
+                        or material.get('warnings') or (material.get('invoice_evidence') or {}).get('invoices')):
+                    raise ValueError('attachment_content_incomplete')
+                self.confirmed_empty = True
+                self.attachment_presence = presence
+        else:
+            prepared = self._local(options)
+        self.prepared = read_prepared(prepared, reading='frozen' if options.material_file else 'local',
+                                      confirmed_empty=self.confirmed_empty)
+
+    def _local(self, options: _RecognitionOptions) -> dict:
+        for index, path in enumerate(options.files or [], 1):
+            path = path.resolve(strict=True)
+            self.sources.append({'resource_id': f'file-{index}', 'path': str(path), 'name': path.name,
+                                 'sha256': _source_digest(path)})
+        native = [item for item in self.sources if Path(item['path']).suffix.lower() not in {
+            '.txt', '.md', '.csv', '.tsv', '.json', '.log', '.yaml', '.yml', '.gif'}]
+        if options.selection.region is not None:
+            prepared = {'images': [{**item, 'content_sha256': item['sha256'], 'kind': 'image'} for item in self.sources],
+                        'manifest': [], 'structured_contents': []}
+            native = self.sources
+        else:
+            prepared = attachment_extractors.prepare_materials(native, out_dir=options.output_dir / 'prepared').to_record()
+        for item in self.sources:
+            if item in native:
+                continue
+            if Path(item['path']).suffix.lower() == '.gif':
+                prepared['images'].append({**item, 'content_sha256': item['sha256'], 'kind': 'image'})
+            else:
+                prepared['structured_contents'].append({'resource_id': item['resource_id'], 'name': item['name'],
+                                                        'text': _read(Path(item['path'])).decode('utf-8')})
+        return prepared
+
+    def report_fields(self, selection: _Selection) -> dict:
+        fields = {'sources': self.sources}
+        if self.binding is not None:
+            fields['material_binding'] = self.binding
+        if self.confirmed_empty:
+            fields.update(reason='official_no_attachments', attachment_presence=self.attachment_presence)
+            if selection.resource_id is None:
+                fields['coverage'] = 'no_attachments'
+        return fields
+
+    def verify(self, parts: tuple, observed: list[dict], material_file: Path | None) -> None:
+        if material_file:
+            if _material(material_file)[1] != self.binding:
+                raise ValueError('frozen_material_changed')
+            for part, source in parts:
+                if part['kind'] == 'image':
+                    result = next(item for item in observed if item['part_id'] == part['part_id'])
+                    if _digest(_read(Path(source['path']))) != result['content_sha256']:
+                        raise ValueError('attachment_page_changed')
+        for source in self.sources:
+            if _source_digest(Path(source['path'])) != source['sha256']:
+                raise ValueError('attachment_source_changed')
+
+
+@dataclass(frozen=True, slots=True)
+class _ReadPlan:
+    parts: tuple
+    selection: dict | None
+    scope_coverage: str
+    manifest: tuple
+    has_images: bool
+
+    @property
+    def skipped_sources(self) -> list[dict]:
+        return attachment_extractors.skipped_video_sources(self.manifest)
+
+    def report_fields(self) -> dict:
+        skipped = self.skipped_sources
+        coverage = ('non_video_only' if skipped and self.scope_coverage == 'all_prepared_content'
+                    else self.scope_coverage)
+        fields = {'skipped_sources': skipped, 'coverage': coverage}
+        if self.selection is not None:
+            fields['selection'] = self.selection
+        return fields
+
+
+def _plan_reading(snapshot: _InputSnapshot, selection: _Selection) -> _ReadPlan:
+    prepared = snapshot.prepared.to_record()
+    parts = list(_parts(prepared))
+    if selection.resource_id is not None:
+        parts = [(part, source) for part, source in parts if part['resource_id'] == selection.resource_id]
+        if not parts:
+            raise ValueError('attachment_resource_not_found')
+    if selection.page is not None:
+        parts = [(part, source) for part, source in parts
+                 if part['kind'] == 'image' and part['page_number'] == selection.page]
+        if not parts:
+            raise ValueError('attachment_page_not_found')
+    if selection.region is not None:
+        parts = [(part, source) for part, source in parts if part['kind'] == 'image']
+        if len(parts) != 1:
+            raise ValueError('attachment_region_source_invalid')
+    scope = selection.report_fields()
+    coverage = 'no_attachments' if snapshot.confirmed_empty else 'all_prepared_content'
+    return _ReadPlan(tuple(parts), scope.get('selection'), scope.get('coverage', coverage),
+                     tuple(prepared.get('manifest', [])),
+                     any(part['kind'] == 'image' for part, _ in parts))
+
+
+class _RecognitionSession:
+    def __init__(self, options: _RecognitionOptions, *, post, monotonic):
+        self.options = options
+        self._post = post
+        self._monotonic = monotonic
+        options.output_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
+        self.report_file = options.output_dir / 'recognition.json'
+        self.report = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,
+                       'transport': 'direct_http', 'prompt': options.prompt, 'status': 'running',
+                       'created_at': datetime.now(timezone.utc).isoformat(), 'completed_at': None,
+                       'report_file': str(self.report_file), 'parts': [], 'sources': [],
+                       **options.selection.report_fields()}
+        self.deadline = monotonic() + options.budget_seconds
+        self._cache = {}
+        self._current = None
+        self._snapshot = _InputSnapshot()
+        self._save()
+
+    def _save(self) -> None:
+        runtime_control.write_control_bytes_atomic(
+            self.report_file, (json.dumps(self.report, ensure_ascii=False) + '\n').encode())
+
+    def _check_budget(self) -> None:
+        if self._monotonic() >= self.deadline:
+            raise ValueError('attachment_recognition_budget_exhausted')
+
+    def run(self) -> dict:
+        try:
+            self._snapshot.load(self.options)
+            self.report.update(self._snapshot.report_fields(self.options.selection))
+            plan = _plan_reading(self._snapshot, self.options.selection)
+            key = _api_key() if plan.has_images else ''
+            if plan.has_images and not key:
+                raise ValueError('attachment_api_key_missing')
+            self.report.update(plan.report_fields())
+            self._save()
+            self._execute(plan, key)
+            self._snapshot.verify(plan.parts, self.report['parts'], self.options.material_file)
+            self.report['status'] = 'complete' if self.report['parts'] else 'skipped'
+        except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
+            self.report.update(self._snapshot.report_fields(self.options.selection))
+            code = str(error)
+            self.report.update(status='failed', error_code=(code if code.startswith(('attachment_', 'frozen_'))
+                                                          else 'attachment_recognition_failed'))
+            if self._current:
+                self.report['failed_part'] = self._current
+        self.report['completed_at'] = datetime.now(timezone.utc).isoformat()
+        if self.options.selection.resource_id is not None:
+            self._write_observations()
+        self._save()
+        return self.report
+
+    def _execute(self, plan: _ReadPlan, key: str) -> None:
+        for self._current, source in plan.parts:
+            self._check_budget()
+            if self._current['kind'] == 'image':
+                result = self._recognize_image(source, key)
+            else:
+                result = {**self._current, 'content_sha256': _digest(source.encode()), 'answer': source}
+            self.report['parts'].append(result)
+            self._save()
+
+    def _image_blocks(self, source: dict):
+        current, selection = self._current, self.options.selection
+        current.update(rotate=selection.rotate, source_image_path=str(source['path']))
+        raw = _read(Path(source['path']))
+        digest = _digest(raw)
+        if source.get('content_sha256') and digest != source['content_sha256']:
+            raise ValueError('attachment_page_changed')
+        if selection.region is None:
+            return digest, _image_tiles(raw, rotate=selection.rotate)
+        region = selection.region
+        current.update(region=list(region), content_sha256=digest)
+        with _open_image(raw) as original:
+            current['source_image_size'] = list(original.size)
+            if selection.rotate and getattr(original, 'n_frames', 1) > 1:
+                raise ValueError('attachment_multiframe_rotation_unsupported')
+            if original.format not in {'JPEG', 'PNG', 'WEBP', 'GIF'} or getattr(original, 'n_frames', 1) != 1:
+                raise ValueError('attachment_region_source_invalid')
+            if region[2] > original.width or region[3] > original.height:
+                raise ValueError('attachment_region_out_of_bounds')
+            encoded = _png_crop(original, region)
+        current['region_png_sha256'] = _digest(encoded)
+        return digest, [(region, _image_block(encoded, rotate=selection.rotate))]
+
+    def _recognize_image(self, source: dict, key: str) -> dict:
+        digest, blocks = self._image_blocks(source)
+        current = self._current
+        current['content_sha256'] = digest
+        cache_key = (current['kind'], digest)
+        if cache_key in self._cache:
+            previous = self._cache[cache_key]
+            result = {**current, 'answer': previous['answer'], 'reused_from': previous['part_id']}
+            if 'image_tiles' in previous:
+                result['image_tiles'] = previous['image_tiles']
+            return result
+        answer, usage = self._request_image(blocks, key)
+        result = {**current, 'answer': answer, 'usage': usage}
+        self._cache[cache_key] = result
+        return result
+
+    def _question(self, box) -> str:
+        question, selection = self.options.prompt, self.options.selection
+        if selection.region is not None:
+            question += f'\n仅覆盖指定区域，原图像素坐标 {list(box)}。不代表整图或整单读取完成。'
+        elif box is not None:
+            question += f'\n当前为同一原图的无缩放分区，像素坐标 {list(box)}，相邻分区有重叠。仅读取本分区可见内容。'
+        if self._current['kind'] == 'image' and selection.rotate:
+            question += f'\n阅读副本已顺时针旋转 {selection.rotate} 度；区域与分区坐标均属于旋转前原图，先裁剪再旋转。'
+        return question
+
+    def _request_image(self, blocks, key: str) -> tuple[str, dict]:
+        tiles = []
+        for box, block in blocks:
+            if box is not None:
+                self._current['image_tiles'] = tiles
+                self._current['failed_tile_box'] = list(box)
+            self._check_budget()
+            body = {'model': MODEL, 'stream': False, 'max_tokens': 8192,
+                    'thinking': {'type': 'disabled'},
+                    'messages': [{'role': 'system', 'content': SYSTEM_PROMPT},
+                                 {'role': 'user', 'content': [
+                                     {'type': 'text', 'text': self._question(box)}, block]}]}
+            timeout = min(self.options.timeout_seconds, max(.1, self.deadline - self._monotonic()))
+            response = self._post(body, key=key, timeout=timeout)
+            try:
+                answer, usage = _answer(response)
+            except ValueError:
+                self.report['failed_response'] = _response_diagnostic(response)
+                raise
+            if box is not None:
+                tile = {'box': list(box), 'answer': answer, 'usage': usage}
+                if self.options.selection.region is not None:
+                    tile['png_sha256'] = self._current['region_png_sha256']
+                tiles.append(tile)
+        if tiles:
+            self._current.pop('failed_tile_box', None)
+            answer = ('以下回答仅覆盖指定区域，不代表整图或整单读取完成。\n\n'
+                      if self.options.selection.region is not None else
+                      '以下分区属于同一原图，重叠内容不代表多笔或多份证据。\n\n')
+            answer += '\n\n'.join(f'分区 {tile["box"]}：\n{tile["answer"]}' for tile in tiles)
+            usage = {name: sum(tile['usage'][name] for tile in tiles)
+                     for name in ('prompt_tokens', 'completion_tokens', 'total_tokens')
+                     if all(type(tile['usage'].get(name)) is int for tile in tiles)}
+        return answer, usage
+
+    def _write_observations(self) -> None:
+        observations = []
+        if self.report['status'] == 'complete':
+            for part in self.report['parts']:
+                locator = part['evidence_ref'] + '#supplemental'
+                if part['kind'] == 'image':
+                    locator += f'&rotate={part["rotate"]}'
+                    if 'region' in part:
+                        locator += '&region=' + ','.join(str(value) for value in part['region'])
+                observations.append({**part, 'locator': locator, 'content': part['answer'], 'status': 'read',
+                                     'coverage': self.report['coverage'], 'selection': self.report['selection'],
+                                     'report_file': str(self.report_file), 'prompt': self.options.prompt,
+                                     'material_binding': self.report['material_binding']})
+        observations_file = self.options.output_dir / 'observations.json'
+        runtime_control.write_control_bytes_atomic(
+            observations_file, (json.dumps(observations, ensure_ascii=False) + '\n').encode())
+        self.report['observations_file'] = str(observations_file)
 
 
 def recognize(*, files: list[Path] | None = None, material_file: Path | None = None,
@@ -347,206 +638,6 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
     material_file = Path(material_file).expanduser().absolute() if material_file else None
     recognition_root = material_file.parent if material_file else runtime_control.RUNTIME_ROOT
     output_dir = Path(output_dir or recognition_root / 'recognitions' / uuid4().hex).expanduser().absolute()
-    output_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
-    report_file = output_dir / 'recognition.json'
-    report = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,
-              'transport': 'direct_http', 'prompt': prompt, 'status': 'running',
-              'created_at': datetime.now(timezone.utc).isoformat(), 'completed_at': None,
-              'report_file': str(report_file), 'parts': [], 'sources': []}
-    if resource_id is not None:
-        report['selection'] = {'resource_id': resource_id}
-        report['coverage'] = 'selected_resource'
-        if page is not None:
-            report['selection']['page'] = page
-            report['coverage'] = 'selected_page'
-    if region is not None:
-        report.update(coverage='image_region', region=list(region))
-    deadline = time.monotonic() + budget_seconds
-    cache = {}
-    current = None
-    confirmed_empty = False
-    def save():
-        runtime_control.write_control_bytes_atomic(report_file, (json.dumps(report, ensure_ascii=False) + '\n').encode())
-    save()
-    try:
-        if material_file:
-            material, binding = _material(material_file)
-            report['material_binding'] = binding
-            prepared = material.get('prepared') or {}
-            presence = material.get('attachment_presence')
-            if presence is not None:
-                if (not isinstance(presence, dict) or presence.get('status') != 'confirmed_empty'
-                        or not isinstance(presence.get('evidence_refs'), list) or not presence['evidence_refs']
-                        or any(not isinstance(ref, str) or not ref.startswith('material:') for ref in presence['evidence_refs'])
-                        or material.get('resources') != []
-                        or any(prepared.get(name) != [] for name in ('images', 'manifest', 'structured_contents'))
-                        or material.get('warnings') or (material.get('invoice_evidence') or {}).get('invoices')):
-                    raise ValueError('attachment_content_incomplete')
-                confirmed_empty = True
-                report.update(reason='official_no_attachments', attachment_presence=presence)
-                if resource_id is None:
-                    report['coverage'] = 'no_attachments'
-        else:
-            attachments = []
-            for index, path in enumerate(files or [], 1):
-                path = path.resolve(strict=True)
-                digest = _source_digest(path)
-                source = {'resource_id': f'file-{index}', 'path': str(path), 'name': path.name,
-                          'sha256': digest}
-                report['sources'].append(source)
-                attachments.append(source)
-            native = [item for item in attachments if Path(item['path']).suffix.lower() not in {
-                '.txt', '.md', '.csv', '.tsv', '.json', '.log', '.yaml', '.yml', '.gif'}]
-            if region is not None:
-                images = [{**item, 'content_sha256': item['sha256'], 'kind': 'image'} for item in attachments]
-                manifest, structured = [], []
-                native = attachments
-            else:
-                images, manifest, structured = attachment_extractors.prepare_materials(native, out_dir=output_dir / 'prepared')
-            for item in attachments:
-                if item in native:
-                    continue
-                if Path(item['path']).suffix.lower() == '.gif':
-                    images.append({**item, 'content_sha256': item['sha256'], 'kind': 'image'})
-                else:
-                    structured.append({'resource_id': item['resource_id'], 'name': item['name'],
-                                       'text': _read(Path(item['path'])).decode('utf-8')})
-            prepared = {'images': images, 'manifest': manifest, 'structured_contents': structured}
-        _validate_prepared(prepared, frozen=material_file is not None, confirmed_empty=confirmed_empty)
-        parts = list(_parts(prepared))
-        if resource_id is not None:
-            parts = [(part, source) for part, source in parts if part['resource_id'] == resource_id]
-            if not parts:
-                raise ValueError('attachment_resource_not_found')
-        if page is not None:
-            parts = [(part, source) for part, source in parts
-                     if part['kind'] == 'image' and part['page_number'] == page]
-            if not parts:
-                raise ValueError('attachment_page_not_found')
-        if region is not None:
-            parts = [(part, source) for part, source in parts if part['kind'] == 'image']
-            if len(parts) != 1:
-                raise ValueError('attachment_region_source_invalid')
-        has_images = any(part['kind'] == 'image' for part, _ in parts)
-        key = _api_key() if has_images else ''
-        if has_images and not key:
-            raise ValueError('attachment_api_key_missing')
-        report['skipped_sources'] = attachment_extractors.skipped_video_sources(prepared.get('manifest', []))
-        if region is None and resource_id is None and not confirmed_empty:
-            report['coverage'] = 'non_video_only' if report['skipped_sources'] else 'all_prepared_content'
-        save()
-        for current, source in parts:
-            if time.monotonic() >= deadline:
-                raise ValueError('attachment_recognition_budget_exhausted')
-            if current['kind'] == 'image':
-                current.update(rotate=rotate, source_image_path=str(source['path']))
-                raw = _read(Path(source['path']))
-                digest = _digest(raw)
-                if source.get('content_sha256') and digest != source['content_sha256']:
-                    raise ValueError('attachment_page_changed')
-                if region is not None:
-                    current.update(region=list(region), content_sha256=digest)
-                    with _open_image(raw) as original:
-                        current['source_image_size'] = list(original.size)
-                        if rotate and getattr(original, 'n_frames', 1) > 1:
-                            raise ValueError('attachment_multiframe_rotation_unsupported')
-                        if original.format not in {'JPEG', 'PNG', 'WEBP', 'GIF'} or getattr(original, 'n_frames', 1) != 1:
-                            raise ValueError('attachment_region_source_invalid')
-                        if region[2] > original.width or region[3] > original.height:
-                            raise ValueError('attachment_region_out_of_bounds')
-                        encoded = _png_crop(original, region)
-                    current['region_png_sha256'] = _digest(encoded)
-                    blocks = [(region, _image_block(encoded, rotate=rotate))]
-                else:
-                    blocks = _image_tiles(raw, rotate=rotate)
-            else:
-                report['parts'].append({**current, 'content_sha256': _digest(source.encode()), 'answer': source})
-                save()
-                continue
-            current['content_sha256'] = digest
-            cache_key = (current['kind'], digest)
-            if cache_key in cache:
-                previous = cache[cache_key]
-                result = {**current, 'answer': previous['answer'], 'reused_from': previous['part_id']}
-                if 'image_tiles' in previous:
-                    result['image_tiles'] = previous['image_tiles']
-            else:
-                tiles = []
-                for box, block in blocks:
-                    if box is not None:
-                        current['image_tiles'] = tiles
-                        current['failed_tile_box'] = list(box)
-                    if time.monotonic() >= deadline:
-                        raise ValueError('attachment_recognition_budget_exhausted')
-                    question = prompt
-                    if region is not None:
-                        question += f'\n仅覆盖指定区域，原图像素坐标 {list(box)}。不代表整图或整单读取完成。'
-                    elif box is not None:
-                        question += f'\n当前为同一原图的无缩放分区，像素坐标 {list(box)}，相邻分区有重叠。仅读取本分区可见内容。'
-                    if current['kind'] == 'image' and rotate:
-                        question += f'\n阅读副本已顺时针旋转 {rotate} 度；区域与分区坐标均属于旋转前原图，先裁剪再旋转。'
-                    body = {'model': MODEL, 'stream': False, 'max_tokens': 8192,
-                            'thinking': {'type': 'disabled'},
-                            'messages': [{'role': 'system', 'content': SYSTEM_PROMPT},
-                                         {'role': 'user', 'content': [
-                                             {'type': 'text', 'text': question}, block]}]}
-                    response = _post(body, key=key, timeout=min(timeout_seconds, max(.1, deadline - time.monotonic())))
-                    try:
-                        answer, usage = _answer(response)
-                    except ValueError:
-                        report['failed_response'] = _response_diagnostic(response)
-                        raise
-                    if box is not None:
-                        tile = {'box': list(box), 'answer': answer, 'usage': usage}
-                        if region is not None:
-                            tile['png_sha256'] = current['region_png_sha256']
-                        tiles.append(tile)
-                if tiles:
-                    current.pop('failed_tile_box', None)
-                    answer = ('以下回答仅覆盖指定区域，不代表整图或整单读取完成。\n\n' if region is not None
-                              else '以下分区属于同一原图，重叠内容不代表多笔或多份证据。\n\n')
-                    answer += '\n\n'.join(f'分区 {t["box"]}：\n{t["answer"]}' for t in tiles)
-                    usage = {name: sum(t['usage'][name] for t in tiles)
-                             for name in ('prompt_tokens', 'completion_tokens', 'total_tokens')
-                             if all(type(t['usage'].get(name)) is int for t in tiles)}
-                result = {**current, 'answer': answer, 'usage': usage}
-                cache[cache_key] = result
-            report['parts'].append(result)
-            save()
-        if material_file:
-            if _material(material_file)[1] != report['material_binding']:
-                raise ValueError('frozen_material_changed')
-            for part, source in parts:
-                if part['kind'] == 'image':
-                    observed = next(item for item in report['parts'] if item['part_id'] == part['part_id'])
-                    if _digest(_read(Path(source['path']))) != observed['content_sha256']:
-                        raise ValueError('attachment_page_changed')
-        for source in report['sources']:
-            if _source_digest(Path(source['path'])) != source['sha256']:
-                raise ValueError('attachment_source_changed')
-        report['status'] = 'complete' if report['parts'] else 'skipped'
-    except (OSError, RuntimeError, ValueError, TypeError, KeyError) as error:
-        code = str(error)
-        report.update(status='failed', error_code=code if code.startswith(('attachment_', 'frozen_')) else 'attachment_recognition_failed')
-        if current:
-            report['failed_part'] = current
-    report['completed_at'] = datetime.now(timezone.utc).isoformat()
-    if resource_id is not None:
-        observations_file = output_dir / 'observations.json'
-        observations = []
-        if report['status'] == 'complete':
-            for part in report['parts']:
-                locator = part['evidence_ref'] + '#supplemental'
-                if part['kind'] == 'image':
-                    locator += f'&rotate={part["rotate"]}'
-                    if 'region' in part:
-                        locator += '&region=' + ','.join(str(value) for value in part['region'])
-                observations.append({**part, 'locator': locator, 'content': part['answer'], 'status': 'read',
-                                     'coverage': report['coverage'], 'selection': report['selection'],
-                                     'report_file': str(report_file), 'prompt': prompt,
-                                     'material_binding': report['material_binding']})
-        runtime_control.write_control_bytes_atomic(
-            observations_file, (json.dumps(observations, ensure_ascii=False) + '\n').encode())
-        report['observations_file'] = str(observations_file)
-    save()
-    return report
+    options = _RecognitionOptions(files, material_file, prompt, output_dir, timeout_seconds, budget_seconds,
+                                  _Selection(resource_id, page, region, rotate))
+    return _RecognitionSession(options, post=_post, monotonic=time.monotonic).run()

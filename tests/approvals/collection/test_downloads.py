@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded, Unavailable
+
 from collections import Counter
 import io
 from pathlib import Path
@@ -15,7 +18,6 @@ from apps.oa.approvals.collection import cache as attachment_cache
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.materials import resources as material_resources
-from apps.oa.approvals.sources import downloads as remote
 from apps.oa.materials import spreadsheet_images
 from apps.oa.approvals.collection import case as case_bundle
 
@@ -43,16 +45,16 @@ def recorded_download(tmp_path, monkeypatch, workbook_bytes):
     calls = []
     lock = Lock()
     monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path/'cache.sqlite3'))
-    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
 
     def download(resource, *, dest_dir, **_kwargs):
         path = dest_dir / material_resources.deterministic_filename(resource)
         path.write_bytes(workbook_bytes + (b'changed' if resource['id'] == 'different' else b''))
         with lock:
             calls.append(resource['id'])
-        return path, ''
+        return Downloaded(path)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
     return calls
 
 
@@ -65,13 +67,15 @@ def test_download_shares_identical_content_after_reading_every_resource(
     tmp_path, monkeypatch, recorded_download, browser_fallback,
 ):
     if browser_fallback:
-        download = attachments._download_resource_direct
-        monkeypatch.setattr(attachments, '_download_resource_direct', lambda *_a, **_k:(None, ''))
-        monkeypatch.setattr(remote, '_download_resource_with_browser', download)
-    files, errors = attachments.download_resources(
+        transfer = attachments.build_download_sources(POLICY).transfer
+        transfer.browser = transfer.direct
+        transfer.direct = lambda *_a, **_k: Unavailable()
+    download_result = attachments.download_resources(
         resources(['first', 'second', 'different']), dest_dir=tmp_path/'downloads',
         timeout_sec=1, allow_browser_download=True, request_id='recorded', flow_key='tpm_small_marketing_fee',
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert Counter(recorded_download) == Counter(['first', 'second', 'different'])
     assert [item['resource_id'] for item in files] == ['first', 'second', 'different']
@@ -91,10 +95,12 @@ def test_explicit_cached_content_reuse_preserves_previous_files(tmp_path, record
             request_id='recorded', flow_key='tpm_small_marketing_fee', resource_key=resource['id'],
             entry_json={'path':str(path), 'resource_id':resource['id'], 'name':resource['name']},
         )
-    files, errors = attachments.download_resources(
+    download_result = attachments.download_resources(
         resources(['first', 'second']), dest_dir=tmp_path/'next', timeout_sec=1,
         allow_browser_download=True, request_id='recorded', flow_key='tpm_small_marketing_fee', reuse_cache=True,
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert recorded_download == []
     assert all(path.read_bytes() == workbook_bytes for path in originals)
@@ -107,7 +113,6 @@ def test_download_reuses_new_content_and_preserves_preexisting_copy(
     tmp_path, monkeypatch, workbook_bytes, preexisting,
 ):
     monkeypatch.setenv('OA_ATTACHMENT_DOWNLOAD_CONCURRENCY', '1')
-    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
     destination = tmp_path / 'downloads'
     destination.mkdir()
     targets = resources(['first', 'second', 'third'])
@@ -118,13 +123,16 @@ def test_download_reuses_new_content_and_preserves_preexisting_copy(
     def download(resource, *, dest_dir, **_kwargs):
         path = dest_dir / material_resources.deterministic_filename(resource)
         path.write_bytes(workbook_bytes)
-        return path, ''
+        return Downloaded(path)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
-    files, errors = attachments.download_resources(
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
+    download_result = attachments.download_resources(
         targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='recorded', flow_key='tpm_small_marketing_fee',
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert [item['resource_id'] for item in files] == [item['id'] for item in targets]
     assert len({item['path'] for item in files}) == 1
@@ -148,7 +156,10 @@ def test_preparation_reuses_content_and_rebinds_each_resource(tmp_path, monkeypa
         return extract(*args, **kwargs)
 
     monkeypatch.setattr(spreadsheet_images, 'extract', recorded_extract)
-    images, manifest, facts = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
+    facts = prepared_record['structured_contents']
     assert len(calls) == 1
     assert [(i['resource_id'], i['parent_resource_id'], i['name']) for i in images] == [
         ('first', 'archive-a', 'first.xlsx'), ('second', 'archive-b', 'second.xlsx'),
@@ -192,7 +203,7 @@ def test_collection_preserves_67_resource_bindings_with_one_workbook_and_image(
             'flow_key':'tpm_small_marketing_fee', 'workflow_id':'195039',
             'workflow_name':'TPM小额市场费用报销申请流程',
         }], allow_browser_download=True, attachment_root=tmp_path/'downloads', prepared_root=tmp_path/'prepared',
-    )
+     source_policy=POLICY)
     assert Counter(recorded_download) == Counter(ids)
     assert [r['resource_id'] for r in material['resources']] == ids
     assert Counter(r['owner_detail_id'] for r in material['resources']) == {
@@ -219,7 +230,8 @@ def test_identical_docx_files_keep_their_own_media_identities(tmp_path, png_byte
         path = tmp_path/f'{rid}.docx'
         path.write_bytes(content.getvalue())
         items.append({'resource_id':rid, 'name':path.name, 'path':str(path)})
-    images, _, _ = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared')
+    prepared_record = attachment_extractors.prepare_materials(items, out_dir=tmp_path/'prepared').to_record()
+    images = prepared_record['images']
     assert [(i['resource_id'], i['parent_resource_id']) for i in images] == [
         (f'{rid}::docx_media::{index}', rid) for rid in ('first', 'second') for index in (1, 2)
     ]
@@ -232,9 +244,11 @@ def test_identical_archive_videos_keep_parent_in_skip_records(tmp_path):
         path = tmp_path/f'{index}.mp4'
         path.write_bytes(b'recorded unread video')
         children.append({'resource_id':f'archive::{index}', 'parent_resource_id':'archive', 'path':str(path)})
-    images, manifest, _ = attachment_extractors.prepare_materials(
+    prepared_record = attachment_extractors.prepare_materials(
         [{'resource_id':'archive', 'extracted_files':children}], out_dir=tmp_path/'prepared',
-    )
+    ).to_record()
+    images = prepared_record['images']
+    manifest = prepared_record['manifest']
     assert images == []
     assert [(i['resource_id'], i['parent_resource_id']) for i in manifest[0]['skipped_videos']] == [
         ('archive::1', 'archive'), ('archive::2', 'archive'),
@@ -247,12 +261,13 @@ def test_identical_archive_image_stays_inside_prepared_directory(tmp_path, png_b
     standalone.write_bytes(png_bytes)
     child.write_bytes(png_bytes)
     prepared = tmp_path/'prepared'
-    images, _, _ = attachment_extractors.prepare_materials([
+    prepared_record = attachment_extractors.prepare_materials([
         {'resource_id':'standalone', 'path':str(standalone)},
         {'resource_id':'archive', 'extracted_files':[
             {'resource_id':'archive::1', 'parent_resource_id':'archive', 'path':str(child)},
         ]},
-    ], out_dir=prepared)
+    ], out_dir=prepared).to_record()
+    images = prepared_record['images']
     assert images[0]['path'] == standalone
     assert Path(images[1]['path']).is_relative_to(prepared)
     assert images[1]['parent_resource_id'] == 'archive'
@@ -269,19 +284,24 @@ def test_cached_archive_reuse_preserves_existing_children(tmp_path, monkeypatch)
         calls.append(resource['id'])
         path = dest_dir / 'source.zip'
         path.write_bytes(archive.getvalue())
-        return path, ''
+        return Downloaded(path)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
     target = [{'id': 'archive-one', 'name': 'source.zip', 'downloadUrl': '/source.zip'}]
     options = dict(dest_dir=tmp_path / 'files', request_id='101', flow_key='general_expense',
                    timeout_sec=5, allow_browser_download=True, reuse_cache=True)
-    first, errors = attachments.download_resources(target, **options)
+    download_result = attachments.download_resources(target, **options, sources=attachments.build_download_sources(POLICY))
+    first = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     child = Path(first[0]['extracted_files'][0]['path'])
     retained = child.parent / 'retained.txt'
     retained.write_text('existing derived evidence')
     child.write_text('changed derived invoice')
-    second, errors = attachments.download_resources(target, **options)
+    download_result = attachments.download_resources(target, **options, sources=attachments.build_download_sources(POLICY))
+    second = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert calls == ['archive-one']
     fresh = second[0]['extracted_files'][0]

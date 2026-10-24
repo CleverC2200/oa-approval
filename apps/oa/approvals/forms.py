@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import html
-import os
 from html.parser import HTMLParser
 from pathlib import Path
 import re
@@ -166,12 +165,8 @@ def _resource_name_from_url(url: str) -> str:
     return attachments.safe_filename(name, "attachment.bin")
 
 
-def _field_attachment_hosts() -> set[str]:
-    return {host.strip().lower() for host in os.environ.get("OA_EXTRA_DOWNLOAD_HOSTS", "").split(",") if host.strip()}
-
-
 def attachment_url_resources_from_fields(
-    data: dict[str, Any],
+    data: dict[str, Any], *, origins,
 ) -> list[dict[str, Any]]:
     resources: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -183,8 +178,7 @@ def attachment_url_resources_from_fields(
             url = match.group(0).strip()
             parsed = urllib.parse.urlparse(url)
             if (
-                parsed.scheme != "https"
-                or parsed.hostname not in _field_attachment_hosts()
+                not origins.permits_field_url(url)
                 or url in seen
             ):
                 continue
@@ -205,18 +199,18 @@ def attachment_url_resources_from_fields(
     return resources
 
 
-def _trip_attachment_identity(resource: dict[str, Any]) -> str:
+def _trip_attachment_identity(resource: dict[str, Any], *, origins) -> str:
     raw_url = str(
         resource.get("downloadUrl") or resource.get("download_url") or ""
     ).strip()
     parsed = urllib.parse.urlparse(raw_url)
-    if parsed.hostname not in _field_attachment_hosts():
+    if parsed.hostname not in origins.extra_hosts:
         return ""
     match = TRIP_ATTACHMENT_ID_RE.search(parsed.path)
     return str(match.group(1)) if match else ""
 
 
-def _attachment_resource_bindings(data: dict[str, Any]) -> dict[str, dict[str, str]]:
+def _attachment_resource_bindings(data: dict[str, Any], *, origins) -> dict[str, dict[str, str]]:
     candidates: dict[str, set[tuple[str, str, str]]] = {}
     for field in extract_fields(data):
         table = str(field.get("table") or "")
@@ -229,7 +223,7 @@ def _attachment_resource_bindings(data: dict[str, Any]) -> dict[str, dict[str, s
             str(field.get("name") or ""),
             owner_detail_id,
         )
-        for resource_id, _filename, _link in _validated_html_links(str(field.get("attachment_html") or "")):
+        for resource_id, _filename, _link in _validated_html_links(str(field.get("attachment_html") or ""), origins=origins):
             candidates.setdefault(resource_id, set()).add(binding)
     bindings: dict[str, dict[str, str]] = {}
     for resource_id, values in candidates.items():
@@ -260,7 +254,7 @@ class _AttachmentLinkParser(HTMLParser):
             self.links.append(match.group(1))
 
 
-def _validated_html_links(markup: str) -> list[tuple[str, str, str]]:
+def _validated_html_links(markup: str, *, origins) -> list[tuple[str, str, str]]:
     parser = _AttachmentLinkParser()
     parser.feed(markup)
     links = []
@@ -269,12 +263,8 @@ def _validated_html_links(markup: str) -> list[tuple[str, str, str]]:
             parsed = urllib.parse.urlsplit(link)
             if parsed.path != "/news/download.do" or parsed.fragment:
                 continue
-            if parsed.netloc or parsed.scheme:
-                origin = urllib.parse.urlsplit(os.environ.get("OA_BASE_URL", ""))
-                if (parsed.scheme not in ("", "https") or parsed.username or parsed.password
-                        or not origin.hostname or parsed.hostname != origin.hostname
-                        or (parsed.port or 443) != (origin.port or 443)):
-                    continue
+            if not origins.permits_native_origin(link):
+                continue
             query = urllib.parse.parse_qs(parsed.query)
         except ValueError:
             continue
@@ -288,7 +278,7 @@ def _validated_html_links(markup: str) -> list[tuple[str, str, str]]:
     return links
 
 
-def _html_attachment_resources(data: dict[str, Any]) -> list[dict[str, Any]]:
+def _html_attachment_resources(data: dict[str, Any], *, origins) -> list[dict[str, Any]]:
     sources = [
         (str(field.get("path") or ""), str(field.get("name") or ""), str(field.get("attachment_html") or ""))
         for field in extract_fields(data)
@@ -299,7 +289,7 @@ def _html_attachment_resources(data: dict[str, Any]) -> list[dict[str, Any]]:
     rows: dict[str, dict[str, Any]] = {}
     paths: dict[str, set[str]] = {}
     for path, name, markup in sources:
-        for resource_id, filename, link in _validated_html_links(markup):
+        for resource_id, filename, link in _validated_html_links(markup, origins=origins):
             rows.setdefault(resource_id, {
                 "id": resource_id, "name": filename,
                 "downloadUrl": "/weaver/weaver.file.FileDownload?" + urllib.parse.urlencode({"fileid": resource_id}),
@@ -316,9 +306,9 @@ def _html_attachment_resources(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 def logical_attachment_resources(
     data: dict[str, Any],
-    resources: list[dict[str, Any]],
+    resources: list[dict[str, Any]], *, origins,
 ) -> list[dict[str, Any]]:
-    bindings = _attachment_resource_bindings(data)
+    bindings = _attachment_resource_bindings(data, origins=origins)
     rows = []
     for resource in attachments.attachment_resources(resources):
         item = dict(resource)
@@ -337,7 +327,7 @@ def logical_attachment_resources(
             item[_TRUSTED_SOURCE_FIELD_NAME_KEY] = binding["source_field_name"]
         rows.append(item)
     known_ids = {str(item.get("id") or item.get("resourceId") or item.get("fileId") or "") for item in rows}
-    for item in _html_attachment_resources(data):
+    for item in _html_attachment_resources(data, origins=origins):
         resource_id = item["id"]
         if resource_id in known_ids:
             continue
@@ -350,7 +340,7 @@ def logical_attachment_resources(
         str(item.get("downloadUrl") or item.get("download_url") or "").strip()
         for item in rows
     }
-    for item in attachment_url_resources_from_fields(data):
+    for item in attachment_url_resources_from_fields(data, origins=origins):
         url = str(item.get("downloadUrl") or "").strip()
         if url and url not in known_urls:
             rows.append(item)
@@ -359,7 +349,7 @@ def logical_attachment_resources(
     deduplicated: list[dict[str, Any]] = []
     seen_trip_ids: set[str] = set()
     for item in rows:
-        trip_id = _trip_attachment_identity(item)
+        trip_id = _trip_attachment_identity(item, origins=origins)
         if trip_id and trip_id in seen_trip_ids:
             continue
         if trip_id:
