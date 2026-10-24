@@ -4,13 +4,17 @@ import json
 import re
 import shlex
 from pathlib import Path
-import sys
 
 from apps.oa.materials.resources import image_locations
+from apps.oa.runtime.paths import PROJECT_ROOT
+
+
+def _argv(operation: str, *arguments: str) -> list[str]:
+    return ['bash', str(PROJECT_ROOT / '.codex/python.sh'), '-m', 'apps.oa.materials', operation, *arguments]
 
 
 def command(material_file: Path) -> str:
-    return shlex.join([sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'read', str(material_file.absolute())])
+    return shlex.join(_argv('read', str(Path(material_file).expanduser().absolute())))
 
 
 def _json(value: object) -> str:
@@ -69,7 +73,8 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
     resources = material.get('resources') or []
     if not pages:
         return {}
-    recognition = [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'recognize']
+    material_file = Path(material_file).expanduser().absolute()
+    recognition = _argv('recognize')
     routes = {
         'kind': 'generated_tool_navigation',
         'readability': 'not_verified',
@@ -108,7 +113,7 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
                 'coverage': 'image_region',
             }
             route['auxiliary_copy'] = {
-                'argv': [sys.executable, '-X', 'utf8', '-B', '-m', 'apps.oa.materials', 'compress', '--file', path],
+                'argv': _argv('compress', '--file', path),
                 'recognition_authorization': 'requires_current_scope',
                 'counts_as_original_page_coverage': False,
             }

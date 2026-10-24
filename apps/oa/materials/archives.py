@@ -10,6 +10,7 @@ import subprocess
 import threading
 from typing import Any, Dict, List, Tuple
 import zipfile
+from uuid import uuid4
 
 from apps.oa.materials.resources import resource_name, resource_key, safe_filename
 from apps.oa.runtime import files as material_store
@@ -377,11 +378,7 @@ def _attach_archive_children(
     if suffix not in ZIP_EXTS | RAR_EXTS:
         return item, ""
     if item.get("archive_status") == "extracted" and isinstance(item.get("extracted_files"), list):
-        children = item["extracted_files"]
-        if all(Path(str(child.get("path") or "")).is_file()
-               and not Path(str(child.get("path") or "")).is_symlink() for child in children):
-            return item, ""
-        return None, "attachment_archive_cached_children_invalid"
+        dest_dir = dest_dir / "expanded" / uuid4().hex
     extracted, err = _extract_archive(path, dest_dir=dest_dir, resource=resource)
     if err:
         return None, err
