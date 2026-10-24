@@ -101,11 +101,12 @@ def main():
     if args.push:
         revisions = []
         for line in sys.stdin:
-            local_ref, local_sha, _, _ = line.split()
-            if not local_ref.startswith('refs/heads/'):
+            local_ref, local_sha, remote_ref, _ = line.split()
+            deleting = local_ref == '(delete)' and set(local_sha) == {'0'}
+            if not (remote_ref if deleting else local_ref).startswith('refs/heads/'):
                 print('private_git_ref: only branch refs may be shared')
                 return 1
-            if set(local_sha) != {'0'}:
+            if not deleting:
                 revisions.append(local_sha)
         if not revisions:
             return 0

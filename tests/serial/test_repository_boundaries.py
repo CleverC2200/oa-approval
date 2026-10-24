@@ -1,4 +1,6 @@
 import io
+from pathlib import Path
+import shlex
 import sys
 
 import pytest
@@ -42,6 +44,50 @@ def test_deleted_secret_is_still_blocked_in_outgoing_history(repository):
     assert history.returncode == 1
     assert 'api_key: deleted.py' in history.stdout
     assert secret not in history.stdout
+    head = run('git', 'rev-parse', 'HEAD').stdout.strip()
+    update = f'refs/heads/main {head} refs/heads/main {"0" * 40}\n'
+    deletion = f'(delete) {"0" * 40} refs/heads/retired {head}\n'
+    for records in (update, deletion + update, update + deletion):
+        pushed = run(sys.executable, '.codex/share_check.py', '--push', input=records)
+        assert pushed.returncode == 1
+        assert 'api_key: deleted.py' in pushed.stdout
+        assert secret not in pushed.stdout
+
+
+@pytest.mark.parametrize('mixed', [False, True])
+def test_pre_push_allows_branch_deletion_without_scanning_staged_files(repository, tmp_path, mixed):
+    root, run, _ = repository
+    remote = tmp_path / 'remote.git'
+    assert run('git', 'init', '--bare', '-q', str(remote)).returncode == 0
+    assert run('git', 'push', str(remote), 'HEAD:refs/heads/retired').returncode == 0
+    (root / '.env').write_text('OA_DB_PASSWORD=synthetic\n')
+    assert run('git', 'add', '.env').returncode == 0
+    setup = run('bash', '.codex/python.sh', 'setup')
+    assert setup.returncode == 0
+    Path(setup.stdout.strip()).write_text('#!/usr/bin/env bash\nexec ' + shlex.quote(sys.executable) + ' "$@"\n')
+    local_ref = run('git', 'symbolic-ref', 'HEAD').stdout.strip()
+    refspecs = [':refs/heads/retired', *([f'{local_ref}:refs/heads/kept'] if mixed else [])]
+    result = run('git', 'push', str(remote), *refspecs)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert run('git', 'ls-remote', str(remote), 'refs/heads/retired').stdout == ''
+    kept = run('git', 'ls-remote', str(remote), 'refs/heads/kept').stdout
+    assert bool(kept) is mixed
+
+
+@pytest.mark.parametrize('local_ref,deleting,remote_ref', [
+    ('refs/tags/release', False, 'refs/tags/release'),
+    ('refs/snapshots/private', False, 'refs/heads/main'),
+    ('(delete)', True, 'refs/tags/release'),
+    ('(delete)', False, 'refs/heads/main'),
+])
+def test_pre_push_keeps_nonbranch_refs_blocked(repository, local_ref, deleting, remote_ref):
+    _, run, _ = repository
+    head = run('git', 'rev-parse', 'HEAD').stdout.strip()
+    local_sha = '0' * 40 if deleting else head
+    records = f'{local_ref} {local_sha} {remote_ref} {head}\n'
+    result = run(sys.executable, '.codex/share_check.py', '--push', input=records)
+    assert result.returncode == 1
+    assert 'private_git_ref: only branch refs may be shared' in result.stdout
 
 
 def test_pre_push_failure_prevents_remote_update(repository, tmp_path):
