@@ -9,6 +9,8 @@ import urllib.parse
 
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import resources
+from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
@@ -257,7 +259,7 @@ def _resource_descriptor(
             or (request_id if source_system == "travel_platform" else "")
         ),
         "discovery_ref": str(resource.get("discovery_ref") or ""),
-        "name": attachments.resource_name(resource),
+        "name": resources.resource_name(resource),
         "media_type": "",
         "local_readonly_path": "",
     }
@@ -266,12 +268,12 @@ def _resource_descriptor(
 def _normalized_attachment_name(resource: dict[str, Any]) -> str:
     return unicodedata.normalize(
         "NFKC",
-        attachments.resource_name(resource).strip(),
+        resources.resource_name(resource).strip(),
     ).casefold()
 
 
 def _packaging_review_role(resource: dict[str, Any]) -> str:
-    suffix = Path(attachments.resource_name(resource).strip()).suffix.casefold()
+    suffix = Path(resources.resource_name(resource).strip()).suffix.casefold()
     if suffix in _SPREADSHEET_SUFFIXES:
         return "excel_reference"
     if suffix in attachment_extractors.PREPARABLE_IMAGE_EXTS or suffix in {".pdf", ".pptx"}:
@@ -310,7 +312,7 @@ def _prepare_packaging_resources(
             deduplicated.append(
                 {
                     "reason": "cross_field_duplicate_filename",
-                    "name": attachments.resource_name(item).strip(),
+                    "name": resources.resource_name(item).strip(),
                     "kept_source_resource_id": str(
                         top.get("id")
                         or top.get("resourceId")
@@ -424,7 +426,7 @@ def _merge_resources(
             resource.get("downloadUrl") or resource.get("download_url") or ""
         ).strip()
         try:
-            url_identity = attachments.normalize_download_url(
+            url_identity = remote.normalize_download_url(
                 raw_url,
                 allow_extra_hosts=bool(resource.get("allowExtraDownloadHost")),
             )
@@ -529,6 +531,7 @@ def collect_case(
     authority_facts.extend(travel_facts)
     original_resources = invoice_originals.resources(
         str(request_id), workflow, str(config.get("flow_key") or ""), invoice_evidence,
+        base_url=remote.OA_HOST,
     )
     logical_resources = _merge_resources(form_resources, discovered_resources + original_resources)
     original_sources = {item["id"]: item["_invoice_original"] for item in original_resources}

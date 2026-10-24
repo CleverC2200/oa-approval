@@ -14,6 +14,8 @@ import pytest
 from apps.oa.approvals.collection import cache as attachment_cache
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import resources as material_resources
+from apps.oa.approvals.sources import downloads as remote
 from apps.oa.materials import spreadsheet_images
 from apps.oa.approvals.collection import case as case_bundle
 
@@ -41,10 +43,10 @@ def recorded_download(tmp_path, monkeypatch, workbook_bytes):
     calls = []
     lock = Lock()
     monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path/'cache.sqlite3'))
-    monkeypatch.setattr(attachments, 'OA_HOST', 'https://oa.example.test')
+    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
 
     def download(resource, *, dest_dir, **_kwargs):
-        path = dest_dir / attachments.deterministic_filename(resource)
+        path = dest_dir / material_resources.deterministic_filename(resource)
         path.write_bytes(workbook_bytes + (b'changed' if resource['id'] == 'different' else b''))
         with lock:
             calls.append(resource['id'])
@@ -65,7 +67,7 @@ def test_download_shares_identical_content_after_reading_every_resource(
     if browser_fallback:
         download = attachments._download_resource_direct
         monkeypatch.setattr(attachments, '_download_resource_direct', lambda *_a, **_k:(None, ''))
-        monkeypatch.setattr(attachments, '_download_resource_with_browser', download)
+        monkeypatch.setattr(remote, '_download_resource_with_browser', download)
     files, errors = attachments.download_resources(
         resources(['first', 'second', 'different']), dest_dir=tmp_path/'downloads',
         timeout_sec=1, allow_browser_download=True, request_id='recorded', flow_key='tpm_small_marketing_fee',
@@ -105,16 +107,16 @@ def test_download_reuses_new_content_and_preserves_preexisting_copy(
     tmp_path, monkeypatch, workbook_bytes, preexisting,
 ):
     monkeypatch.setenv('OA_ATTACHMENT_DOWNLOAD_CONCURRENCY', '1')
-    monkeypatch.setattr(attachments, 'OA_HOST', 'https://oa.example.test')
+    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
     destination = tmp_path / 'downloads'
     destination.mkdir()
     targets = resources(['first', 'second', 'third'])
-    previous = destination / attachments.deterministic_filename(targets[1])
+    previous = destination / material_resources.deterministic_filename(targets[1])
     if preexisting:
         previous.write_bytes(workbook_bytes)
 
     def download(resource, *, dest_dir, **_kwargs):
-        path = dest_dir / attachments.deterministic_filename(resource)
+        path = dest_dir / material_resources.deterministic_filename(resource)
         path.write_bytes(workbook_bytes)
         return path, ''
 
@@ -255,3 +257,32 @@ def test_identical_archive_image_stays_inside_prepared_directory(tmp_path, png_b
     assert Path(images[1]['path']).is_relative_to(prepared)
     assert images[1]['parent_resource_id'] == 'archive'
     assert Path(images[1]['path']).read_bytes() == png_bytes
+
+
+def test_cached_archive_reuse_preserves_existing_children(tmp_path, monkeypatch):
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as source:
+        source.writestr('invoice.txt', 'original invoice')
+    calls = []
+
+    def download(resource, *, dest_dir, **kwargs):
+        calls.append(resource['id'])
+        path = dest_dir / 'source.zip'
+        path.write_bytes(archive.getvalue())
+        return path, ''
+
+    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    target = [{'id': 'archive-one', 'name': 'source.zip', 'downloadUrl': '/source.zip'}]
+    options = dict(dest_dir=tmp_path / 'files', request_id='101', flow_key='general_expense',
+                   timeout_sec=5, allow_browser_download=True, reuse_cache=True)
+    first, errors = attachments.download_resources(target, **options)
+    assert errors == []
+    child = Path(first[0]['extracted_files'][0]['path'])
+    retained = child.parent / 'retained.txt'
+    retained.write_text('existing derived evidence')
+    second, errors = attachments.download_resources(target, **options)
+    assert errors == []
+    assert calls == ['archive-one']
+    assert second[0]['extracted_files'] == first[0]['extracted_files']
+    assert child.read_text() == 'original invoice'
+    assert retained.read_text() == 'existing derived evidence'

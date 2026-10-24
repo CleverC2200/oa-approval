@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import travel as travel_orders
 
 
@@ -107,7 +108,7 @@ def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_tr
         ]}]}}
     oa_api = SimpleNamespace(request_context=lambda _: (workflow, []))
     monkeypatch.setattr(case_bundle, '_authority_facts', lambda **_: [])
-    monkeypatch.setattr(case_bundle.invoice_originals, 'resources', lambda *_: [])
+    monkeypatch.setattr(case_bundle.invoice_originals, 'resources', lambda *_, **__: [])
     with pytest.raises(case_bundle.CollectionFailure, match='^travel_attachment_resources_incomplete$') as caught:
         case_bundle.collect_case('12', oa_api=oa_api, configs=[config], allow_browser_download=True,
                                  attachment_timeout_sec=1)
@@ -337,8 +338,8 @@ def browser_transport(monkeypatch):
     monkeypatch.setattr(playwright.sync_api, 'sync_playwright', Playwright)
     monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: True)
     monkeypatch.setattr(travel_orders, 'TRIP_BASE_URL', 'https://trip.example.test')
-    monkeypatch.setattr(attachments, 'rpa_storage_state', lambda **_k: {'cookies': [], 'origins': []})
-    monkeypatch.setattr(attachments, 'browser_visible_fallback_enabled', lambda: True)
+    monkeypatch.setattr(remote, 'rpa_storage_state', lambda **_k: {'cookies': [], 'origins': []})
+    monkeypatch.setattr(remote, 'browser_visible_fallback_enabled', lambda: True)
     return transport
 
 

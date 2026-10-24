@@ -29,6 +29,7 @@ from apps import json_artifact
 
 
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import archives
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
@@ -312,7 +313,7 @@ def test_company_field_does_not_fall_back_to_a_present_browser_display() -> None
 def test_archive_limit_error_reaches_flow_admission_without_preparing_partial_files(tmp_path, monkeypatch):
     archive = tmp_path / "too-many.zip"
     with zipfile.ZipFile(archive, "w") as output:
-        for index in range(attachments.ARCHIVE_MAX_FILES + 1):
+        for index in range(archives.ARCHIVE_MAX_FILES + 1):
             output.writestr(f"{index}.txt", "recorded")
     resource = {"id": "recorded-archive", "name": archive.name, "downloadUrl": "/recorded/too-many.zip"}
     monkeypatch.setattr(case_bundle, "_travel_resources", lambda **_kw: ([], []))

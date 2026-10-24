@@ -294,6 +294,7 @@ def test_travel_positive_count_still_requires_resources(travel_source):
 def test_travel_count_uses_native_records_and_retains_each_source_identity(
         tmp_path, monkeypatch, travel_source, failure):
     from apps.oa.approvals.collection import downloads as attachments
+    from apps.oa.approvals.sources import downloads as remote
     from apps.oa.approvals import forms as evidence_packet
     from apps.oa.approvals.collection import invoice_originals
     from apps.oa.approvals.collection.case import CollectionFailure
@@ -302,7 +303,7 @@ def test_travel_count_uses_native_records_and_retains_each_source_identity(
     workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][2][
         'fieldShowValue'] = '6'
     monkeypatch.setattr(travel_orders, 'TRIP_BASE_URL', 'https://trip.example.test')
-    monkeypatch.setattr(attachments, 'EXTRA_DOWNLOAD_HOSTS', {'trip.example.test'})
+    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', {'trip.example.test'})
     inventory = []
     rows = [{'id': f'expense-{i}', 'fjList': [
         {'id': f'attachment-{i}', 'fjdz': f'{100+i}/file.txt' if i < 4 else '',
@@ -318,7 +319,7 @@ def test_travel_count_uses_native_records_and_retains_each_source_identity(
         scan['attachment_inventory'] = []
     elif failure == 'cloud_originals':
         scan['attachment_inventory'] = []
-        monkeypatch.setattr(invoice_originals, 'resources', lambda *_: [
+        monkeypatch.setattr(invoice_originals, 'resources', lambda *_, **__: [
             {'id': f'invoice-{i}', '_invoice_original': {}} for i in range(8)])
 
     def download(targets, **kwargs):

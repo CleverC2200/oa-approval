@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import html
+import os
 from html.parser import HTMLParser
 from pathlib import Path
 import re
 from typing import Any
 import urllib.parse
 
-from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.materials import resources as attachments
 from apps.oa.approvals import flows as flow
 
 
 ATTACHMENT_FIELD_URL_RE = re.compile(r"https://[^\s\"'<>]+", re.IGNORECASE)
-FIELD_ATTACHMENT_HOSTS = attachments.EXTRA_DOWNLOAD_HOSTS
+FIELD_ATTACHMENT_HOSTS = {host.strip().lower() for host in os.environ.get("OA_EXTRA_DOWNLOAD_HOSTS", "").split(",") if host.strip()}
 TRIP_ATTACHMENT_ID_RE = re.compile(
     r"/opera/(?:getFile|share/open)/(\d+)/",
     re.IGNORECASE,
@@ -266,7 +267,7 @@ def _validated_html_links(markup: str) -> list[tuple[str, str, str]]:
             if parsed.path != "/news/download.do" or parsed.fragment:
                 continue
             if parsed.netloc or parsed.scheme:
-                origin = urllib.parse.urlsplit(attachments.OA_HOST)
+                origin = urllib.parse.urlsplit(os.environ.get("OA_BASE_URL", ""))
                 if (parsed.scheme not in ("", "https") or parsed.username or parsed.password
                         or not origin.hostname or parsed.hostname != origin.hostname
                         or (parsed.port or 443) != (origin.port or 443)):

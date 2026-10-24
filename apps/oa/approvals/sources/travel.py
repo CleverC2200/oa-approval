@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List
 
-from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import downloads as attachments
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.runtime import slots as resource_slots
 from apps.oa.runtime import control as runtime_control

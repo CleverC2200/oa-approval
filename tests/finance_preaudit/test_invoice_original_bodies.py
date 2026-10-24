@@ -16,6 +16,7 @@ import pytest
 
 from apps.oa.approvals.sources import oa as api
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import auth
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
@@ -51,9 +52,9 @@ def original_transport(monkeypatch, tmp_path):
     monkeypatch.setattr(api, 'build_api', lambda _config: client)
     monkeypatch.setattr(flow, 'load_all_configs', lambda: [CONFIG])
     monkeypatch.setattr(official_sql, 'workflow_attachment_document', lambda *_args: '')
-    monkeypatch.setattr(attachments, 'OA_HOST', 'https://oa.example.test')
-    monkeypatch.setattr(attachments, 'EXTRA_DOWNLOAD_HOSTS', set())
-    monkeypatch.setattr(attachments, '_rpa_cookie_header', lambda *_a, **_kw: 'session=fixed')
+    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
+    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', set())
+    monkeypatch.setattr(remote, '_rpa_cookie_header', lambda *_a, **_kw: 'session=fixed')
     monkeypatch.setattr(auth, 'env', lambda key, default='': '77' if key == 'OA_UID' else default)
     monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path / 'cache.sqlite3'))
 
@@ -104,9 +105,9 @@ def original_transport(monkeypatch, tmp_path):
             return Response(state.pdf, request.full_url)
         return Response(json.dumps(body).encode(), request.full_url)
 
-    monkeypatch.setattr(attachments.safe_http, 'urlopen', open_request)
+    monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     monkeypatch.setattr(attachments.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
-    monkeypatch.setattr(attachments, '_download_resource_with_browser', lambda *_a, **_kw: pytest.fail('classified denial must stop'))
+    monkeypatch.setattr(remote, '_download_resource_with_browser', lambda *_a, **_kw: pytest.fail('classified denial must stop'))
     return state
 
 def collect_original(state, tmp_path):
@@ -380,7 +381,7 @@ def many_originals(original_transport, monkeypatch):
         {'status': '1', 'targetIds': state.details[params['ids']]['id']}
         if path == invoice_buyers.MAPPING_PATH else original_get(path, params)
     )
-    original_open = attachments.safe_http.urlopen
+    original_open = remote.safe_http.urlopen
 
     class Response(BytesIO):
         def __init__(self, body, url):
@@ -412,7 +413,7 @@ def many_originals(original_transport, monkeypatch):
             return original_open(request, **kwargs)
         return Response(body, request.full_url)
 
-    monkeypatch.setattr(attachments.safe_http, 'urlopen', open_request)
+    monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     monkeypatch.setattr(attachments.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
     return state
 
@@ -581,7 +582,7 @@ def test_failed_mixed_original_batch_never_publishes_cache(
         {'id': 'ordinary', 'name': 'ordinary.pdf', 'allowExtraDownloadHost': True,
          'downloadUrl': 'https://files.example.test/ordinary.pdf'},
     ]
-    original_open = attachments.safe_http.urlopen
+    original_open = remote.safe_http.urlopen
 
     class Response(BytesIO):
         def __init__(self, url):
@@ -596,8 +597,8 @@ def test_failed_mixed_original_batch_never_publishes_cache(
             return Response(request.full_url)
         return original_open(request, **kwargs)
 
-    monkeypatch.setattr(attachments, 'EXTRA_DOWNLOAD_HOSTS', {'files.example.test'})
-    monkeypatch.setattr(attachments.safe_http, 'urlopen', open_request)
+    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', {'files.example.test'})
+    monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     context = state.client.request_context
     reads = []
     stopped = []

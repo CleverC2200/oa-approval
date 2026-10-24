@@ -211,8 +211,6 @@ def _invoice_evidence(ref: dict, detail: dict) -> dict:
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             record["size_bytes"] = size
         files.append(record)
-    from apps.oa.approvals.collection.invoice_originals import original_source
-
     original = original_source(data, ref["invoice_no"])
     if original:
         for record in files:
@@ -307,3 +305,33 @@ def read_invoice_buyers(
             "invoices": [_invoice_evidence(ref, detail) for ref, detail in zip(refs, details)],
         }
     return result
+
+
+def _positive_id(value: object) -> str:
+    text = str(value) if type(value) in (str, int) else ''
+    return text if re.fullmatch(r'[1-9][0-9]*', text) else ''
+
+
+def original_source(data: dict, invoice_number: str) -> dict:
+    record_id = _positive_id(data.get('id'))
+    if not record_id or str(data.get('number')) != invoice_number:
+        return {}
+    if data.get('fid') is not None and str(data['fid']) != record_id:
+        return {}
+    active = [item for item in data.get('flist') or [] if isinstance(item, dict)
+              and item.get('del', 0) in (0, '0') and item.get('type') == 'pdf']
+    if len(active) != 1:
+        return {}
+    cloud_file = _positive_id(active[0].get('id'))
+    modified = data.get('modify_info')
+    native = data.get('oa')
+    if not cloud_file or not isinstance(modified, dict) or not isinstance(native, dict):
+        return {}
+    doc_id = _positive_id(native.get('doc_id'))
+    file_id = _positive_id(native.get('img_id'))
+    if (not doc_id or not file_id or str(modified.get('pdf')) != cloud_file
+            or str(modified.get('furl')) != cloud_file):
+        return {}
+    return {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
+            'document_id': doc_id, 'native_file_id': file_id}
+
