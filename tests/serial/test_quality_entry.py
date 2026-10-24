@@ -35,8 +35,8 @@ def repository(tmp_path):
     environment = {**inherited, 'XDG_CACHE_HOME': str(cache), 'CHECK_CALLS': str(tmp_path / 'calls'),
                    'PATH': str(binary) + os.pathsep + os.environ['PATH']}
 
-    def run(*args, **overrides):
-        return subprocess.run(args, cwd=root, env={**environment, **overrides}, text=True, capture_output=True)
+    def run(*args, input=None, **overrides):
+        return subprocess.run(args, cwd=root, env={**environment, **overrides}, input=input, text=True, capture_output=True)
 
     assert run('git', 'init', '-q').returncode == 0
     assert run('git', 'config', 'user.name', 'Synthetic test').returncode == 0
