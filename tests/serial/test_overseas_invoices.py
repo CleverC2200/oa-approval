@@ -9,7 +9,8 @@ import urllib.parse
 import fitz
 import pytest
 
-from apps.oa.approvals import overseas_runtime as overseas
+from apps.oa.approvals.collection import overseas
+from apps.oa.approvals.operations import submit_overseas
 from apps.oa.approvals.operations import Approval
 from apps.oa.approvals import overseas as invoice
 from apps.oa.approvals.sources import overseas as overseas_invoice_api
@@ -300,7 +301,13 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
     elif po_problem == 'mismatch':
         recognized['invoices'][1]['invoice_purchase_order']['value'] = '009999'
     assert len(material['attachments']) == 2
-    assert app.submit(task['task_id'], recognition=recognized)['status'] == 'preview'
+    preview = app.submit(task['task_id'], recognition=recognized)
+    assert preview['status'] == 'preview'
+    assert preview['field_plan']['updates'] == [{'row_key': 'formtable_main_1295_dt1:1', 'values': {
+        'fpje': '20.20', 'fphm': 'INV-101,INV-102', 'fpdqr': '2026-12-01',
+        'custom_date': '2026-10-20', 'custom_invoice_po': {
+            None: '001234,001234', 'missing': '001234', 'mismatch': '001234,009999'}[po_problem]}}]
+    assert preview['field_plan']['remark'] == preview['opinion']
     assert posts == []
     with pytest.raises(ValueError, match='overseas_authorization_required'):
         app.submit(task['task_id'], recognition=recognized, confirm_write=True)
@@ -333,7 +340,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
 ])
 def test_overseas_submit_preserves_response_and_completion_evidence(case, response, pending, fresh, expected_code):
     data, resources, _, material, recognized = case()
-    plan = overseas.plan(material, recognized)
+    plan = invoice.build_plan(material, recognized)
     posts = []
     class Api:
         def request_context(self, request_id):
@@ -351,9 +358,36 @@ def test_overseas_submit_preserves_response_and_completion_evidence(case, respon
             return [{'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()
                      if fresh else '2020-01-01T12:00:00+00:00'}]
 
-    result = overseas.submit(Api(), '201', material, plan)
+    api = Api()
+    result = submit_overseas(api, api, '201', material, plan)
     assert result['failure_code'] == expected_code
     assert result['submit_ok'] is (response == 'SUCCESS')
     assert result['done_hit'] is (response == 'SUCCESS' and fresh)
     assert result['postcheck_done_hit'] is (expected_code is None)
     assert len(posts) == 1
+
+
+def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_path, monkeypatch):
+    data, resources, files, _, _ = case()
+    class Api:
+        def pending_rows(self):
+            return [{'request_id': '201', 'received_at': '2026-10-23 09:00:00',
+                     'operator_id': 'tester', 'workflow_key': 'overseas_invoice'}]
+
+        def request_context(self, request_id):
+            return data, resources
+
+    monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
+    monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda: pytest.fail('injected adapter must not fall back to real credentials'))
+    app = Approval(tmp_path / 'runtime', api=Api(), writer=object(), configs=[])
+    started = app.pending()
+    task = app.collect(started['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    material = json.loads(Path(task['material_file']).read_text())
+    recognition = {'material_digest': invoice.digest(material), 'invoices': [
+        reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
+        for item in material['attachments']]}
+    with pytest.raises(ValueError, match='invoice_write_adapter_required'):
+        submit_overseas(app.api, app.writer, '201', material, invoice.build_plan(material, recognition))
+    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
+    assert result['status'] == 'unknown'
+    assert len(app.inspect(task['task_id'])['submissions']) == 1

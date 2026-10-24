@@ -1,31 +1,26 @@
 from __future__ import annotations
 
-from apps.oa.runtime.paths import PROJECT_ROOT
+from apps.oa.approvals.rules import freeze_rules
 
 from contextlib import contextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
-import re
 from pathlib import Path
-import shutil
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals.sources import writer_outcomes
+from apps.oa.approvals.sources.writer import POSTCHECK_TIMEOUT, SUBMIT_REJECTED, verification_result, submission_status
+
+from apps.oa.approvals import overseas as business
+from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
+from apps.oa.approvals.sources.writer import handled_since
 
 from apps.oa.approvals.store import Store
 from apps.oa.approvals.store import encoded
 from apps.oa.approvals.store import occurrence_key
-
-
-PROJECT = PROJECT_ROOT
-RULE_NAMES = {
-    "travel_expense":"travel-expense", "business_entertainment":"business-entertainment",
-    "business_support_fee":"business-support-fee", "small_marketing_fee":"small-marketing-fee",
-    "tpm_small_marketing_fee":"tpm-small-marketing-fee", "general_expense":"general-expense",
-    "packaging_layout_approval":"packaging-layout-approval",
-}
 
 
 def file_digest(path):
@@ -53,44 +48,37 @@ def material_paths(value):
     return paths
 
 
-def freeze_rules(workflow_key, directory):
-    reference = Path(".agents/skills/oa-finance-preaudit/references")
-    if workflow_key == "overseas_invoice":
-        entry = Path(".agents/skills/oa-overseas-invoice/SKILL.md")
-        selected = [entry, Path("docs/overseas-invoice.md")]
-    else:
-        if workflow_key not in RULE_NAMES:
-            raise ValueError("rule_workflow_unknown")
-        entry = reference / "flows" / (RULE_NAMES[workflow_key]+".md")
-        selected = [entry, *(reference / name for name in (
-            "result-contract.md", "observation-contract.md", "execution-contract.md"))]
-        if workflow_key == "packaging_layout_approval":
-            audit = Path(".agents/skills/audit-chinese-image-text")
-            selected += [audit / "SKILL.md", audit / "scripts/problem_set.py"]
-            selected += [audit / "references" / name for name in (
-                "error-taxonomy.md", "output-contract.md", "problem-set.json", "visual-agent-prompts.md")]
-        else:
-            selected += [reference / name for name in ("payment-screenshot-exemption.md",
-                "finance-result-contract.md", "finance-observation-contract.md")]
-            selected += [Path("docs/agents") / name for name in (
-                "attachment-recognition.md", "image-compression.md", "invoice-originals.md")]
-    for relative in selected:
-        source = PROJECT / relative
-        if not source.is_file():
-            raise ValueError("rule_dependency_missing")
-    sources = {(PROJECT / relative).resolve() for relative in selected}
-    for source in sources:
-        if source.suffix != ".md":
-            continue
-        for link in re.findall(r"\]\(([^)]+)\)",source.read_text(encoding="utf-8")):
-            path = link.split("#",1)[0]
-            if path and "://" not in path and (source.parent / path).resolve() not in sources:
-                raise ValueError("rule_dependency_out_of_scope")
-    for relative in selected:
-        target = directory / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(PROJECT / relative,target)
-    return directory / entry
+def expected_overseas_snapshot(material, plan):
+    expected = deepcopy(material["snapshot"])
+    for update in plan["updates"]:
+        row = next(row for row in expected["rows"] if row["key"] == update["row_key"])
+        row["values"].update(update["values"])
+    return expected
+
+def check_overseas_fields(api, request_id, material, plan):
+    data,resources = api.request_context(request_id)
+    after = overseas_snapshot(data,resources,request_id,writable=False)
+    return business.postcheck_fields_match(after,expected_overseas_snapshot(material,plan))
+
+def submit_overseas(api, writer, request_id, material, plan):
+    data,resources = api.request_context(request_id)
+    current = overseas_snapshot(data,resources,request_id)
+    business._require(business.stable_snapshot(current) == business.stable_snapshot(material["snapshot"]),"invoice_target_changed")
+    details = business.detail_data(data,current,plan)
+    fields_by_row = {tuple(row['key'].rsplit(':', 1)): set(row['field_names'].values())
+                     for row in current['rows'] if row.get('field_names')}
+    business._require(callable(getattr(writer, "submit_invoice", None)), "invoice_write_adapter_required")
+    started_at = datetime.now(timezone.utc).isoformat()
+    response = writer.submit_invoice(request_id,plan["remark"],details,fields_by_row=fields_by_row)
+    code = str(response.get("code") or "").upper()
+    if code != "SUCCESS":
+        return {**verification_result(False,False,submit_ok=False),
+            "failure_code":SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
+    pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
+    done = handled_since(api.handled_rows(),request_id,started_at)
+    fields_match = check_overseas_fields(api,request_id,material,plan)
+    result = verification_result(done,pending,submit_ok=True,fields_match=fields_match)
+    return {**result,"failure_code":None if result["postcheck_done_hit"] else POSTCHECK_TIMEOUT}
 
 
 class Approval:
@@ -148,7 +136,7 @@ class Approval:
         try:
             with attachment_cache.runtime_root(self.root):
                 if task["workflow_key"] == "overseas_invoice":
-                    from apps.oa.approvals import overseas_runtime as overseas
+                    from apps.oa.approvals.collection import overseas
                     material = overseas.collect(self._api(),task["request_id"],directory)
                 else:
                     if self.collector is None:
@@ -219,8 +207,7 @@ class Approval:
             material = json.loads(task["material_json"])
             plan = None
             if task["workflow_key"] == "overseas_invoice":
-                from apps.oa.approvals import overseas_runtime as overseas
-                plan = overseas.plan(material,recognition)
+                plan = business.build_plan(material,recognition)
                 opinion = plan["remark"]
                 if confirm_write and not allow_overseas:
                     raise ValueError("overseas_authorization_required")
@@ -229,7 +216,8 @@ class Approval:
             review = self.store.review(task_id,opinion,recognition,observations)
             if not confirm_write:
                 self.store.set_status(task_id,"preview")
-                return {"task_id":task_id,"status":"preview","review_id":review["id"],"opinion":opinion}
+                return {"task_id":task_id,"status":"preview","review_id":review["id"],"opinion":opinion,
+                        **({"field_plan":plan} if plan is not None else {})}
             current = self._api().pending_rows()
             matches = [row for row in current if occurrence_key(row) == task["occurrence"]]
             if len(matches) != 1:
@@ -237,7 +225,12 @@ class Approval:
             submission = self.store.begin_submission(task_id,review["id"])
             try:
                 if plan is not None:
-                    result = overseas.submit(self._api(),task["request_id"],material,plan)
+                    read_api = self._api()
+                    write_api = self.writer if self.writer is not None else self.api
+                    if write_api is None:
+                        from apps.oa.approvals.sources.overseas import build_api
+                        write_api = build_api()
+                    result = submit_overseas(read_api,write_api,task["request_id"],material,plan)
                 else:
                     writer = self.writer
                     if writer is None:
@@ -245,8 +238,8 @@ class Approval:
                         writer = build_writer_api()
                     result = writer.submit_and_verify(task["request_id"],opinion)
             except Exception:
-                result = {**writer_outcomes.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
-            status = writer_outcomes.submission_status(result)
+                result = {**verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            status = submission_status(result)
             self.store.finish_submission(submission,status,result)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
@@ -264,12 +257,11 @@ class Approval:
             handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
             fields_match = None
             if task["workflow_key"] == "overseas_invoice":
-                from apps.oa.approvals import overseas_runtime as overseas
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
-                fields_match = overseas.check_fields(self._api(),task["request_id"],material,overseas.plan(material,json.loads(review["recognition_json"])))
-            result = writer_outcomes.verification_result(handled,pending,fields_match=fields_match)
-            status = writer_outcomes.submission_status(result)
+                fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])))
+            result = verification_result(handled,pending,fields_match=fields_match)
+            status = submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
             return {"task_id":task_id,"status":status,**result}
 

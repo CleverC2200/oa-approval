@@ -32,7 +32,7 @@ def rule_case(tmp_path, monkeypatch):
                     {'id': '201', 'name': 'synthetic.pdf', 'downloadUrl': '/news/download.do?fileid=201'}]
 
         if workflow_key == 'overseas_invoice':
-            from apps.oa.approvals import overseas_runtime as overseas
+            from apps.oa.approvals.collection import overseas
 
             def download(_resources, directory, **_options):
                 directory.mkdir(parents=True)
@@ -107,7 +107,7 @@ def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workf
     'docs/overseas-invoice.md',
 ])
 def test_missing_required_rules_fail_collection(rule_case, tmp_path, monkeypatch, missing):
-    from apps.oa.approvals import operations as service
+    from apps.oa.approvals import rules as service
 
     project = tmp_path / 'source'
     shutil.copytree(service.PROJECT / '.agents', project / '.agents')
@@ -133,7 +133,7 @@ def test_missing_required_rules_fail_collection(rule_case, tmp_path, monkeypatch
 
 
 def test_new_cross_flow_link_cannot_expand_or_leave_incomplete_rule_package(rule_case, tmp_path, monkeypatch):
-    from apps.oa.approvals import operations as service
+    from apps.oa.approvals import rules as service
 
     project = tmp_path / 'source'
     shutil.copytree(service.PROJECT / '.agents', project / '.agents')
