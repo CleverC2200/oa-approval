@@ -32,36 +32,37 @@ def test_queue_claims_same_type_in_fifo_order_and_limits_three_reviewers(tmp_pat
         pending("104", "2026-10-22 09:03:00", "business_support_fee"),
         pending("105", "2026-10-22 09:04:00", "small_marketing_fee"),
     ])
-    first = store.claim(run, agent_id="agent-a")["task"]
+    first = store.claim(run, agent_id="agent-a", expected_task_id=2, agent_workflow_key='travel_expense')["task"]
     assert first["request_id"] == "101"
-    assert store.claim(run, agent_id="agent-a")["reason"] == "agent_busy"
-    assert store.claim(run, agent_id="agent-b")["task"]["request_id"] == "102"
-    assert store.claim(run, agent_id="agent-c")["task"]["request_id"] == "103"
-    assert store.claim(run, agent_id="agent-d")["reason"] == "inflight_limit"
+    assert store.claim(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')["reason"] == "agent_busy"
+    assert store.claim(run, agent_id="agent-b", expected_task_id=1, agent_workflow_key='travel_expense')["task"]["request_id"] == "102"
+    assert store.claim(run, agent_id="agent-c", expected_task_id=3, agent_workflow_key='general_expense')["task"]["request_id"] == "103"
+    assert store.claim(run, agent_id="agent-d", expected_task_id=4, agent_workflow_key='business_support_fee')["reason"] == "inflight_limit"
     store.fail(first["id"], "read_failed")
-    assert store.claim(run, agent_id="agent-d")["task"]["request_id"] == "104"
+    assert store.claim(run, agent_id="agent-d", expected_task_id=4, agent_workflow_key='business_support_fee')["task"]["request_id"] == "104"
 
 
-def test_idle_agent_can_claim_the_next_type_without_historical_binding(tmp_path):
+def test_new_generation_can_claim_the_next_type_after_previous_agent_finishes(tmp_path):
     store = Store(tmp_path / "approval.sqlite3")
     run = store.start_run([pending(), pending("102", workflow_key="general_expense")])
-    first = store.claim(run, agent_id="agent-a")["task"]
+    first = store.claim(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')["task"]
     store.fail(first["id"], "read_failed")
-    assert store.claim(run, agent_id="agent-a")["task"]["request_id"] == "102"
+    assert store.claim(run, agent_id="agent-a", expected_task_id=2, agent_workflow_key='general_expense')["reason"] == "agent_generation_workflow_mismatch"
+    assert store.claim(run, agent_id="agent-b", expected_task_id=2, agent_workflow_key='general_expense')["task"]["request_id"] == "102"
 
 
 @pytest.mark.parametrize("status", ["preparing", "reviewing", "reviewed", "submitting"])
 def test_inflight_tasks_hold_capacity_and_their_agent_until_finished(tmp_path, status):
     store = Store(tmp_path / "approval.sqlite3")
     run = store.start_run([pending(str(value)) for value in range(101, 105)])
-    first = store.claim(run, agent_id="agent-a")["task"]
+    first = store.claim(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')["task"]
     store.set_status(first["id"], status)
-    assert store.claim(run, agent_id="agent-a")["reason"] == "agent_busy"
-    assert store.claim(run, agent_id="agent-b")["task"]["request_id"] == "102"
-    assert store.claim(run, agent_id="agent-c")["task"]["request_id"] == "103"
-    assert store.claim(run, agent_id="agent-d")["reason"] == "inflight_limit"
+    assert store.claim(run, agent_id="agent-a", expected_task_id=2, agent_workflow_key='travel_expense')["reason"] == "agent_busy"
+    assert store.claim(run, agent_id="agent-b", expected_task_id=2, agent_workflow_key='travel_expense')["task"]["request_id"] == "102"
+    assert store.claim(run, agent_id="agent-c", expected_task_id=3, agent_workflow_key='travel_expense')["task"]["request_id"] == "103"
+    assert store.claim(run, agent_id="agent-d", expected_task_id=4, agent_workflow_key='travel_expense')["reason"] == "inflight_limit"
     store.set_status(first["id"], "submitted")
-    assert store.claim(run, agent_id="agent-a")["task"]["request_id"] == "104"
+    assert store.claim(run, agent_id="agent-a", expected_task_id=4, agent_workflow_key='travel_expense')["task"]["request_id"] == "104"
 
 
 def test_fifo_is_stable_for_multiple_instances_and_explicit_filter_is_preserved(tmp_path):
@@ -72,22 +73,22 @@ def test_fifo_is_stable_for_multiple_instances_and_explicit_filter_is_preserved(
         {**pending("102"), "task_instance_id":"earlier"},
     ])
     assert [task["id"] for task in store.tasks(run)] == [2, 1, 3]
-    filtered = store.claim(run, workflow_key="travel_expense", agent_id="agent-a")["task"]
+    filtered = store.claim(run, workflow_key="travel_expense", agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')["task"]
     assert filtered["id"] == 1
-    assert store.claim(run, agent_id="agent-b")["task"]["id"] == 2
-    assert store.claim(run, agent_id="agent-c")["task"]["id"] == 3
+    assert store.claim(run, agent_id="agent-b", expected_task_id=2, agent_workflow_key='general_expense')["task"]["id"] == 2
+    assert store.claim(run, agent_id="agent-c", expected_task_id=3, agent_workflow_key='travel_expense')["task"]["id"] == 3
 
 
 def test_batch_freezes_fifo_prefix_and_failed_claims_keep_their_place(tmp_path):
     store = Store(tmp_path / "approval.sqlite3")
     run = store.start_run([pending("103"), pending("101"), pending("102")], batch_size=2)
-    first = store.claim(run)["task"]
+    first = store.claim(run, agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')["task"]
     assert first["request_id"] == "101"
     store.fail(first["id"], "read_failed")
-    second = store.claim(run)["task"]
+    second = store.claim(run, agent_id='agent-a', expected_task_id=3, agent_workflow_key='travel_expense')["task"]
     assert second["request_id"] == "102"
     store.set_status(second["id"], "preview")
-    assert store.claim(run)["reason"] == "batch_exhausted"
+    assert store.claim(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["reason"] == "batch_exhausted"
     assert store.tasks(run)[-1]["status"] == "queued"
     batch = json.loads(store.run(run)["summary_json"])["batch"]
     assert batch == {"size":2, "task_ids":[first["id"], second["id"]]}
@@ -96,6 +97,10 @@ def test_batch_freezes_fifo_prefix_and_failed_claims_keep_their_place(tmp_path):
 
 
 @pytest.mark.parametrize("options, reason", [
+    ({}, "claim_guards_required"),
+    ({"agent_id":"agent-a"}, "claim_guards_required"),
+    ({"expected_task_id":True,"agent_workflow_key":"travel_expense","agent_id":"agent-a"}, "claim_guards_required"),
+    ({"expected_task_id":1,"agent_workflow_key":" ","agent_id":"agent-a"}, "claim_guards_required"),
     ({"expected_task_id":2,"agent_workflow_key":"travel_expense","agent_id":"agent-a"}, "expected_task_changed"),
     ({"expected_task_id":1,"agent_workflow_key":"general_expense","agent_id":"agent-a"}, "agent_workflow_mismatch"),
     ({"expected_task_id":1,"agent_workflow_key":"travel_expense"}, "agent_identity_required"),
@@ -145,7 +150,7 @@ def test_protected_agent_keeps_type_and_five_claim_budget_after_failures_and_pre
 def test_batch_filter_cannot_replace_oldest_prefix_with_later_matching_type(tmp_path):
     store = Store(tmp_path / "approval.sqlite3")
     run = store.start_run([pending(), pending("102", workflow_key="general_expense")], batch_size=1)
-    assert store.claim(run, workflow_key="general_expense", agent_id="general-agent")["reason"] == "workflow_unavailable"
+    assert store.claim(run, workflow_key="general_expense", agent_id="general-agent", expected_task_id=2, agent_workflow_key='general_expense')["reason"] == "workflow_unavailable"
     assert [task["status"] for task in store.tasks(run)] == ["queued", "queued"]
     assert store.claim(run, agent_id="travel-agent", expected_task_id=1,
                        agent_workflow_key="travel_expense")["task"]["request_id"] == "101"
@@ -167,17 +172,17 @@ def test_claim_returns_a_decision_from_the_current_sqlite_snapshot(tmp_path):
     path = tmp_path / "approval.sqlite3"
     first, second = Store(path), Store(path)
     run = first.start_run([pending(), pending("102")], batch_size=1)
-    unavailable = second.claim(run, workflow_key="general_expense")
+    unavailable = second.claim(run, workflow_key="general_expense", agent_id='agent-a', expected_task_id=1, agent_workflow_key='general_expense')
     assert unavailable == {
         "run_id":run, "status":"waiting", "reason":"workflow_unavailable", "summary":{"queued":2}}
-    claimed = first.claim(run, agent_id="agent-a")
+    claimed = first.claim(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')
     assert claimed["status"] == "claimed"
     assert claimed["task"]["request_id"] == "101"
     assert claimed["task"]["status"] == "preparing"
-    assert second.claim(run, agent_id="agent-a") == {
+    assert second.claim(run, agent_id="agent-a", expected_task_id=2, agent_workflow_key='travel_expense') == {
         "run_id":run, "status":"waiting", "reason":"agent_busy", "summary":{"preparing":1,"queued":1}}
     first.set_status(claimed["task"]["id"], "preview")
-    assert second.claim(run) == {
+    assert second.claim(run, agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense') == {
         "run_id":run, "status":"done", "reason":"batch_exhausted", "summary":{"preview":1,"queued":1}}
     assert unavailable["summary"] == {"queued":2}
 
@@ -185,8 +190,8 @@ def test_claim_returns_a_decision_from_the_current_sqlite_snapshot(tmp_path):
 def test_claim_decision_preserves_blocked_guards_and_capacity_priority(tmp_path):
     store = Store(tmp_path / "approval.sqlite3")
     run = store.start_run([pending(str(value)) for value in range(101, 105)])
-    for agent in ("agent-a", "agent-b", "agent-c"):
-        store.claim(run, agent_id=agent)
+    for index, agent in enumerate(("agent-a", "agent-b", "agent-c"), 1):
+        store.claim(run, agent_id=agent, expected_task_id=index, agent_workflow_key='travel_expense')
     assert store.claim(run, expected_task_id=1)["reason"] == "claim_guards_required"
     assert store.claim(run, agent_id="agent-a", expected_task_id=1,
                        agent_workflow_key="general_expense")["reason"] == "inflight_limit"
@@ -199,15 +204,15 @@ def test_two_sqlite_connections_cannot_claim_the_last_slot_twice(tmp_path):
     path = tmp_path / "approval.sqlite3"
     store = Store(path)
     run = store.start_run([pending(str(value)) for value in range(101, 105)])
-    store.claim(run, agent_id="agent-a")
-    store.claim(run, agent_id="agent-b")
+    store.claim(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')
+    store.claim(run, agent_id="agent-b", expected_task_id=2, agent_workflow_key='travel_expense')
     ready = Barrier(2)
 
     def claim(agent):
         other = Store(path)
         try:
             ready.wait(timeout=5)
-            return other.claim(run, agent_id=agent)
+            return other.claim(run, agent_id=agent, expected_task_id=3, agent_workflow_key='travel_expense')
         finally:
             other.connection.close()
 

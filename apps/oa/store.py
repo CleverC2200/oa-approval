@@ -146,16 +146,15 @@ class Store:
 
             if run["status"] != "running":
                 return unclaimed("blocked", "run_blocked")
-            guarded = expected_task_id is not None or agent_workflow_key is not None
-            if guarded:
-                if expected_task_id is None or not agent_workflow_key:
-                    return unclaimed("refused", "claim_guards_required")
-                if not isinstance(agent_id,str) or not agent_id.strip():
-                    return unclaimed("refused", "agent_identity_required")
+            if (type(expected_task_id) is not int or expected_task_id < 1
+                    or not isinstance(agent_workflow_key,str) or not agent_workflow_key.strip()):
+                return unclaimed("refused", "claim_guards_required")
+            if not isinstance(agent_id,str) or not agent_id.strip():
+                return unclaimed("refused", "agent_identity_required")
             busy = [task for task in tasks if task["status"] in INFLIGHT_STATUSES]
             if len(busy) >= 3:
                 return unclaimed("waiting", "inflight_limit")
-            if agent_id and any(task["agent_id"] == agent_id for task in busy):
+            if any(task["agent_id"] == agent_id for task in busy):
                 return unclaimed("waiting", "agent_busy")
             batch = json.loads(run["summary_json"]).get("batch")
             queued = [task for task in tasks if task["status"] == "queued"
@@ -168,16 +167,15 @@ class Store:
                 if busy:
                     return unclaimed("waiting", "in_flight")
                 return unclaimed("done", "batch_exhausted" if batch is not None else "queue_exhausted")
-            if guarded:
-                if candidate["id"] != expected_task_id:
-                    return unclaimed("refused", "expected_task_changed")
-                if candidate["workflow_key"] != agent_workflow_key:
-                    return unclaimed("refused", "agent_workflow_mismatch")
-                previous = [task for task in tasks if task["agent_id"] == agent_id]
-                if any(task["workflow_key"] != agent_workflow_key for task in previous):
-                    return unclaimed("refused", "agent_generation_workflow_mismatch")
-                if len(previous) >= 5:
-                    return unclaimed("refused", "agent_claim_limit")
+            if candidate["id"] != expected_task_id:
+                return unclaimed("refused", "expected_task_changed")
+            if candidate["workflow_key"] != agent_workflow_key:
+                return unclaimed("refused", "agent_workflow_mismatch")
+            previous = [task for task in tasks if task["agent_id"] == agent_id]
+            if any(task["workflow_key"] != agent_workflow_key for task in previous):
+                return unclaimed("refused", "agent_generation_workflow_mismatch")
+            if len(previous) >= 5:
+                return unclaimed("refused", "agent_claim_limit")
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
             return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"])}
 
