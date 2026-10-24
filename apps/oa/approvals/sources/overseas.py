@@ -4,9 +4,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
-from pathlib import Path
 
-from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.approvals.sources import auth
 from apps.oa.approvals.sources import http as safe_http
 from apps.oa.approvals.sources import writer as writer_api
@@ -59,23 +57,3 @@ def build_api() -> InvoiceApi:
     return InvoiceApi(*auth.credentials())
 
 
-def download_fresh(resources: list[dict], directory: Path, *, request_id: str) -> list[dict]:
-    import fitz
-
-    _require(isinstance(request_id, str) and re.fullmatch(r'[1-9][0-9]*', request_id) is not None,
-             'invoice_request_invalid')
-    files, errors = attachments.download_resources(
-        resources, dest_dir=directory, timeout_sec=60, allow_browser_download=True,
-        request_id=request_id, flow_key='overseas_invoice', reuse_cache=False,
-    )
-    _require(not errors and len(files) == len(resources), 'invoice_download_failed')
-    for item in files:
-        path = Path(item['path'])
-        _require(path.suffix.lower() in {'.pdf', '.png', '.jpg', '.jpeg'}, 'invoice_attachment_type_unsupported')
-        try:
-            with fitz.open(path) as document:
-                _require(0 < len(document) <= 100, 'invoice_attachment_unreadable')
-                item['pages'] = len(document)
-        except Exception:
-            raise ValueError('invoice_attachment_unreadable') from None
-    return files

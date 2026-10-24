@@ -15,7 +15,7 @@ PROJECT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def pending_output(tmp_path, monkeypatch, capsys):
-    from apps.oa.approvals import cli
+    from apps.oa.approvals import cli, owner
     from apps.oa.approvals.demo import DemoApi
     from apps.oa.approvals.sources import oa as api
 
@@ -27,9 +27,9 @@ def pending_output(tmp_path, monkeypatch, capsys):
         for index in reversed(range(23))
     ]
     monkeypatch.setattr(api, 'build_api', lambda _config: fake)
-    monkeypatch.setattr(cli, 'require_production_main', lambda: None)
-    monkeypatch.setattr(cli.socket.socket, 'bind', lambda _socket, address: Path(address).touch())
-    monkeypatch.setattr(cli.socket.socket, 'listen', lambda _socket: None)
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner.socket.socket, 'bind', lambda _socket, address: Path(address).touch())
+    monkeypatch.setattr(owner.socket.socket, 'listen', lambda _socket: None)
 
     def invoke(*arguments):
         monkeypatch.setattr(sys, 'stdin', io.StringIO('{"operation":"finish"}\n'))
@@ -83,7 +83,7 @@ def test_pending_full_returns_every_complete_task(pending_output, arguments):
 
 
 def test_pending_rejects_negative_limit_before_starting_a_round(tmp_path, capsys, pending_output, monkeypatch):
-    from apps.oa.approvals import cli
+    from apps.oa.approvals import cli, owner
 
     root = tmp_path / 'not-started'
     monkeypatch.setattr(sys, 'stdin', io.StringIO('{"operation":"finish"}\n'))
@@ -108,12 +108,13 @@ def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_out
     assert [task['request_id'] for task in started['tasks']] == ['101', '103']
 
 
-def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys):
-    from apps.oa.approvals import cli
+@pytest.mark.parametrize('operation', ['submit', 'preview'])
+def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys, operation):
+    from apps.oa.approvals import cli, owner
 
     monkeypatch.setattr(sys, 'stdin', io.StringIO(
         '{"operation":"collect","agent_id":"travel-reviewer","expected_task_id":1,"agent_workflow_key":"travel_expense"}\n'
-        '{"operation":"submit","task_id":1,"opinion":"合成离线演示意见。"}\n'
+        f'{{"operation":"{operation}","task_id":1,"opinion":"合成离线演示意见。"}}\n'
         '{"operation":"finish"}\n'))
     assert cli.main(['--root', str(tmp_path), 'pending', '--demo']) == 0
     started, collected, preview = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
@@ -542,3 +543,26 @@ def test_collection_process_crash_marks_preparing_task_failed_once(blocked_colle
     process.stdin.close()
     process.wait(timeout=15)
     assert process.returncode == 0, process.stderr.read()
+
+
+def test_socket_finish_waits_for_collection_and_refuses_new_claims(blocked_collection, tmp_path):
+    import socket
+
+    process, started, first, invoke, collector, channel = blocked_collection
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as finishing:
+        finishing.settimeout(15)
+        finishing.connect(started['socket'])
+        finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+        assert invoke('pending', '--demo')['status'] == 'already_running'
+        refused = invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
+                         '--agent-workflow-key', 'general_expense')
+        assert refused == {'run_id': started['run_id'], 'status': 'blocked', 'reason': 'run_finishing'}
+        channel.sendall(b'r')
+        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        assert json.loads(finishing.makefile().readline())['status'] == 'closed'
+    process.wait(timeout=15)
+    assert process.returncode == 0, process.stderr.read()
+    status = invoke('status')
+    assert status['run']['status'] == 'closed'
+    assert status['summary'] == {'reviewing': 2, 'queued': 1}
+    assert not Path(started['socket']).exists()

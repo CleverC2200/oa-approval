@@ -32,8 +32,13 @@ def occurrence_key(row):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, *, read_only=False):
         self.path = Path(path)
+        if read_only:
+            self.connection = sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, timeout=10)
+            self.connection.row_factory = sqlite3.Row
+            self.connection.execute("PRAGMA query_only=ON")
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.path, timeout=10)
         self.connection.row_factory = sqlite3.Row
@@ -121,6 +126,10 @@ class Store:
     def tasks(self, run_id):
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM tasks WHERE last_run_id=? ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id", (run_id,))]
+
+    def latest_run(self):
+        row = self.connection.execute("SELECT * FROM runs ORDER BY started_at DESC,rowid DESC LIMIT 1").fetchone()
+        return dict(row) if row is not None else None
 
     def run(self, run_id):
         row = self.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()

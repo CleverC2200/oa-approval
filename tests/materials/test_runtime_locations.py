@@ -90,7 +90,7 @@ def test_material_recognition_defaults_to_unique_version_local_directories(tmp_p
 def test_collection_preserves_cache_overrides_and_restores_context(
     tmp_path, monkeypatch, workflow, cache_setting,
 ):
-    from apps.oa.approvals import overseas_runtime as overseas
+    from apps.oa.approvals.collection import overseas
     from apps.oa.runtime import control as runtime_control
 
     root = tmp_path / 'selected-root'
