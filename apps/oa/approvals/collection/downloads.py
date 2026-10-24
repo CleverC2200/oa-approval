@@ -493,4 +493,3 @@ def download_resources(
             )
     _remove_legacy_manifest(dest_dir)
     return downloaded, errors
-

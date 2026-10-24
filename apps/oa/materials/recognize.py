@@ -19,7 +19,7 @@ import fitz
 from PIL import Image, JpegImagePlugin
 
 from apps.oa.materials import formats as attachment_extractors
-from apps.oa.materials import locations as attachment_locations
+from apps.oa.materials import resources as attachment_locations
 from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
 

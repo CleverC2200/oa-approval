@@ -80,4 +80,3 @@ def verify(resource: dict, url: str, *, base_url: str, document_id: str,
         raise
     except Exception:
         return False
-

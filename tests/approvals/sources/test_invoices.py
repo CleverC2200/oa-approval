@@ -221,4 +221,3 @@ def test_invoice_read_failure_stops_collection_without_fabricated_parties():
             "synthetic-request", oa_api=UnavailableApi(workflow), configs=[CONFIG],
             allow_browser_download=False,
         )
-

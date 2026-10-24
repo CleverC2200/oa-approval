@@ -397,4 +397,3 @@ def _attach_archive_children(
     item["archive_extracted_count"] = len(extracted)
     item["extracted_files"] = extracted
     return item, ""
-

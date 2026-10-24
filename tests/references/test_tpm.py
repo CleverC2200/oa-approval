@@ -141,4 +141,3 @@ def test_pass_requires_a_real_frozen_catalog_row(tmp_path: Path) -> None:
 def test_reference_guard_keeps_existing_business_problems(status: str) -> None:
     item = {"item_key": "attachment_completeness", "status": status}
     assert prices.evidence_gap(item, _material()) is None
-

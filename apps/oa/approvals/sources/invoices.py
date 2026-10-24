@@ -334,4 +334,3 @@ def original_source(data: dict, invoice_number: str) -> dict:
         return {}
     return {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
             'document_id': doc_id, 'native_file_id': file_id}
-

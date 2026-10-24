@@ -86,4 +86,3 @@ def load_local_env() -> None:
 def env(name: str, default: str = "") -> str:
     load_local_env()
     return str(os.environ.get(name) or default).strip()
-

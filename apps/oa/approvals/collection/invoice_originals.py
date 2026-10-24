@@ -27,7 +27,7 @@ _FINANCE_FLOWS = {
 
 
 def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict, *, base_url: str) -> list[dict]:
-    
+
     invoices = evidence.get('invoices') or []
     originals = [(invoice, file) for invoice in invoices for file in invoice.get('files', [])
                  if file.get('original_source')]

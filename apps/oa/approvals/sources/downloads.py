@@ -706,4 +706,3 @@ def _download_resource_with_browser(
         return None, (
             f"{RESOURCE_SLOT_TIMEOUT_CODE}: {name}: 等待浏览器附件下载通道超时"
         )
-

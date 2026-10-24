@@ -6,7 +6,7 @@ import shlex
 from pathlib import Path
 import sys
 
-from apps.oa.materials.locations import image_locations
+from apps.oa.materials.resources import image_locations
 
 
 def command(material_file: Path) -> str:

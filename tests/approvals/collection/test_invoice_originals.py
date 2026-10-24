@@ -23,7 +23,7 @@ from apps.oa.approvals.sources import invoices as invoice_buyers
 from apps.oa.approvals.sources import official_sql
 
 from apps.oa.approvals.collection.case import collect_case
-from tests.finance_preaudit.invoice_fakes import CONFIG, NUMBER, InvoiceApi
+from tests.approvals.invoice_fakes import CONFIG, NUMBER, InvoiceApi
 
 @pytest.fixture
 def original_transport(monkeypatch, tmp_path):

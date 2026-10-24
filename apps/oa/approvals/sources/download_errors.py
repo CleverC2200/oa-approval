@@ -27,5 +27,3 @@ def detect_oa_download_fail_code(value: Any) -> str:
     if "noright.jsp" in lowered or "无权限" in text:
         return ATTACHMENT_ACCESS_DENIED_CODE
     return ""
-
-

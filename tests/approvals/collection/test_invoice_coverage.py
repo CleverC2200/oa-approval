@@ -6,7 +6,7 @@ import pytest
 
 from apps.oa.approvals.sources import invoices as invoice_buyers
 from apps.oa.approvals.collection.case import collect_case
-from tests.finance_preaudit.invoice_fakes import CONFIG, NUMBER, InvoiceApi, linked_field
+from tests.approvals.invoice_fakes import CONFIG, NUMBER, InvoiceApi, linked_field
 
 
 @pytest.fixture
@@ -168,4 +168,3 @@ def test_cloud_number_missing_does_not_replace_oa_link_with_inferred_fact(cloud_
     assert entry['invoice_no'] == NUMBER
     assert entry['fields']['invoice_number'] == {'value': '', 'read_status': 'not_provided'}
     assert entry['fields']['total'] == {'value': '43.00', 'read_status': 'present'}
-

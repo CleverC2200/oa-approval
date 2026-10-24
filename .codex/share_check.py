@@ -34,8 +34,8 @@ def git(*args):
 def private_path(name):
     path = PurePosixPath(name)
     directories = path.parts[:-1]
-    if directories == ('apps', 'oa', 'runtime') and path.suffix == '.py':
-        directories = directories[:2]
+    if directories in {('apps', 'oa', 'runtime'), ('tests', 'runtime')} and path.suffix == '.py':
+        directories = ()
     return (bool(set(directories) & PRIVATE_DIRECTORIES)
             or path.suffix.lower() in PRIVATE_SUFFIXES
             or (path.name.startswith('.env') and name != '.env.example')
