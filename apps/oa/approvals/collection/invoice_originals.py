@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import os
 from apps.oa.approvals.sources.invoices import _positive_id
 import hashlib
 from collections.abc import Callable
@@ -59,12 +58,12 @@ def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict
     return result
 
 
-def _download_contexts(request_id: str):
+def _download_contexts(request_id: str, *, source_policy):
     from apps.oa.approvals.sources import oa as api
     from apps.oa.approvals import flows as flow
     from apps.oa.approvals.sources import invoices as invoice_buyers
 
-    client = api.build_api({})
+    client = api.build_api({}, source_policy=source_policy)
     workflow, _ = client.request_context(request_id)
     config = flow.select_config_for_workflow(request_id, workflow, flow.load_all_configs())
     flow.ensure_workflow_matches(request_id, workflow, config)
@@ -77,7 +76,7 @@ def _download_contexts(request_id: str):
     )
     evidence = result.get('invoice_evidence') or {}
     trusted = resources(request_id, workflow, workflow_key, evidence,
-                        base_url=getattr(client, "base_url", os.environ.get("OA_BASE_URL", "")))
+                        base_url=source_policy.attachments.oa_origin)
     candidates = {item['id']: [] for item in trusted}
     for invoice in evidence.get('invoices', []):
         for file in invoice['files']:
@@ -94,12 +93,13 @@ def _download_contexts(request_id: str):
 
 class DownloadBatch:
     def __init__(self, request_id: str, *, base_url: str, cookie_header: Callable,
-                 native_read: Callable):
+                 native_read: Callable, source_policy):
+        self.source_policy = source_policy
         self.request_id = request_id
         self.base_url = base_url
         self._cookie_header = cookie_header
         self._native_read = native_read
-        self.client, self._sources = _download_contexts(request_id)
+        self.client, self._sources = _download_contexts(request_id, source_policy=source_policy)
 
     def context(self, request_id: str, native_file_id: str):
         source, data_id = ({}, '')
@@ -185,7 +185,7 @@ class DownloadBatch:
         if runtime_control.stop_requested():
             return [runtime_control.stop_error('已请求停止财务预审，停止本单附件下载')]
         try:
-            _, current = _download_contexts(self.request_id)
+            _, current = _download_contexts(self.request_id, source_policy=self.source_policy)
             valid = bool(self._sources) and current == self._sources
         except rpa_session.RpaSessionError as error:
             return [{'code': error.code, 'message': '发票原件会话核验失败'}]
@@ -251,8 +251,8 @@ def _content_sha256(path: Path) -> str:
         return ''
 
 
-def source_for_download(request_id: str, native_file_id: str) -> dict:
-    _, sources = _download_contexts(request_id)
+def source_for_download(request_id: str, native_file_id: str, *, source_policy) -> dict:
+    _, sources = _download_contexts(request_id, source_policy=source_policy)
     source, _ = sources.get(native_file_id, ({}, ''))
     return source
 

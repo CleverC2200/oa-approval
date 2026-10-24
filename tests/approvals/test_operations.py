@@ -1,3 +1,5 @@
+
+from tests.approvals.source_fakes import POLICY
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -40,7 +42,7 @@ def collect(request_id, *, attachment_root, **kwargs):
 
 def service(tmp_path, api=None):
     api = api or FakeOA()
-    return Approval(tmp_path, api=api, writer=api, configs=[], collector=collect), api
+    return Approval(tmp_path, api=api, writer=api, configs=[], collector=collect, source_policy=POLICY), api
 
 
 def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
@@ -66,15 +68,15 @@ def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_
 
     def fail_collect(request_id, **_kwargs):
         return _travel_resources(config={'flow_key': 'travel_expense'}, workflow={},
-            request_id=request_id, allow_browser_download=True, attachment_timeout_sec=1)
+            request_id=request_id, allow_browser_download=True, attachment_timeout_sec=1, travel_source=travel_orders.TravelSource(POLICY))
 
-    monkeypatch.setattr(travel_orders, 'collect_evidence', lambda *_a, **_k: {'errors': [{
+    monkeypatch.setattr(travel_orders.TravelSource, 'collect_evidence', staticmethod(lambda *_a, **_k: {'errors': [{
         'code': 'travel_attachment_discovery_failed', 'message': 'synthetic-secret-message',
         'counts': {'declared_attachment_count': 1},
         'diagnostics': [{'stage': 'navigation', 'reason': 'navigation_failed', 'browser': 'headless',
                          'exception_type': 'TimeoutError', 'http_status': 503,
                          'source_url': 'https://example.test/?token=synthetic-secret',
-                         'message': 'synthetic-secret-message'}]}]})
+                         'message': 'synthetic-secret-message'}]}]}))
     app, api = service(tmp_path)
     app.collector = fail_collect
     run = app.pending()['run_id']
@@ -198,9 +200,9 @@ def test_default_clients_handle_expired_credentials_between_tasks(tmp_path, monk
             generation[0] += 1
             return result
 
-    monkeypatch.setattr(api, "build_api", lambda config: Reader())
-    monkeypatch.setattr(writer_api, "build_writer_api", Writer)
-    app = Approval(tmp_path, configs=[{"flow_key": "travel_expense"}], collector=collect)
+    monkeypatch.setattr(api, "build_api", lambda config, **kwargs: Reader())
+    monkeypatch.setattr(writer_api, "build_writer_api", lambda **kwargs: Writer())
+    app = Approval(tmp_path, configs=[{"flow_key": "travel_expense"}], collector=collect, source_policy=POLICY)
     run = app.pending()["run_id"]
     for request_id in ("101", "102"):
         task = app.collect(run, agent_id='agent-a', expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 import json
 
 import pytest
@@ -49,7 +51,7 @@ def cloud_http(monkeypatch):
 def collect(api=None):
     api = api or InvoiceApi()
     return collect_case('synthetic-request', oa_api=api, configs=[api.config],
-                        allow_browser_download=False)
+                        allow_browser_download=False, source_policy=POLICY)
 
 
 def test_linked_rail_ticket_retains_authoritative_fields_without_duplicate_upload(cloud_http):
@@ -134,12 +136,12 @@ def test_six_finance_collectors_preserve_same_invoice_coverage(config, monkeypat
             return workflow, resources
 
         api.request_context = request_context
-        monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: True)
-        monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', lambda *_a, **_k: [{
+        monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
+        monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [{
             'text': 'SYNTHETIC-TRAVEL', 'resources': [], 'attachment_scan_status': 'empty',
-        }])
+        }]))
     material = collect_case('synthetic-request', oa_api=api, configs=[config],
-                            allow_browser_download=config['flow_key'] == 'travel_expense')
+                            allow_browser_download=config['flow_key'] == 'travel_expense', source_policy=POLICY)
     assert material['invoice_evidence']['invoices'][0]['fields']['total']['value'] == '43.00'
     assert material['invoice_evidence']['invoices'][0]['fields']['seller']['read_status'] == 'not_provided'
     assert any(fact['name'] == '发票价税合计' and fact['value'] == '43.00'

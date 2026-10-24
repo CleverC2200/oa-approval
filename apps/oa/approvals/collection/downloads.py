@@ -28,7 +28,7 @@ MAX_DOWNLOAD_CONCURRENCY = 8
 
 
 def _unique_attachment_resources(
-    resources: List[Dict[str, Any]],
+    resources: List[Dict[str, Any]], *, transfer,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
     unique: List[Dict[str, Any]] = []
     identities: Dict[str, str] = {}
@@ -38,7 +38,7 @@ def _unique_attachment_resources(
             resource.get("downloadUrl") or resource.get("download_url") or ""
         ).strip()
         try:
-            identity = remote.normalize_download_url(
+            identity = transfer.normalize_download_url(
                 raw_url,
                 allow_extra_hosts=bool(resource.get("allowExtraDownloadHost")),
             )
@@ -243,22 +243,22 @@ def _record_attachment_entry(
 
 
 def _initialize_workflow_document_context(
-    resource: Dict[str, Any], url: str, *, timeout_sec: int,
+    resource: Dict[str, Any], url: str, *, timeout_sec: int, transfer,
 ) -> bool:
     from apps.oa.approvals.collection import invoice_originals
     from apps.oa.approvals.sources import native_documents
     from apps.oa.approvals.sources import official_sql
 
-    if not native_documents.accepts(resource, url, base_url=remote.OA_HOST):
+    if not native_documents.accepts(resource, url, base_url=transfer.policy.attachments.oa_origin):
         return False
     request_id = str(resource.get('_workflow_request_id') or '')
     file_id = str(resource.get('id') or '')
     try:
         document_id = official_sql.workflow_attachment_document(request_id, file_id)
         if not document_id:
-            document_id = invoice_originals.source_for_download(request_id, file_id).get('document_id', '')
+            document_id = invoice_originals.source_for_download(request_id, file_id, source_policy=transfer.policy).get('document_id', '')
         return native_documents.verify(
-            resource, url, base_url=remote.OA_HOST, document_id=document_id,
+            resource, url, base_url=transfer.policy.attachments.oa_origin, document_id=document_id,
             timeout_sec=timeout_sec,
         )
     except rpa_session.RpaSessionError:
@@ -268,7 +268,7 @@ def _initialize_workflow_document_context(
 
 
 def _download_resource_direct(
-    resource: Dict[str, Any], *, dest_dir: Path, timeout_sec: int, original_batch=None,
+    resource: Dict[str, Any], *, dest_dir: Path, timeout_sec: int, transfer, original_batch=None,
 ) -> Tuple[Path | None, str]:
     name = resource_name(resource) or "attachment.bin"
     try:
@@ -279,11 +279,11 @@ def _download_resource_direct(
         ):
             if original_batch is not None and resource.get('_invoice_original'):
                 return original_batch.download(resource, dest_dir=dest_dir, timeout_sec=timeout_sec)
-            return remote._download_resource_direct_uncoordinated(
+            return transfer._download_resource_direct_uncoordinated(
                 resource,
                 dest_dir=dest_dir,
                 timeout_sec=timeout_sec,
-                initialize_context=_initialize_workflow_document_context,
+                initialize_context=lambda resource, url, **kwargs: _initialize_workflow_document_context(resource, url, transfer=transfer, **kwargs),
             )
     except resource_slots.ResourceSlotTimeout:
         return None, (
@@ -300,8 +300,9 @@ def download_resources(
     request_id: str = "",
     flow_key: str = "",
     reuse_cache: bool = False,
+    transfer,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    targets, identity_errors = _unique_attachment_resources(resources)
+    targets, identity_errors = _unique_attachment_resources(resources, transfer=transfer)
     if identity_errors:
         return [], identity_errors
     targets = [dict(resource, _workflow_request_id=str(request_id).strip()) for resource in targets]
@@ -351,7 +352,7 @@ def download_resources(
 
     def download(resource: Dict[str, Any]) -> Tuple[Path | None, str]:
         path, error = _download_resource_direct(
-            resource, dest_dir=dest_dir, timeout_sec=timeout_sec, original_batch=original_batch,
+            resource, dest_dir=dest_dir, timeout_sec=timeout_sec, transfer=transfer, original_batch=original_batch,
         )
         if path is not None and not error:
             path = share_content(path, newly_downloaded=True)
@@ -365,8 +366,8 @@ def download_resources(
 
         try:
             original_batch = DownloadBatch(
-                str(request_id).strip(), base_url=remote.OA_HOST, cookie_header=remote._rpa_cookie_header,
-                native_read=remote._direct_session_cookie_download,
+                str(request_id).strip(), base_url=transfer.policy.attachments.oa_origin, cookie_header=transfer._rpa_cookie_header,
+                native_read=transfer._direct_session_cookie_download, source_policy=transfer.policy,
             )
         except rpa_session.RpaSessionError as error:
             return [], [{'code': error.code, 'message': '发票原件会话核验失败'}]
@@ -437,7 +438,7 @@ def download_resources(
             path = outcome.get("path")
             err = str(outcome.get("error") or "")
             if path is None and not err:
-                path, err = remote._download_resource_with_browser(
+                path, err = transfer._download_resource_with_browser(
                     resource,
                     dest_dir=dest_dir,
                     timeout_sec=timeout_sec,

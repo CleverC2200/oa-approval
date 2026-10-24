@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 import json
 from pathlib import Path
 
@@ -10,6 +12,8 @@ from apps.oa.materials import cli as materials_cli
 from apps.oa.approvals.sources import official_sql
 from apps.oa.approvals.sources import travel as travel_orders
 from apps.oa.approvals.collection.case import collect_case
+
+travel_source = travel_orders.TravelSource(POLICY)
 
 
 CONFIG = {'flow_key': 'general_expense', 'workflow_id': '195021',
@@ -27,8 +31,8 @@ def travel_source(monkeypatch):
         def request_context(self, request_id):
             return workflow, []
 
-    monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: True)
-    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', lambda *_a, **_k: [scan])
+    monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
+    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [scan]))
     return workflow, scan, TravelOaApi()
 
 
@@ -49,7 +53,7 @@ def test_collection_reuses_confirmed_official_empty_fields(monkeypatch):
     monkeypatch.setattr(official_sql, '_query_rows', lambda *_a, **_k: [{
         'requestid': '12', 'detail_id': '7', 'scfj': None, 'fj': None, 'glfp': None,
     }])
-    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False)
+    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False, source_policy=POLICY)
 
     assert material['attachment_presence'] == {
         'status': 'confirmed_empty', 'evidence_refs': [
@@ -66,7 +70,7 @@ def test_recognizer_skips_official_empty_material_without_model(tmp_path, monkey
     monkeypatch.setattr(official_sql, '_query_rows', lambda *_a, **_k: [{
         'requestid': '12', 'detail_id': '7', 'scfj': None, 'fj': None, 'glfp': None,
     }])
-    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False)
+    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False, source_policy=POLICY)
     material_file = tmp_path / 'material.json'
     material_file.write_text(json.dumps(material))
     original = material_file.read_bytes()
@@ -107,28 +111,28 @@ def test_travel_collection_uses_zero_count_only_after_source_read(monkeypatch):
                 {'fieldName': 'lcbh', 'fieldShowName': '流程编号', 'fieldShowValue': 'SYNTHETIC-TRAVEL'},
             ]}]}}, []
 
-    monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: True)
-    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', lambda *_a, **_k: [{
+    monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
+    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [{
         'text': 'SYNTHETIC-TRAVEL', 'resources': [], 'attachment_scan_status': 'empty',
-    }])
-    material = collect_case('12', oa_api=TravelOaApi(), configs=[config], allow_browser_download=True)
+    }]))
+    material = collect_case('12', oa_api=TravelOaApi(), configs=[config], allow_browser_download=True, source_policy=POLICY)
     assert material['attachment_presence'] == {
         'status': 'confirmed_empty', 'evidence_refs': [
             'material:declared_fields[0]', 'material:attachment_scan'],
     }
 
-    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', lambda *_a, **_k: [{
+    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [{
         'text': 'SYNTHETIC-TRAVEL', 'resources': [], 'attachment_scan_status': 'read_failed',
-    }])
+    }]))
     with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
-        collect_case('12', oa_api=TravelOaApi(), configs=[config], allow_browser_download=True)
+        collect_case('12', oa_api=TravelOaApi(), configs=[config], allow_browser_download=True, source_policy=POLICY)
 
 
 @pytest.mark.parametrize('entry', ['api', 'cli'])
 def test_travel_placeholder_fields_skip_only_with_official_empty_scan(
         tmp_path, monkeypatch, capsys, travel_source, entry):
     workflow, scan, oa_api = travel_source
-    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
     material_file = tmp_path / 'material.json'
     material_file.write_text(json.dumps(material))
     original = material_file.read_bytes()
@@ -163,7 +167,7 @@ def test_travel_empty_scan_preserves_placeholder_inputs(travel_source):
     fields[1]['fieldValue'] = '[该字段仅支持显示]'
     fields[1]['filedHtmlShow'] = '[该字段仅支持显示]'
 
-    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
 
     assert material['attachment_presence']['status'] == 'confirmed_empty'
     declared = {field['code']: field for field in material['declared_fields']
@@ -196,9 +200,9 @@ def test_zero_downloads_preserves_trip_and_hotel_page_review(
                     'check_out': '2026-10-21', 'order_detail': {'ddbh': 'synthetic-hotel', 'ddztmc': '已完成'}}
     scan['hotel_order_details'] = [hotel_detail]
     second_page = 'SYNTHETIC-TRAVEL 住宿结算详情：合成退款记录'
-    monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', lambda *_a, **_k: [
-        scan, {**scan, 'text': second_page}])
-    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [
+        scan, {**scan, 'text': second_page}]))
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
     page = next(fact for fact in material['authority_facts'] if fact['name'] == '商旅页面内容')
     assert page['value'] == scan['text']
     assert {fact['value'] for fact in material['authority_facts'] if fact['name'] == '商旅页面内容'} == {
@@ -232,15 +236,15 @@ def test_travel_placeholder_source_failure_never_becomes_empty(travel_source, mo
     elif failure == 'wrong_identity':
         scan['text'] = 'SYNTHETIC-OTHER-REQUEST 暂无数据'
     elif failure == 'browser_unavailable':
-        monkeypatch.setattr(travel_orders, '_ensure_cdp_available', lambda: False)
+        monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: False))
     else:
         def fail_read(*_a, **_k):
             raise RuntimeError('synthetic_source_failed')
 
-        monkeypatch.setattr(travel_orders, '_read_trip_candidate_results', fail_read)
+        monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(fail_read))
 
     with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
-        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
 
 
 @pytest.mark.parametrize('positive', [
@@ -269,10 +273,10 @@ def test_travel_zero_count_and_empty_scan_do_not_hide_declared_content(
 
     if positive in {'linked_invoice', 'invoice_number'}:
         with pytest.raises(RuntimeError, match='invoice_buyer_read_failed'):
-            collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+            collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
         return
 
-    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
     assert 'attachment_presence' not in material
     material_file = tmp_path / 'material.json'
     material_file.write_text(json.dumps(material))
@@ -288,7 +292,7 @@ def test_travel_positive_count_still_requires_resources(travel_source):
         'fieldShowValue'] = '1'
 
     with pytest.raises(RuntimeError, match='travel_attachment_resources_incomplete'):
-        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
 
 
 @pytest.mark.parametrize('failure', ['', 'missing_record', 'missing_file', 'duplicate_source', 'cloud_originals'])
@@ -303,15 +307,13 @@ def test_travel_count_uses_native_records_and_retains_each_source_identity(
     workflow, scan, oa_api = travel_source
     workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][2][
         'fieldShowValue'] = '6'
-    monkeypatch.setattr(travel_orders, 'TRIP_BASE_URL', 'https://trip.example.test')
-    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', {'trip.example.test'})
     inventory = []
     rows = [{'id': f'expense-{i}', 'fjList': [
         {'id': f'attachment-{i}', 'fjdz': f'{100+i}/file.txt' if i < 4 else '',
          'fjmc': 'file.txt' if i < 4 else '', 'fjlx': ''}]} for i in range(6)]
-    resources = travel_orders._attachment_resources_from_api_payload({'result': rows}, inventory)
+    resources = travel_orders.TravelSource(POLICY)._attachment_resources_from_api_payload({'result': rows}, inventory)
     scan.update(resources=resources, attachment_scan_status='resources_found', attachment_inventory=inventory)
-    monkeypatch.setattr(evidence_packet, 'logical_attachment_resources', lambda *_: [resources[0]])
+    monkeypatch.setattr(evidence_packet, 'logical_attachment_resources', lambda *_, **kwargs: [resources[0]])
     if failure == 'missing_record':
         inventory.pop()
     elif failure == 'missing_file':
@@ -338,12 +340,12 @@ def test_travel_count_uses_native_records_and_retains_each_source_identity(
     monkeypatch.setattr(attachments, 'download_resources', download)
     if failure:
         with pytest.raises(CollectionFailure, match='^travel_attachment_resources_incomplete$') as caught:
-            collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+            collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
         assert caught.value.counts['unique_source_resource_count'] <= 4
         assert caught.value.diagnostics[-1]['reason'] == 'source_inventory_incomplete'
     else:
         material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True,
-                                attachment_root=tmp_path, prepared_root=tmp_path / 'prepared')
+                                attachment_root=tmp_path, prepared_root=tmp_path / 'prepared', source_policy=POLICY)
         assert len(material['resources']) == 4
         assert len(material['attachment_scan']['inventory']) == 6
         assert len(material['prepared']['manifest']) == 4
@@ -358,7 +360,7 @@ def test_travel_missing_count_uses_complete_empty_scan_without_inventing_zero(
         fields[2]['fieldShowValue'] = ''
     else:
         del fields[2]
-    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
 
     assert material['attachment_presence'] == {
         'status': 'confirmed_empty', 'evidence_refs': ['material:attachment_scan']}
@@ -379,7 +381,7 @@ def test_travel_missing_count_still_requires_complete_source_read(travel_source)
     scan['attachment_scan_status'] = 'read_failed'
 
     with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
-        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True, source_policy=POLICY)
 
 
 def test_zero_count_does_not_hide_unresolved_declared_attachment(monkeypatch):
@@ -394,7 +396,7 @@ def test_zero_count_does_not_hide_unresolved_declared_attachment(monkeypatch):
             return workflow, resources
 
     monkeypatch.setattr(official_sql, '_query_rows', lambda *_a, **_k: pytest.fail('no extra SQL lookup'))
-    material = collect_case('12', oa_api=DeclaredAttachmentApi(), configs=[CONFIG], allow_browser_download=False)
+    material = collect_case('12', oa_api=DeclaredAttachmentApi(), configs=[CONFIG], allow_browser_download=False, source_policy=POLICY)
     assert 'attachment_presence' not in material
 
 
@@ -415,7 +417,7 @@ def test_collection_does_not_confirm_unknown_empty_sources(monkeypatch, failure)
         return [{'requestid': '12', 'detail_id': '7', 'scfj': None, 'fj': None, 'glfp': None}]
 
     monkeypatch.setattr(official_sql, '_query_rows', query)
-    material = collect_case('12', oa_api=UnknownOaApi(), configs=[CONFIG], allow_browser_download=False)
+    material = collect_case('12', oa_api=UnknownOaApi(), configs=[CONFIG], allow_browser_download=False, source_policy=POLICY)
     assert 'attachment_presence' not in material
 
 
@@ -455,7 +457,7 @@ def test_official_empty_material_does_not_hide_missing_selected_attachment(
     monkeypatch.setattr(official_sql, '_query_rows', lambda *_a, **_k: [{
         'requestid': '12', 'detail_id': '7', 'scfj': None, 'fj': None, 'glfp': None,
     }])
-    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False)
+    material = collect_case('12', oa_api=EmptyOaApi(), configs=[CONFIG], allow_browser_download=False, source_policy=POLICY)
     material_file = tmp_path / 'material.json'
     material_file.write_text(json.dumps(material))
     requests = []

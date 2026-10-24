@@ -9,6 +9,8 @@ import sys
 
 import pytest
 
+from tests.approvals.source_fakes import POLICY
+
 
 PROJECT = Path(__file__).resolve().parents[2]
 
@@ -26,8 +28,9 @@ def pending_output(tmp_path, monkeypatch, capsys):
          'request_name': f'测试单据 {index + 1}'}
         for index in reversed(range(23))
     ]
-    monkeypatch.setattr(api, 'build_api', lambda _config: fake)
+    monkeypatch.setattr(api, 'build_api', lambda _config, **kwargs: fake)
     monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner, 'load_source_policy', lambda: POLICY)
     monkeypatch.setattr(owner.socket.socket, 'bind', lambda _socket, address: Path(address).touch())
     monkeypatch.setattr(owner.socket.socket, 'listen', lambda _socket: None)
 
