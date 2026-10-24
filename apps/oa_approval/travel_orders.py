@@ -153,51 +153,77 @@ def _attachment_resources_from_dom(
     return resources
 
 
-def _attachment_resources_from_api_payload(payload: Any) -> List[Dict[str, Any]]:
+def _attachment_resources_from_api_payload(
+    payload: Any, inventory: List[Dict[str, Any]] | None = None,
+) -> List[Dict[str, Any]]:
     resources: List[Dict[str, Any]] = []
     seen_urls: set[str] = set()
 
-    def add_attachment(item: Any) -> None:
+    def add_attachment(item: Any, path: str, owner: str) -> None:
         if not isinstance(item, dict):
+            if inventory is not None:
+                inventory.append({"stage": "attachment_inventory", "reason": "record_invalid", "source_path": path})
             return
         raw_path = html.unescape(str(item.get("fjdz") or "")).strip()
         url = _trip_attachment_url(raw_path, base_url=f"{TRIP_BASE_URL}/")
         if not url:
             relative_path = raw_path.lstrip("/")
-            resource_id = relative_path.partition("/")[0]
-            if not resource_id.isdigit():
-                return
-            url = _trip_attachment_url(
-                f"/fcfile/fcc/opera/getFile/{relative_path}",
-                base_url=f"{TRIP_BASE_URL}/",
-            )
+            if relative_path.partition("/")[0].isdigit():
+                url = _trip_attachment_url(f"/fcfile/fcc/opera/getFile/{relative_path}", base_url=f"{TRIP_BASE_URL}/")
+        placeholder = (all(key in item for key in ("fjdz", "fjmc", "fjlx"))
+                       and all(item.get(key) in (None, "") for key in ("fjdz", "fjmc", "fjlx", "wbfjdz", "fjwb"))
+                       and item.get("fjdx") in (None, "", 0, "0"))
+        record = {"stage": "attachment_inventory", "source_path": path,
+                  "reason": "downloadable" if url else "empty_placeholder" if placeholder
+                  else "resource_address_invalid" if raw_path else "resource_address_missing"}
+        for key, value in (("attachment_ref", item.get("id")), ("owner_ref", owner)):
+            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value):
+                record[key] = value
+        if url:
+            record["file_ref"] = _attachment_id_from_url(url)
+        if inventory is not None:
+            inventory.append(record)
         if not url or url in seen_urls:
             return
         seen_urls.add(url)
-        resources.append(
-            {
-                "id": _attachment_id_from_url(url),
-                "name": _attachment_name(str(item.get("fjmc") or ""), url),
-                "downloadUrl": url,
-                "allowExtraDownloadHost": True,
-                "source": "travel_platform",
-            }
-        )
+        resources.append({"id": _attachment_id_from_url(url),
+                          "name": _attachment_name(str(item.get("fjmc") or ""), url),
+                          "downloadUrl": url, "allowExtraDownloadHost": True, "source": "travel_platform"})
 
-    def walk(value: Any) -> None:
+    def walk(value: Any, path: str = "payload", owner: str = "main") -> None:
         if isinstance(value, dict):
+            owner = str(value.get("id") or owner)
             for key, child in value.items():
-                if str(key).lower() == "fjlist" and isinstance(child, list):
-                    for item in child:
-                        add_attachment(item)
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(key)):
+                    continue
+                child_path = path + "." + str(key)
+                if str(key).lower() == "fjlist":
+                    if isinstance(child, list):
+                        for index, item in enumerate(child):
+                            add_attachment(item, f"{child_path}[{index}]", owner)
+                    elif inventory is not None:
+                        inventory.append({"stage": "attachment_inventory", "reason": "list_invalid", "source_path": child_path})
                 else:
-                    walk(child)
+                    walk(child, child_path, owner)
         elif isinstance(value, list):
-            for child in value:
-                walk(child)
+            for index, child in enumerate(value):
+                walk(child, f"{path}[{index}]", owner)
 
     walk(payload)
     return resources
+
+
+def _merge_attachment_inventory(target: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> None:
+    identities = {(item.get("owner_ref"), item.get("attachment_ref") or item.get("source_path")): item
+                  for item in target}
+    for item in incoming:
+        key = (item.get("owner_ref"), item.get("attachment_ref") or item.get("source_path"))
+        previous = identities.get(key)
+        if previous is None:
+            target.append(dict(item))
+            identities[key] = target[-1]
+        elif any(previous.get(field) != item.get(field) for field in ("reason", "file_ref")):
+            previous["reason"] = "inventory_changed"
 
 
 def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
@@ -230,14 +256,27 @@ def _capture_attachment_response(
     response: Any,
     resources: List[Dict[str, Any]],
     diagnostics: List[Dict[str, Any]] | None = None,
+    inventory: List[Dict[str, Any]] | None = None,
 ) -> None:
     parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
     trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
     if parsed.hostname != trip_host or parsed.path not in TRIP_ATTACHMENT_API_PATHS:
         return
     try:
-        discovered = _attachment_resources_from_api_payload(response.json())
+        payload = response.json()
+        if (not isinstance(payload, dict) or payload.get("success") is not True
+                or not isinstance(payload.get("result"), (dict, list))
+                or not 200 <= getattr(response, "status", 200) < 300):
+            if inventory is not None:
+                inventory.append({"stage": "attachment_inventory", "reason": "response_invalid"})
+            return
+        observed = []
+        discovered = _attachment_resources_from_api_payload(payload, observed)
+        if inventory is not None:
+            _merge_attachment_inventory(inventory, observed)
     except Exception as error:
+        if inventory is not None:
+            inventory.append({"stage": "attachment_inventory", "reason": "response_invalid"})
         if diagnostics is not None:
             diagnostics.append({"stage": "attachment_api", "reason": "attachment_response_invalid",
                                 "http_status": getattr(response, "status", 200), "exception_type": type(error).__name__})
@@ -679,11 +718,12 @@ def _read_browser_trip_candidates_uncoordinated(
                 context = browser.new_context(storage_state=storage_state)
                 page = context.new_page()
                 response_resources: List[Dict[str, Any]] = []
+                attachment_inventory: List[Dict[str, Any]] = []
                 hotel_orders: List[Dict[str, str]] = []
                 response_diagnostics: List[Dict[str, Any]] = []
 
                 def capture_response(response: Any) -> None:
-                    _capture_attachment_response(response, response_resources, response_diagnostics)
+                    _capture_attachment_response(response, response_resources, response_diagnostics, attachment_inventory)
                     _capture_hotel_order_response(response, hotel_orders, response_diagnostics)
 
                 page.on("response", capture_response)
@@ -764,6 +804,7 @@ def _read_browser_trip_candidates_uncoordinated(
                             "text": text,
                             "resources": resources,
                             "attachment_scan_status": status,
+                            "attachment_inventory": list(attachment_inventory),
                             "hotel_order_details": hotel_order_details,
                             "source_url": str(getattr(page, "url", "") or url),
                             "browser": "headless" if headless else "visible",
@@ -1090,6 +1131,17 @@ def collect_evidence(
             result["fields"].append({"name": "商旅页面内容", "value": body, "raw_value": body,
                                      "table": "travel_order", "row": len(result["fields"])})
         result["fields"].extend(_hotel_detail_fields(fields, valid_results))
+    inventory: List[Dict[str, Any]] = []
+    for candidate in valid_results:
+        _merge_attachment_inventory(inventory, candidate.get("attachment_inventory") or [])
+    if any(item.get("reason") not in {"downloadable", "empty_placeholder"} for item in inventory):
+        return fail("travel_attachment_resources_incomplete", "商旅附件记录含无法读取的文件引用", diagnostics=inventory)
+    if inventory:
+        result["attachment_scan"] = {
+            "status": "resources_found" if merged_resources else "empty",
+            "source": "travel_platform", "source_request_id": str(request_id),
+            "discovery_ref": f"travel_platform:{flow_mark}", "inventory": inventory,
+        }
     if merged_resources:
         result["resources"] = merged_resources
         return result
@@ -1098,6 +1150,7 @@ def collect_evidence(
         for item in valid_results
     ):
         result["attachment_scan"] = {
+            **result.get("attachment_scan", {}),
             "status": "empty",
             "source": "travel_platform",
             "source_request_id": str(request_id),

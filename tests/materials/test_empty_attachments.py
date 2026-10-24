@@ -288,6 +288,61 @@ def test_travel_positive_count_still_requires_resources(travel_source):
         collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
 
 
+@pytest.mark.parametrize('failure', ['', 'missing_record', 'missing_file', 'duplicate_source', 'cloud_originals'])
+def test_travel_count_uses_native_records_and_retains_each_source_identity(
+        tmp_path, monkeypatch, travel_source, failure):
+    from apps.oa_approval import attachments, evidence_packet, invoice_originals
+    from apps.oa_finance_preaudit.case_bundle import CollectionFailure
+
+    workflow, scan, oa_api = travel_source
+    workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][2][
+        'fieldShowValue'] = '6'
+    monkeypatch.setattr(travel_orders, 'TRIP_BASE_URL', 'https://trip.example.test')
+    monkeypatch.setattr(attachments, 'EXTRA_DOWNLOAD_HOSTS', {'trip.example.test'})
+    inventory = []
+    rows = [{'id': f'expense-{i}', 'fjList': [
+        {'id': f'attachment-{i}', 'fjdz': f'{100+i}/file.txt' if i < 4 else '',
+         'fjmc': 'file.txt' if i < 4 else '', 'fjlx': ''}]} for i in range(6)]
+    resources = travel_orders._attachment_resources_from_api_payload({'result': rows}, inventory)
+    scan.update(resources=resources, attachment_scan_status='resources_found', attachment_inventory=inventory)
+    monkeypatch.setattr(evidence_packet, 'logical_attachment_resources', lambda *_: [resources[0]])
+    if failure == 'missing_record':
+        inventory.pop()
+    elif failure == 'missing_file':
+        scan['resources'] = resources[:-1]
+    elif failure == 'duplicate_source':
+        scan['attachment_inventory'] = []
+    elif failure == 'cloud_originals':
+        scan['attachment_inventory'] = []
+        monkeypatch.setattr(invoice_originals, 'resources', lambda *_: [
+            {'id': f'invoice-{i}', '_invoice_original': {}} for i in range(8)])
+
+    def download(targets, **kwargs):
+        import fitz
+
+        result = []
+        for target in targets:
+            path = tmp_path / (target['id'] + '.pdf')
+            with fitz.open() as document:
+                document.new_page().insert_text((40, 40), 'synthetic attachment')
+                document.save(path)
+            result.append({'resource_id': target['id'], 'path': str(path), 'name': path.name})
+        return result, []
+
+    monkeypatch.setattr(attachments, 'download_resources', download)
+    if failure:
+        with pytest.raises(CollectionFailure, match='^travel_attachment_resources_incomplete$') as caught:
+            collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True)
+        assert caught.value.counts['unique_source_resource_count'] <= 4
+        assert caught.value.diagnostics[-1]['reason'] == 'source_inventory_incomplete'
+    else:
+        material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG], allow_browser_download=True,
+                                attachment_root=tmp_path, prepared_root=tmp_path / 'prepared')
+        assert len(material['resources']) == 4
+        assert len(material['attachment_scan']['inventory']) == 6
+        assert len(material['prepared']['manifest']) == 4
+
+
 @pytest.mark.parametrize('missing', ['blank', 'absent'])
 def test_travel_missing_count_uses_complete_empty_scan_without_inventing_zero(
         tmp_path, monkeypatch, travel_source, missing):

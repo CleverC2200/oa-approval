@@ -312,6 +312,4 @@ class OaApi:
 
 
 def build_api(config: dict[str, Any], *, oa_uid_override: str = "") -> OaApi:
-    token = auth.get_token()
-    oa_uid = oa_uid_override or auth.env("OA_UID")
-    return OaApi(token, auth.encrypt_user_id(oa_uid))
+    return OaApi(*auth.credentials(oa_uid_override))

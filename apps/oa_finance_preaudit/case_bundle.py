@@ -33,6 +33,10 @@ _SAFE_COLLECTION_COUNT_KEYS = {
     "form_resource_count",
     "travel_resource_count",
     "trusted_source_sighting_count",
+    "native_attachment_record_count",
+    "empty_placeholder_count",
+    "unique_source_resource_count",
+    "invoice_original_resource_count",
 }
 
 
@@ -48,7 +52,7 @@ class CollectionFailure(RuntimeError):
             and 0 <= value <= 100_000
         }
         self.diagnostics = []
-        for item in diagnostics[:20] if isinstance(diagnostics, list) else []:
+        for item in diagnostics[:2000] if isinstance(diagnostics, list) else []:
             if not isinstance(item, dict):
                 continue
             kept = {}
@@ -61,6 +65,12 @@ class CollectionFailure(RuntimeError):
                         kept[key] = value
                 elif key in {"api_success", "identity_present", "identity_matches"} and isinstance(value, bool):
                     kept[key] = value
+                elif key in {"attachment_ref", "owner_ref", "file_ref"}:
+                    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value):
+                        kept[key] = value
+                elif key == "source_path":
+                    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.\[\]]{1,256}", value):
+                        kept[key] = value
             if kept:
                 self.diagnostics.append(kept)
 
@@ -339,7 +349,7 @@ def _travel_resources(
     request_id: str,
     allow_browser_download: bool,
     attachment_timeout_sec: int,
-    attachment_scan: dict[str, str] | None = None,
+    attachment_scan: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if str(config.get("flow_key") or "") != "travel_expense":
         return [], []
@@ -508,7 +518,7 @@ def collect_case(
         workflow,
         raw_resources,
     )
-    travel_scan: dict[str, str] = {}
+    travel_scan: dict[str, Any] = {}
     discovered_resources, travel_facts = _travel_resources(
         config=config,
         workflow=workflow,
@@ -535,10 +545,21 @@ def collect_case(
         )
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
-        trusted_source_sighting_count = len(form_resources) + len(discovered_resources)
+        source_resources = _merge_resources(form_resources, discovered_resources)
+        inventory = travel_scan.get("inventory") or []
+        source_file_ids = {_trip_content_id(item) for item in source_resources}
+        inventory_complete = all(
+            item.get("reason") == "empty_placeholder"
+            or (item.get("reason") == "downloadable" and item.get("file_ref") in source_file_ids)
+            for item in inventory
+        )
+        trusted_source_sighting_count = len(inventory) if inventory else len(source_resources)
         if (
-            declared_attachment_count is not None
-            and trusted_source_sighting_count < declared_attachment_count
+            not inventory_complete
+            or (
+                declared_attachment_count is not None
+                and trusted_source_sighting_count < declared_attachment_count
+            )
         ):
             raise CollectionFailure(
                 "travel_attachment_resources_incomplete",
@@ -548,7 +569,12 @@ def collect_case(
                     "form_resource_count": len(form_resources),
                     "travel_resource_count": len(discovered_resources),
                     "trusted_source_sighting_count": trusted_source_sighting_count,
+                    "native_attachment_record_count": len(inventory),
+                    "empty_placeholder_count": sum(item.get("reason") == "empty_placeholder" for item in inventory),
+                    "unique_source_resource_count": len(source_resources),
+                    "invoice_original_resource_count": len(original_resources),
                 },
+                inventory + [{"stage": "attachment_count", "reason": "source_inventory_incomplete"}],
             )
     descriptors = [
         _resource_descriptor(item, request_id=str(request_id))

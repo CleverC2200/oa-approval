@@ -153,7 +153,9 @@ class Approval:
         except Exception as error:
             from apps.oa_finance_preaudit.case_bundle import CollectionFailure
 
-            if isinstance(error, CollectionFailure):
+            from apps.oa_approval.auth import AuthFailure
+
+            if isinstance(error, (CollectionFailure, AuthFailure)):
                 report = directory / "collection-error.json"
                 try:
                     report.write_text(encoded({"error": str(error), "counts": error.counts,

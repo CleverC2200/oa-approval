@@ -482,3 +482,40 @@ def test_collect_unknown_run_keeps_the_public_not_found_error(tmp_path):
     with pytest.raises(ValueError, match="^run_not_found$"):
         app.collect("missing", expected_task_id=1)
     assert api.posts == []
+
+
+def test_auth_failure_keeps_attempt_diagnostics_and_never_submits(tmp_path, monkeypatch):
+    from apps.oa import cli
+    from apps.oa_approval import auth
+    import base64
+
+    app, fake = service(tmp_path)
+    run = app.pending()['run_id']
+    app.api = None
+    app.configs = [{}]
+    values = {'OA_BASE_URL': 'https://oa.example.test', 'OA_APP_ID': 'fake-app',
+              'OA_APP_SECRET': 'fake-secret', 'OA_UID': '77',
+              'OA_APP_PUBLIC_KEY': base64.b64encode(b'fake-public-key').decode()}
+    monkeypatch.setattr(auth, 'env', lambda name, default='': values.get(name, default))
+    monkeypatch.setattr(auth, '_openssl_encrypt', lambda *_: 'fake-cipher')
+    calls = []
+
+    def token(url, headers, body=''):
+        calls.append(url)
+        return {'code': -1, 'status': False, 'msg': 'secret解密失败,请检查加密内容.',
+                'secret': 'synthetic-secret', 'token': 'synthetic-token'}
+
+    monkeypatch.setattr(auth, '_http_post', token)
+    with pytest.raises(auth.AuthFailure) as caught:
+        app.collect(run)
+    output = cli.failure(caught.value)
+    body = json.loads(Path(output['diagnostics_file']).read_text())
+    assert body['error'] == 'oa_auth_applytoken_failed'
+    assert body['diagnostics'][0]['reason'] == 'secret_decryption_failed'
+    assert body['diagnostics'][0]['api_code'] == -1
+    assert not any(value in json.dumps(body) for value in ('synthetic-secret', 'synthetic-token', 'fake-cipher'))
+    task, = app.store.tasks(run)
+    assert task['status'] == 'failed' and task['material_file'] is None
+    assert app.inspect(task['id'])['submissions'] == []
+    assert len(calls) == 1 and calls[0].endswith('/applytoken')
+    assert fake.posts == []

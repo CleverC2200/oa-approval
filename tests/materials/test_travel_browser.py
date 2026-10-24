@@ -21,6 +21,53 @@ def expense_result(**changes):
             'fkFymxKzbBean': {'jddz': ''}, 'jdmxList': [{'rzrq': '2026-10-20'}], **changes}
 
 
+def native_attachment_rows():
+    return [
+        {'id': 'expense-a', 'fjList': [{'id': 'attachment-a', 'fjdz': '', 'fjmc': '',
+                                      'fjlx': '', 'fjdx': '', 'wbfjdz': '', 'fjwb': ''}]},
+        {'id': 'expense-b', 'fjList': [{'id': 'attachment-b', 'fjdz': '', 'fjmc': '',
+                                      'fjlx': '', 'fjdx': '', 'wbfjdz': '', 'fjwb': ''}]},
+        {'id': 'expense-c', 'fjList': [{'id': f'attachment-{index}', 'fjdz': f'{100 + index}/file.txt',
+                                      'fjmc': 'file.txt'} for index in range(4)],
+         'fpList': [{'id': f'invoice-{index}'} for index in range(9)]},
+    ]
+
+
+def test_native_attachment_records_are_distinct_from_downloads_and_invoices(browser_transport):
+    browser_transport.outcomes[True] = {'expense_rows': native_attachment_rows()}
+    evidence = collect_travel(count='6')
+    assert evidence['errors'] == []
+    assert len(evidence['resources']) == 4
+    inventory = evidence['attachment_scan']['inventory']
+    assert len(inventory) == 6
+    assert [item['reason'] for item in inventory].count('empty_placeholder') == 2
+    assert {item['owner_ref'] for item in inventory} == {'expense-a', 'expense-b', 'expense-c'}
+    assert all('invoice' not in json.dumps(item) for item in inventory)
+
+
+@pytest.mark.parametrize('change', [{'fjmc': 'missing.txt'}, {'fjdx': '120'},
+                                   {'wbfjdz': 'https://other.example.test/private?token=synthetic-secret'},
+                                   {'fjdz': 'not-a-supported-address'}])
+def test_unreadable_attachment_record_is_not_an_empty_placeholder(browser_transport, change):
+    rows = native_attachment_rows()
+    rows[0]['fjList'][0].update(change)
+    browser_transport.outcomes[True] = {'expense_rows': rows}
+    evidence = collect_travel(count='6')
+    assert evidence['errors'][0]['code'] == 'travel_attachment_resources_incomplete'
+    diagnostic = next(item for item in evidence['errors'][0]['diagnostics']
+                      if item.get('attachment_ref') == 'attachment-a')
+    assert diagnostic['reason'] in {'resource_address_missing', 'resource_address_invalid'}
+    assert 'synthetic-secret' not in json.dumps(evidence['errors'])
+
+
+def test_repeated_native_responses_do_not_inflate_attachment_record_count(browser_transport):
+    rows = native_attachment_rows()
+    browser_transport.outcomes[True] = {'expense_rows': rows + rows}
+    evidence = collect_travel(count='6')
+    assert len(evidence['attachment_scan']['inventory']) == 6
+    assert len(evidence['resources']) == 4
+
+
 def hotel_transport(payload, status=200):
     calls = []
 
