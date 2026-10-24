@@ -306,17 +306,20 @@ def test_complete_nonempty_travel_scan_does_not_open_visible_browser(browser_tra
     assert browser_transport.launches == [True]
 
 
-def test_native_offline_source_flows_from_browser_response_to_bound_evidence(browser_transport):
+@pytest.mark.parametrize('address', ['', '合成市合成区合成路1号'])
+def test_native_offline_source_flows_from_browser_response_to_bound_evidence(browser_transport, address):
+    result = expense_result(fkFymxKzbBean={'jddz': address})
     browser_transport.outcomes[True] = {
         'expense_rows': [{'cpbh': '0300', 'ddlx': '03001', 'ywdh': 'BL-SYNTHETIC',
                          'fysm': '合成住宿', 'sjly': '3', 'id': 'expense-1', 'bxpch': 'batch-1'}],
-        'hotel_payload': {'success': True, 'result': expense_result()},
+        'hotel_payload': {'success': True, 'result': result},
     }
     evidence = collect_travel()
     fact, = [item for item in evidence['fields'] if item['name'] == '商旅住宿订单详情']
     detail = json.loads(fact['value'])
     assert detail['read_status'] == 'read' and detail['date_semantics'] == 'declared'
-    assert detail['order_detail'] == expense_result()
+    assert detail['order_detail'] == result
+    assert detail['hotel_address'] == address and detail['location_semantics'] == 'declared'
     assert fact['subject_ref'] == 'travel_order:BL-SYNTHETIC'
     assert not any(item['name'] == '酒店地址' for item in evidence['fields'])
     assert browser_transport.requests[0][0].endswith('/fcecf/fcc/pcapi/COMM_B2G_bldDetail')
@@ -328,6 +331,7 @@ def test_native_offline_source_flows_from_browser_response_to_bound_evidence(bro
     ({'failure': 'deadline'}, 'browser_deadline'),
     ({'text': '登录'}, 'login_required'),
     ({'text': 'SYNTHETIC-OTHER'}, 'flow_marker_mismatch'),
+    ({'text': ''}, 'page_empty'),
     ({'text': 'SYNTHETIC-TRAVEL 系统正在处理中，请稍后'}, 'page_pending'),
 ])
 def test_travel_failure_diagnostics_survive_browser_fallback(browser_transport, outcome, reason):

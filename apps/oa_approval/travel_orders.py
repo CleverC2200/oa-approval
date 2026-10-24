@@ -938,7 +938,7 @@ def _hotel_detail_fields(
             seen.add(identity)
             facts.append({"name": "商旅住宿订单详情", "value": body, "raw_value": body,
                           "table": "travel_order", "row": len(facts), "subject_ref": subject_ref})
-            if not address:
+            if not address or detail.get("location_semantics") == "declared":
                 continue
             facts.append(
                 {
@@ -1040,6 +1040,9 @@ def collect_evidence(
         if not text or "登录" in text[:100] or flow_mark not in text:
             if text:
                 diagnostics.append({"stage": "page", "reason": "login_required" if "登录" in text[:100] else "flow_marker_mismatch",
+                    **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
+            elif not candidate.get("diagnostics"):
+                diagnostics.append({"stage": "page", "reason": "page_empty",
                     **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
             continue
         if _trip_page_pending(text):
