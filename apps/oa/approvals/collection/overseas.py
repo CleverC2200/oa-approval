@@ -8,7 +8,7 @@ from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals.sources import official_sql
 from apps.oa.approvals import overseas as business
-from apps.oa.approvals.collection.downloads import download_resources
+from apps.oa.approvals.collection.downloads import download_resources, build_download_sources
 
 
 def snapshot(data, resources, request_id, *, origins, writable=True):
@@ -40,15 +40,15 @@ def collect(api, request_id, directory, *, source_policy):
 
 def download_fresh(resources: list[dict], directory: Path, *, request_id: str, source_policy) -> list[dict]:
     import fitz
-    from apps.oa.approvals.sources.downloads import DownloadTransfer
 
     business._require(isinstance(request_id, str) and re.fullmatch(r'[1-9][0-9]*', request_id) is not None,
              'invoice_request_invalid')
-    files, errors = download_resources(
-        resources, transfer=DownloadTransfer(source_policy), dest_dir=directory, timeout_sec=60, allow_browser_download=True,
+    result = download_resources(
+        resources, sources=build_download_sources(source_policy), dest_dir=directory, timeout_sec=60, allow_browser_download=True,
         request_id=request_id, flow_key='overseas_invoice', reuse_cache=False,
     )
-    business._require(not errors and len(files) == len(resources), 'invoice_download_failed')
+    files = list(result.items)
+    business._require(not result.errors and len(files) == len(resources), 'invoice_download_failed')
     for item in files:
         path = Path(item['path'])
         business._require(path.suffix.lower() in {'.pdf', '.png', '.jpg', '.jpeg'}, 'invoice_attachment_type_unsupported')

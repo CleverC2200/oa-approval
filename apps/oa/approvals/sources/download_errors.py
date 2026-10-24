@@ -1,6 +1,35 @@
 from __future__ import annotations
 
-from typing import Any
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, TypeAlias
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadError:
+    code: str
+    message: str
+
+    def to_record(self) -> dict:
+        return {"code": self.code, "message": self.message}
+
+
+@dataclass(frozen=True, slots=True)
+class Downloaded:
+    path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class Unavailable:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class Failed:
+    error: DownloadError
+
+
+TransferOutcome: TypeAlias = Downloaded | Unavailable | Failed
 
 
 OA_SESSION_EXPIRED_CODE = "oa_session_expired"

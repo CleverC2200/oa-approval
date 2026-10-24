@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from apps.oa.approvals.sources import downloads as remote
-from tests.approvals.source_fakes import POLICY
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
 
 import json
 import os
@@ -24,15 +24,18 @@ def test_collection_cache_follows_runtime_root_across_working_directories(tmp_pa
         path = dest_dir / 'source.txt'
         path.write_text('synthetic source')
         calls.append(path)
-        return path, ''
+        return Downloaded(path)
 
-    monkeypatch.setattr(attachments, '_download_resource_direct', download)
+    sources = download_sources(download)
+    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
 
     def collect(request_id, *, attachment_root, **_options):
-        files, errors = attachments.download_resources(
+        download_result = attachments.download_resources(
             [{'id': 'source', 'name': 'source.txt', 'downloadUrl': '/download?fileid=source'}],
             dest_dir=attachment_root, timeout_sec=1, allow_browser_download=True,
-            request_id=request_id, flow_key='general_expense', reuse_cache=True, transfer=remote.DownloadTransfer(POLICY))
+            request_id=request_id, flow_key='general_expense', reuse_cache=True, sources=attachments.build_download_sources(POLICY))
+        files = list(download_result.items)
+        errors = [error.to_record() for error in download_result.errors]
         assert errors == []
         return {'request_id': request_id, 'workflow_key': 'general_expense',
                 'resources': [{'resource_id': 'source', 'path': files[0]['path']}],

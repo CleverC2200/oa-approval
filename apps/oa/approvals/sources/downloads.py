@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+from apps.oa.approvals.sources.download_errors import (
+    Downloaded,
+    DownloadError,
+    Failed,
+    Unavailable,
+    TransferOutcome,
+)
 from apps.oa.approvals.source_policy import SourcePolicy
 
 import os
 from pathlib import Path
-import re
 import shutil
 import subprocess
 import threading
@@ -13,7 +19,6 @@ from typing import Any, Dict, List, Tuple
 import urllib.parse
 import urllib.request
 
-from apps.oa.materials import resources
 from apps.oa.materials.resources import (
     resource_name,
     safe_filename,
@@ -84,36 +89,6 @@ def _looks_like_html(path: Path) -> bool:
         or head.startswith(b"<html")
         or b"<html" in head[:200]
     )
-
-
-def download_error_code(message: str) -> str:
-    text = str(message or "").strip()
-    for code in (
-        "resource_ownership_untrusted",
-        "attachment_content_incomplete",
-        "material_budget_exceeded",
-        "material_path_untrusted",
-    ):
-        if text.startswith(f"{code}:"):
-            return code
-    if text.startswith(f"{ATTACHMENT_ACCESS_DENIED_CODE}:"):
-        return ATTACHMENT_ACCESS_DENIED_CODE
-    for code in rpa_session.FATAL_SESSION_CODES:
-        if text.startswith(f"{code}:"):
-            return code
-    if text.startswith(f"{runtime_control.STOP_CODE}:"):
-        return runtime_control.STOP_CODE
-    if text.startswith(f"{OA_SESSION_EXPIRED_CODE}:"):
-        return OA_SESSION_EXPIRED_CODE
-    if text.startswith(f"{CHROME_LAUNCH_TIMEOUT_CODE}:"):
-        return CHROME_LAUNCH_TIMEOUT_CODE
-    if text.startswith(f"{DOWNLOAD_TIMEOUT_CODE}:"):
-        return DOWNLOAD_TIMEOUT_CODE
-    if text.startswith(f"{RESOURCE_SLOT_TIMEOUT_CODE}:"):
-        return RESOURCE_SLOT_TIMEOUT_CODE
-    if "下载超时" in text:
-        return DOWNLOAD_TIMEOUT_CODE
-    return detect_oa_download_fail_code(text) or "attachment_download_failed"
 
 
 def _download_block_message(code: str, name: str) -> str:
@@ -319,8 +294,9 @@ _BROWSER_CACHE = _BrowserCache()
 
 
 class DownloadTransfer:
-    def __init__(self, policy: SourcePolicy):
+    def __init__(self, policy: SourcePolicy, *, initialize_context=None):
         self.policy = policy
+        self._initialize_context = initialize_context
         self._browser_cache = _BROWSER_CACHE
 
     def normalize_download_url(
@@ -534,10 +510,10 @@ class DownloadTransfer:
 
     def _direct_extra_host_download(
         self, resource: Dict[str, Any], url: str, *, dest_dir: Path, timeout_sec: int
-    ) -> Tuple[Path | None, str]:
+    ) -> TransferOutcome:
         parsed = urllib.parse.urlparse(url)
         if parsed.hostname not in self.policy.attachments.extra_hosts:
-            return None, ""
+            return Unavailable()
         name = resource_name(resource) or "attachment.bin"
         dest = dest_dir / deterministic_filename(resource, name)
         request = urllib.request.Request(
@@ -560,15 +536,19 @@ class DownloadTransfer:
                         "kind": "attachment",
                     },
                 )
-            return dest, ""
+            return Downloaded(dest)
         except Exception as err:
             if isinstance(err, safe_http.HttpBoundaryError):
                 raise
             if str(err).startswith("material_"):
-                return None, f"{err}: 附件空间不足或路径不可信"
-            return (
-                None,
-                f"attachment_download_failed: {name}: 直连下载失败: {str(err).strip()[:300]}",
+                return Failed(
+                    DownloadError(str(err), f"{err}: 附件空间不足或路径不可信")
+                )
+            return Failed(
+                DownloadError(
+                    "attachment_download_failed",
+                    f"attachment_download_failed: {name}: 直连下载失败: {str(err).strip()[:300]}",
+                )
             )
 
     def _rpa_cookie_header(self, host: str, *, timeout_sec: int = 2) -> str:
@@ -598,20 +578,20 @@ class DownloadTransfer:
                 )
             return header
 
-    def _direct_session_cookie_download(
+    def native(
         self, resource: Dict[str, Any], url: str, *, dest_dir: Path, timeout_sec: int
-    ) -> Tuple[Path | None, str]:
+    ) -> TransferOutcome:
         parsed = urllib.parse.urlparse(url)
         oa_host_name = (
             urllib.parse.urlparse(self.policy.attachments.oa_origin).hostname or ""
         )
         if parsed.hostname not in {oa_host_name, *self.policy.attachments.extra_hosts}:
-            return None, ""
+            return Unavailable()
         cookie_header = str(resource.get("_ephemeral_cookie_header") or "").strip()
         if not cookie_header:
             cookie_header = self._rpa_cookie_header(parsed.hostname or "")
         if not cookie_header:
-            return None, ""
+            return Unavailable()
         name = resource_name(resource) or "attachment.bin"
         dest = dest_dir / deterministic_filename(resource, name)
         request = urllib.request.Request(
@@ -626,7 +606,11 @@ class DownloadTransfer:
             ) as resp:
                 response_code = detect_oa_download_fail_code(resp.geturl())
                 if response_code:
-                    return None, _download_block_message(response_code, name)
+                    return Failed(
+                        DownloadError(
+                            response_code, _download_block_message(response_code, name)
+                        )
+                    )
                 material_store.copy_stream(
                     dest,
                     resp,
@@ -643,15 +627,19 @@ class DownloadTransfer:
                 except Exception:
                     pass
                 if code:
-                    return None, _download_block_message(code, name)
-                return None, ""
-            return dest, ""
+                    return Failed(
+                        DownloadError(code, _download_block_message(code, name))
+                    )
+                return Unavailable()
+            return Downloaded(dest)
         except Exception as error:
             if isinstance(error, safe_http.HttpBoundaryError):
                 raise
             if str(error).startswith("material_"):
-                return None, f"{error}: 附件空间不足或路径不可信"
-            return None, ""
+                return Failed(
+                    DownloadError(str(error), f"{error}: 附件空间不足或路径不可信")
+                )
+            return Unavailable()
 
     def wait_new_download_or_block(
         self, before: set[str], expected_suffix: str, timeout_sec: int
@@ -686,43 +674,42 @@ class DownloadTransfer:
             time.sleep(0.5)
         return None, self.chrome_download_fail_code(close_blocking_tabs=True)
 
-    def _normalized_download_url(self, resource: Dict[str, Any]) -> Tuple[str, str]:
+    def _download_url(self, resource: Dict[str, Any]) -> str | Failed:
         raw_url = str(
             resource.get("downloadUrl") or resource.get("download_url") or ""
         ).strip()
         name = resource_name(resource) or "attachment.bin"
         if not raw_url:
-            return "", f"{name}: 缺少 downloadUrl"
-        try:
-            return (
-                self.normalize_download_url(
-                    raw_url,
-                    allow_extra_hosts=bool(resource.get("allowExtraDownloadHost")),
-                ),
-                "",
+            return Failed(
+                DownloadError("attachment_download_failed", f"{name}: 缺少 downloadUrl")
             )
-        except ValueError as err:
-            return "", f"{name}: 下载链接不合法: {err}"
+        try:
+            return self.normalize_download_url(
+                raw_url, allow_extra_hosts=bool(resource.get("allowExtraDownloadHost"))
+            )
+        except ValueError as error:
+            return Failed(
+                DownloadError(
+                    "attachment_download_failed", f"{name}: 下载链接不合法: {error}"
+                )
+            )
 
-    def _download_resource_direct_uncoordinated(
-        self,
-        resource: Dict[str, Any],
-        *,
-        dest_dir: Path,
-        timeout_sec: int,
-        initialize_context=None,
-    ) -> Tuple[Path | None, str]:
-        url, error = self._normalized_download_url(resource)
-        if error:
-            return None, error
+    def _direct(
+        self, resource: dict, *, dest_dir: Path, timeout_sec: int
+    ) -> TransferOutcome:
+        url = self._download_url(resource)
+        if isinstance(url, Failed):
+            return url
         dest_dir.mkdir(parents=True, exist_ok=True)
-        direct_path, _direct_err = self._direct_extra_host_download(
+        extra = self._direct_extra_host_download(
             resource, url, dest_dir=dest_dir, timeout_sec=timeout_sec
         )
-        if direct_path is not None:
-            return direct_path, ""
-        if _direct_err.startswith("material_"):
-            return None, _direct_err
+        if (
+            isinstance(extra, Downloaded)
+            or isinstance(extra, Failed)
+            and extra.error.code.startswith("material_")
+        ):
+            return extra
         resource = dict(resource)
         host = urllib.parse.urlsplit(url).hostname or ""
         if host in {
@@ -732,61 +719,52 @@ class DownloadTransfer:
             resource["_ephemeral_cookie_header"] = resource.get(
                 "_ephemeral_cookie_header"
             ) or self._rpa_cookie_header(host)
-        direct_path, direct_err = self._direct_session_cookie_download(
-            resource, url, dest_dir=dest_dir, timeout_sec=timeout_sec
-        )
+        outcome = self.native(resource, url, dest_dir=dest_dir, timeout_sec=timeout_sec)
         if (
-            direct_path is None
-            and download_error_code(direct_err) == ATTACHMENT_ACCESS_DENIED_CODE
-            and initialize_context is not None
+            isinstance(outcome, Failed)
+            and outcome.error.code == ATTACHMENT_ACCESS_DENIED_CODE
+            and self._initialize_context is not None
         ):
             try:
-                initialized = initialize_context(resource, url, timeout_sec=timeout_sec)
+                initialized = self._initialize_context(
+                    resource, url, timeout_sec=timeout_sec
+                )
             except rpa_session.RpaSessionError as error:
-                return None, f"{error.code}: {resource_name(resource)}: {error}"
+                return Failed(
+                    DownloadError(
+                        error.code, f"{error.code}: {resource_name(resource)}: {error}"
+                    )
+                )
             if initialized:
                 if runtime_control.stop_requested():
-                    return None, _download_block_message(
-                        runtime_control.STOP_CODE, resource_name(resource)
+                    return Failed(
+                        DownloadError(
+                            runtime_control.STOP_CODE,
+                            _download_block_message(
+                                runtime_control.STOP_CODE, resource_name(resource)
+                            ),
+                        )
                     )
-                retry_path, retry_error = self._direct_session_cookie_download(
+                retried = self.native(
                     resource, url, dest_dir=dest_dir, timeout_sec=timeout_sec
                 )
-                return retry_path, retry_error or (
-                    direct_err if retry_path is None else ""
-                )
-        if direct_path is not None or direct_err:
-            return direct_path, direct_err
-        return None, ""
+                return outcome if isinstance(retried, Unavailable) else retried
+        return outcome
 
-    def _download_resource_with_browser_uncoordinated(
-        self, resource: Dict[str, Any], *, dest_dir: Path, timeout_sec: int
-    ) -> Tuple[Path | None, str]:
-        url, error = self._normalized_download_url(resource)
-        if error:
-            return None, error
-        name = resource_name(resource) or "attachment.bin"
-        try:
-            return self._capture_browser_download(
-                url,
-                name,
-                dest_dir=dest_dir,
-                resource=resource,
-                timeout_sec=timeout_sec,
-                headless=browser_silent_enabled()
-                or headless_browser_download_enabled(),
-            ), ""
-        except Exception as browser_error:
-            code = (
-                str(browser_error)
-                if str(browser_error).startswith("material_")
-                else "attachment_download_failed"
-            )
-            return None, f"{code}: 浏览器会话下载失败"
+    def direct(
+        self, resource: dict, *, dest_dir: Path, timeout_sec: int
+    ) -> TransferOutcome:
+        return direct_download(
+            resource,
+            timeout_sec=timeout_sec,
+            operation=lambda: self._direct(
+                resource, dest_dir=dest_dir, timeout_sec=timeout_sec
+            ),
+        )
 
-    def _download_resource_with_browser(
-        self, resource: Dict[str, Any], *, dest_dir: Path, timeout_sec: int
-    ) -> Tuple[Path | None, str]:
+    def browser(
+        self, resource: dict, *, dest_dir: Path, timeout_sec: int
+    ) -> TransferOutcome:
         name = resource_name(resource) or "attachment.bin"
         try:
             with resource_slots.acquire(
@@ -794,12 +772,49 @@ class DownloadTransfer:
                 capacity=1,
                 timeout_sec=_resource_slot_wait_timeout(timeout_sec),
             ):
-                return self._download_resource_with_browser_uncoordinated(
-                    resource,
-                    dest_dir=dest_dir,
-                    timeout_sec=timeout_sec,
-                )
+                url = self._download_url(resource)
+                if isinstance(url, Failed):
+                    return url
+                try:
+                    path = self._capture_browser_download(
+                        url,
+                        name,
+                        dest_dir=dest_dir,
+                        resource=resource,
+                        timeout_sec=timeout_sec,
+                        headless=browser_silent_enabled()
+                        or headless_browser_download_enabled(),
+                    )
+                    return Downloaded(path)
+                except Exception as error:
+                    code = (
+                        str(error)
+                        if str(error).startswith("material_")
+                        else "attachment_download_failed"
+                    )
+                    return Failed(DownloadError(code, f"{code}: 浏览器会话下载失败"))
         except resource_slots.ResourceSlotTimeout:
-            return None, (
-                f"{RESOURCE_SLOT_TIMEOUT_CODE}: {name}: 等待浏览器附件下载通道超时"
+            return Failed(
+                DownloadError(
+                    RESOURCE_SLOT_TIMEOUT_CODE,
+                    f"{RESOURCE_SLOT_TIMEOUT_CODE}: {name}: 等待浏览器附件下载通道超时",
+                )
             )
+
+
+def direct_download(resource: dict, *, timeout_sec: int, operation) -> TransferOutcome:
+    try:
+        with resource_slots.acquire(
+            "attachment-direct",
+            capacity=_global_download_capacity(),
+            timeout_sec=_resource_slot_wait_timeout(timeout_sec),
+        ):
+            return operation()
+    except resource_slots.ResourceSlotTimeout:
+        name = resource_name(resource) or "attachment.bin"
+        return Failed(
+            DownloadError(
+                RESOURCE_SLOT_TIMEOUT_CODE,
+                f"{RESOURCE_SLOT_TIMEOUT_CODE}: {name}: 等待全局附件下载通道超时",
+            )
+        )
