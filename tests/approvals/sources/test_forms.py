@@ -1,3 +1,9 @@
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
 import pytest
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.approvals.sources import downloads as remote
@@ -64,3 +70,46 @@ def test_same_origin_absolute_link_and_fileid_only_are_kept(monkeypatch):
     rows = evidence_packet.logical_attachment_resources(data, [])
     assert rows[0]['downloadUrl'] == '/weaver/weaver.file.FileDownload?fileid=101'
     assert rows[0]['name'] == 'attachment-101.bin'
+
+
+def test_cold_approval_import_keeps_attachment_hosts_from_private_configuration(tmp_path):
+    configuration = tmp_path / 'synthetic.env'
+    configuration.write_text('OA_BASE_URL=https://oa.example.test\nOA_EXTRA_DOWNLOAD_HOSTS=files.example.test\n')
+    configuration.chmod(0o600)
+    environment = {**os.environ, 'OA_AUTH_ENV_FILE': str(configuration)}
+    environment.pop('OA_EXTRA_DOWNLOAD_HOSTS', None)
+    script = '''
+import json
+import os
+from pathlib import Path
+import socket
+from apps.oa.runtime import environment
+
+def reject(*args, **kwargs):
+    raise RuntimeError('offline_network_forbidden')
+
+socket.getaddrinfo = reject
+socket.socket.connect = reject
+environment.PROJECT_ROOT = Path(os.environ['OA_AUTH_ENV_FILE']).parent / 'checkout'
+from apps.oa.approvals import operations, forms
+
+url = 'https://files.example.test/opera/getFile/123/invoice.pdf'
+workflow = {'workflowMainTableInfo': {'requestRecords': [{'workflowRequestTableFields': [
+    {'fieldName': 'attachment', 'fieldShowName': '附件', 'fieldValue': url, 'fieldShowValue': url}
+]}]}}
+rows = forms.logical_attachment_resources(workflow, [])
+trip = forms.logical_attachment_resources({}, [
+    {'id': 'listed-1', 'name': 'invoice-a.pdf', 'downloadUrl': url},
+    {'id': 'listed-2', 'name': 'invoice-b.pdf', 'downloadUrl': url.replace('/getFile/', '/share/open/')}
+])
+print(json.dumps({'rows': rows, 'trip_ids': [row['id'] for row in trip]}))
+'''
+    result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[3],
+                            env=environment, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert len(report['rows']) == 1
+    assert report['rows'][0]['downloadUrl'] == 'https://files.example.test/opera/getFile/123/invoice.pdf'
+    assert report['rows'][0]['allowExtraDownloadHost'] is True
+    assert report['rows'][0]['_trusted_source_field_path'] == 'main[0].field[0]'
+    assert report['trip_ids'] == ['listed-1']

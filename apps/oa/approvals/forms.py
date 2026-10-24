@@ -13,7 +13,6 @@ from apps.oa.approvals import flows as flow
 
 
 ATTACHMENT_FIELD_URL_RE = re.compile(r"https://[^\s\"'<>]+", re.IGNORECASE)
-FIELD_ATTACHMENT_HOSTS = {host.strip().lower() for host in os.environ.get("OA_EXTRA_DOWNLOAD_HOSTS", "").split(",") if host.strip()}
 TRIP_ATTACHMENT_ID_RE = re.compile(
     r"/opera/(?:getFile|share/open)/(\d+)/",
     re.IGNORECASE,
@@ -167,6 +166,10 @@ def _resource_name_from_url(url: str) -> str:
     return attachments.safe_filename(name, "attachment.bin")
 
 
+def _field_attachment_hosts() -> set[str]:
+    return {host.strip().lower() for host in os.environ.get("OA_EXTRA_DOWNLOAD_HOSTS", "").split(",") if host.strip()}
+
+
 def attachment_url_resources_from_fields(
     data: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -181,7 +184,7 @@ def attachment_url_resources_from_fields(
             parsed = urllib.parse.urlparse(url)
             if (
                 parsed.scheme != "https"
-                or parsed.hostname not in FIELD_ATTACHMENT_HOSTS
+                or parsed.hostname not in _field_attachment_hosts()
                 or url in seen
             ):
                 continue
@@ -207,7 +210,7 @@ def _trip_attachment_identity(resource: dict[str, Any]) -> str:
         resource.get("downloadUrl") or resource.get("download_url") or ""
     ).strip()
     parsed = urllib.parse.urlparse(raw_url)
-    if parsed.hostname not in FIELD_ATTACHMENT_HOSTS:
+    if parsed.hostname not in _field_attachment_hosts():
         return ""
     match = TRIP_ATTACHMENT_ID_RE.search(parsed.path)
     return str(match.group(1)) if match else ""
