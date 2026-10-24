@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import base64
 from datetime import datetime, timezone
 import hashlib
@@ -21,7 +20,7 @@ from PIL import Image, JpegImagePlugin
 
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.materials import locations as attachment_locations
-from apps.oa.approvals.sources import auth
+from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
 
 MODEL = 'deepseek-flash'
@@ -79,7 +78,7 @@ def _source_digest(path: Path) -> str:
 
 
 def _api_key() -> str:
-    return auth.env('OA_REVIEW_API_KEY')
+    return environment.env('OA_REVIEW_API_KEY')
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -551,36 +550,3 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
         report['observations_file'] = str(observations_file)
     save()
     return report
-
-
-def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description='通过 DeepSeek HTTP API 读取附件，返回带来源的文本回答。')
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument('--file', action='append', type=Path, dest='files')
-    source.add_argument('--material-file', type=Path)
-    parser.add_argument('--resource-id', help='冻结材料中的真实附件 ID。')
-    parser.add_argument('--page', type=int, help='所选附件在完整报告中的图片页码，依赖 --resource-id。')
-    parser.add_argument('--prompt', default=DEFAULT_PROMPT)
-    parser.add_argument('--output-dir', type=Path)
-    parser.add_argument('--timeout-seconds', type=float, default=90)
-    parser.add_argument('--budget-seconds', type=float, default=1800)
-    parser.add_argument('--region', type=int, nargs=4, metavar=('X0', 'Y0', 'X1', 'Y1'))
-    parser.add_argument('--rotate', type=int, choices=(0, 90, 180, 270), default=0,
-                        help='图片阅读副本顺时针旋转角度；先按原图坐标裁剪，文本不旋转。')
-    args = parser.parse_args(argv)
-    try:
-        report = recognize(**vars(args))
-        print(json.dumps({key: report[key] for key in ('status', 'report_file', 'model', 'transport')}
-                         | {'parts': len(report['parts']), 'skipped_sources': len(report.get('skipped_sources', [])),
-                            'coverage': report.get('coverage'), 'reason': report.get('reason'),
-                            'selection': report.get('selection'),
-                            'observations_file': report.get('observations_file'), 'error_code': report.get('error_code')}, ensure_ascii=False))
-        return 0 if report['status'] in {'complete', 'skipped'} else 1
-    except (OSError, ValueError) as error:
-        code = str(error) if str(error) in {'attachment_api_key_missing', 'attachment_recognition_input_invalid', 'attachment_recognition_timeout_invalid', 'attachment_region_invalid', 'attachment_region_source_invalid', 'attachment_rotation_invalid', 'attachment_resource_invalid', 'attachment_page_invalid'} else 'attachment_recognition_start_failed'
-        print(json.dumps({'status': 'failed', 'error_code': code}))
-        return 1
-
-
-if __name__ == '__main__':
-    raise SystemExit(main())
