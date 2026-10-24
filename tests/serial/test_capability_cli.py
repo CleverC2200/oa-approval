@@ -62,3 +62,22 @@ def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_help_does_not_import_owner_collection_or_external_adapters():
+    script = '''import importlib.abc
+import runpy
+import sys
+
+class LocalHelpOnly(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname in {'apps.oa.approvals.owner', 'apps.oa.approvals.operations'} or fullname.startswith(('apps.oa.approvals.sources', 'apps.oa.approvals.collection')):
+            raise AssertionError('help imported approval runtime or external adapters')
+
+sys.meta_path.insert(0, LocalHelpOnly())
+sys.argv = ['approvals', '--help']
+runpy.run_module('apps.oa.approvals', run_name='__main__')
+'''
+    result = subprocess.run([sys.executable, '-c', script], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert 'start' in result.stdout and 'preview' in result.stdout

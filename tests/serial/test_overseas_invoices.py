@@ -391,3 +391,64 @@ def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_
     result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
     assert result['status'] == 'unknown'
     assert len(app.inspect(task['task_id'])['submissions']) == 1
+
+
+def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verification(case, tmp_path, monkeypatch):
+    from apps.oa.approvals.sources import oa
+
+    data, resources, files, _, _ = case()
+    live = {'token': 0, 'pending': True}
+    posts = []
+
+    class ReadApi:
+        def __init__(self, token):
+            self.token = token
+
+        def require_current_token(self):
+            if self.token != live['token']:
+                raise ValueError('token_expired')
+
+        def pending_rows(self):
+            self.require_current_token()
+            return [{'request_id': '201', 'received_at': '2026-10-23 09:00:00',
+                     'operator_id': 'tester', 'workflow_key': 'overseas_invoice'}] if live['pending'] else []
+
+        def request_context(self, request_id):
+            self.require_current_token()
+            return data, resources
+
+        def handled_rows(self):
+            self.require_current_token()
+            return [{'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()}] if posts else []
+
+    class InvoiceApi(ReadApi):
+        def submit_invoice(self, request_id, remark, details, *, fields_by_row):
+            self.require_current_token()
+            posts.append(details)
+            for table in details:
+                records = next(item for item in data['workflowDetailTableInfos']
+                               if item['tableDBName'] == table['tableDBName'])['workflowRequestTableRecords']
+                for update in table['workflowRequestTableRecords']:
+                    fields = next(item for item in records if str(item['recordOrder']) == str(update['recordOrder']))['workflowRequestTableFields']
+                    for value in update['workflowRequestTableFields']:
+                        next(item for item in fields if item['fieldName'] == value['fieldName'])['fieldValue'] = value['fieldValue']
+            live['pending'] = False
+            return {'code': 'SUCCESS'}
+
+    def fresh(client_type):
+        live['token'] += 1
+        return client_type(live['token'])
+
+    monkeypatch.setattr(oa, 'build_api', lambda config: fresh(ReadApi))
+    monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda: fresh(InvoiceApi))
+    monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
+    app = Approval(tmp_path / 'runtime', configs=[{}])
+    task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    material = json.loads(Path(task['material_file']).read_text())
+    recognition = {'material_digest': invoice.digest(material), 'invoices': [
+        reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
+        for item in material['attachments']]}
+    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
+    assert result['status'] == 'submitted'
+    assert result['fields_match'] is True
+    assert len(posts) == 1
