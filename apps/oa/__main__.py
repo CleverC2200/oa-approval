@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from importlib import import_module
 import sys
 
 
@@ -12,7 +11,17 @@ def main(argv=None):
     if not arguments or arguments[0] in {'-h', '--help'}:
         parser.parse_args(arguments)
     capability = parser.parse_args(arguments[:1]).capability
-    return import_module(f'apps.oa.{capability}.cli').main(arguments[1:])
+    if capability == 'approvals':
+        from apps.oa.approvals import cli as approvals
+
+        return approvals.main(arguments[1:])
+    if capability == 'materials':
+        from apps.oa.materials import cli as materials
+
+        return materials.main(arguments[1:])
+    from apps.oa.references import cli as references
+
+    return references.main(arguments[1:])
 
 
 if __name__ == '__main__':
