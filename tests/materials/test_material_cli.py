@@ -110,30 +110,44 @@ def test_prepare_cli_keeps_two_archive_parents_and_complete_local_material(tmp_p
     assert Path(result['material_file']).read_bytes() == artifact_before
 
 
-def test_prepare_reuses_existing_expansion_without_removing_old_children(tmp_path):
+def test_prepare_reexpands_original_archive_and_preserves_tampered_old_children(tmp_path):
+    from io import BytesIO
     from zipfile import ZipFile
 
     from apps.oa.materials.prepare import prepare
+    from apps.oa.materials.read import read
 
+    nested = BytesIO()
+    original_text = '<Invoice><Amount>12.50</Amount></Invoice>'
+    with ZipFile(nested, 'w') as archive:
+        archive.writestr('invoice.xml', original_text)
     archive_path = tmp_path / 'original.zip'
     with ZipFile(archive_path, 'w') as archive:
-        archive.writestr('memo.xml', '<memo>keep original facts</memo>')
+        archive.writestr('nested.zip', nested.getvalue())
+    original = archive_path.read_bytes()
     old = tmp_path / 'old-expansion'
     old.mkdir()
-    child = old / 'memo.xml'
-    child.write_text('<memo>keep original facts</memo>')
+    child = old / 'invoice.xml'
+    child.write_text('<Invoice><Amount>99999.00</Amount></Invoice>')
+    tampered = child.read_bytes()
     manifest = tmp_path / 'manifest.json'
     manifest.write_text(json.dumps({'resources': [{
         'resource_id': 'existing-parent', 'path': str(archive_path), 'archive_status': 'extracted',
-        'extracted_files': [{'resource_id': 'existing-parent::1', 'parent_resource_id': 'existing-parent',
-                             'name': 'memo.xml', 'path': str(child), 'archive_path': 'memo.xml'}]}]}))
-    original = child.read_bytes()
+        'extracted_files': [{'resource_id': 'existing-parent::1::1', 'parent_resource_id': 'existing-parent',
+                             'name': 'invoice.xml', 'path': str(child), 'archive_path': 'nested.zip::invoice.xml'}]}]}))
     result = prepare(manifest=manifest, output_dir=tmp_path / 'new-output')
     assert result['status'] == 'complete'
     material = json.loads(Path(result['material_file']).read_text())
-    assert material['resources'][0]['extracted_files'][0]['resource_id'] == 'existing-parent::1'
-    assert material['resources'][0]['extracted_files'][0]['path'] == str(child)
-    assert child.read_bytes() == original
+    fresh = material['resources'][0]['extracted_files'][0]
+    assert fresh['resource_id'] == 'existing-parent::1::1'
+    assert fresh['parent_resource_id'] == 'existing-parent'
+    assert fresh['archive_path'] == 'nested.zip::invoice.xml'
+    assert Path(fresh['path']) != child
+    assert Path(fresh['path']).read_text() == original_text
+    view = read(Path(result['material_file']))
+    assert '12.50' in view and '99999.00' not in view
+    assert child.read_bytes() == tampered
+    assert archive_path.read_bytes() == original
     assert list(old.iterdir()) == [child]
 
 
@@ -150,3 +164,30 @@ def test_material_cli_resolves_relative_input_from_another_working_directory(tmp
     assert read.returncode == 0, read.stderr
     assert 'LOCAL-1' in read.stdout
     assert not (tmp_path / 'runtime').exists()
+
+
+def test_generated_material_routes_execute_from_another_working_directory(tmp_path):
+    import hashlib
+    import shlex
+
+    material_file = tmp_path / 'material file.json'
+    source = tmp_path / 'source.png'
+    source.write_bytes(b'synthetic image for help-only navigation')
+    material_file.write_text(json.dumps({'resources': [{'resource_id': 'page'}], 'prepared': {'images': [
+        {'resource_id': 'page', 'path': str(source), 'content_sha256': hashlib.sha256(source.read_bytes()).hexdigest()}]}}))
+    elsewhere = tmp_path / 'elsewhere'
+    elsewhere.mkdir()
+    invocation = ['bash', str(PROJECT / '.codex/python.sh'), '-m', 'apps.oa.materials', 'read', str(material_file)]
+    result = subprocess.run(invocation, cwd=elsewhere, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0, result.stdout + result.stderr
+    routes = json.loads(result.stdout.split('[reader.image_tool_routes]\n', 1)[1])
+    from apps.oa.materials.read import command
+
+    reread = subprocess.run(shlex.split(command(material_file)), cwd=elsewhere, capture_output=True, text=True, timeout=10)
+    assert reread.returncode == 0, reread.stdout + reread.stderr
+    assert reread.stdout == result.stdout
+    for argv in (routes['original_read']['argv'], routes['pages'][0]['auxiliary_copy']['argv']):
+        helped = subprocess.run([*argv, '--help'], cwd=elsewhere, capture_output=True, text=True, timeout=10)
+        assert helped.returncode == 0, helped.stdout + helped.stderr
+        assert 'usage:' in helped.stdout
+    assert list(elsewhere.iterdir()) == []

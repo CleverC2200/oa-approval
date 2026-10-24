@@ -566,3 +566,44 @@ def test_socket_finish_waits_for_collection_and_refuses_new_claims(blocked_colle
     assert status['run']['status'] == 'closed'
     assert status['summary'] == {'reviewing': 2, 'queued': 1}
     assert not Path(started['socket']).exists()
+
+
+def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blocked_collection, tmp_path):
+    import socket
+
+    process, started, first, invoke, collector, channel = blocked_collection
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as finishing:
+        finishing.settimeout(2)
+        finishing.connect(started['socket'])
+        finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
+                      '--agent-workflow-key', 'general_expense')['reason'] == 'run_finishing'
+        process.stdin.write(json.dumps({'operation': 'collect', 'agent_id': 'third',
+            'expected_task_id': 3, 'agent_workflow_key': 'general_expense'}) + '\n')
+        process.stdin.flush()
+        for _ in range(20):
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+                probe.settimeout(0.1)
+                probe.connect(started['socket'])
+                probe.sendall(b'{"operation":"status"}\n')
+                try:
+                    probe.recv(4096)
+                except socket.timeout:
+                    break
+        else:
+            pytest.fail('owner did not begin draining the blocked worker for stdin')
+        channel.sendall(b'r')
+        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        assert json.loads(finishing.makefile().readline())['status'] == 'closed'
+    process.wait(timeout=5)
+    assert process.returncode == 0, process.stderr.read()
+    assert process.stdout.read() == ''
+    assert not Path(started['socket']).exists()
+    status = invoke('status')
+    assert status['run']['status'] == 'closed'
+    assert status['summary'] == {'reviewing': 2, 'queued': 1}
+    assert invoke('show', '--task-id', '3')['task']['status'] == 'queued'
+    reopened = subprocess.run(command(tmp_path, 'start', '--demo'), cwd=PROJECT,
+                              input='{"operation":"finish"}\n', capture_output=True, text=True, timeout=10)
+    assert reopened.returncode == 0, reopened.stdout + reopened.stderr
+    assert json.loads(reopened.stdout)['run_id'] != started['run_id']

@@ -280,9 +280,14 @@ def test_cached_archive_reuse_preserves_existing_children(tmp_path, monkeypatch)
     child = Path(first[0]['extracted_files'][0]['path'])
     retained = child.parent / 'retained.txt'
     retained.write_text('existing derived evidence')
+    child.write_text('changed derived invoice')
     second, errors = attachments.download_resources(target, **options)
     assert errors == []
     assert calls == ['archive-one']
-    assert second[0]['extracted_files'] == first[0]['extracted_files']
-    assert child.read_text() == 'original invoice'
+    fresh = second[0]['extracted_files'][0]
+    assert fresh['resource_id'] == first[0]['extracted_files'][0]['resource_id']
+    assert fresh['parent_resource_id'] == 'archive-one'
+    assert Path(fresh['path']) != child
+    assert Path(fresh['path']).read_text() == 'original invoice'
+    assert child.read_text() == 'changed derived invoice'
     assert retained.read_text() == 'existing derived evidence'

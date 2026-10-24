@@ -173,6 +173,8 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                                         selector.unregister(worker[1])
                                         finish_collection(approval, run_id, worker)
                                         worker = None
+                                    if finishing:
+                                        return 0
                                     if not input_line(approval, run_id, sys.stdin.readline()):
                                         return 0
                                 elif worker is not None and selected.fileobj is worker[1]:
