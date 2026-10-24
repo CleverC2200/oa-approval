@@ -41,18 +41,6 @@ def dispatch(approval, run_id, request):
         return approval.fail(run_id, request['task_id'], request['reason'])
     raise ValueError('unknown_operation')
 
-def input_line(approval, run_id, line):
-    if not line:
-        return False
-    try:
-        request = json.loads(line)
-        if request.get('operation') == 'finish':
-            return False
-        emit(dispatch(approval, run_id, request))
-    except Exception as error:
-        emit(failure(error))
-    return True
-
 def collect_process(root, demo, run_id, request, output):
     from apps.oa.approvals.operations import Approval
 
@@ -82,20 +70,143 @@ def reply(client, result):
     finally:
         client.close()
 
-def finish_collection(approval, run_id, worker):
-    process, incoming, client = worker
-    try:
-        result = incoming.recv()
-    except EOFError:
-        for task in approval.store.tasks(run_id):
-            if task['status'] == 'preparing':
-                approval.store.fail_collection(task['id'], 'collection_process_failed')
-        result = {'status': 'failed', 'error': 'collection_process_failed'}
-    finally:
-        process.join()
-        incoming.close()
-        process.close()
-    reply(client, result)
+class _Collection:
+    def __init__(self, process, incoming, respond, store, run_id):
+        self.process = process
+        self.incoming = incoming
+        self._respond = respond
+        self._store = store
+        self._run_id = run_id
+
+    @classmethod
+    def start(cls, root, demo, run_id, request, respond, store):
+        context = multiprocessing.get_context('spawn')
+        receiver, output = context.Pipe(duplex=False)
+        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output))
+        try:
+            process.start()
+        except Exception:
+            receiver.close()
+            output.close()
+            process.close()
+            raise
+        output.close()
+        return cls(process, receiver, respond, store, run_id)
+
+    def complete(self):
+        try:
+            result = self.incoming.recv()
+        except EOFError:
+            for task in self._store.tasks(self._run_id):
+                if task['status'] == 'preparing':
+                    self._store.fail_collection(task['id'], 'collection_process_failed')
+            result = {'status': 'failed', 'error': 'collection_process_failed'}
+        finally:
+            self.process.join()
+            self.incoming.close()
+            self.process.close()
+        self._respond(result)
+
+
+class _RoundSession:
+    def __init__(self, approval, run_id, *, root, demo, close_transport):
+        self._approval = approval
+        self._run_id = run_id
+        self._root = root
+        self._demo = demo
+        self._close_transport = close_transport
+        self._collection = None
+        self._finishing = False
+        self._finish_responders = []
+        self._closed_result = None
+        self._close_attempted = False
+        self._close_error = None
+
+    @property
+    def collection_pipe(self):
+        return self._collection.incoming if self._collection is not None else None
+
+    @property
+    def closed(self):
+        return self._closed_result is not None
+
+    def handle(self, receive_request, *, source, respond):
+        if source == 'stdin':
+            self.collection_ready()
+        if self.closed:
+            return
+        try:
+            request = receive_request()
+            if source == 'stdin' and (request is None or request.get('operation') == 'finish'):
+                self._finishing = True
+            elif request.get('operation') == 'finish':
+                if request.get('run_id') != self._run_id:
+                    raise ValueError('run_mismatch')
+                self._finishing = True
+                self._finish_responders.append(respond)
+            elif source == 'socket' and request.get('operation') == 'collect':
+                self._collect(request, respond)
+            else:
+                respond(dispatch(self._approval, self._run_id, request))
+        except Exception as error:
+            respond(failure(error))
+        self._close_if_drained()
+
+    def _collect(self, request, respond):
+        if self._finishing:
+            respond({'run_id': self._run_id, 'status': 'blocked', 'reason': 'run_finishing'})
+        elif self._collection is not None:
+            blocked = self._approval.store.run(self._run_id)['status'] != 'running'
+            respond({'run_id': self._run_id, 'status': 'blocked' if blocked else 'waiting',
+                     'reason': 'run_blocked' if blocked else 'collection_in_progress'})
+        else:
+            self._collection = _Collection.start(self._root, self._demo, self._run_id, request,
+                                                 respond, self._approval.store)
+
+    def _drain_collection(self):
+        if self._collection is not None:
+            collection, self._collection = self._collection, None
+            collection.complete()
+
+    def _close_if_drained(self):
+        if self._finishing and self._collection is None:
+            self.shutdown()
+
+    def collection_ready(self):
+        self._drain_collection()
+        self._close_if_drained()
+
+    def shutdown(self):
+        if self._close_attempted:
+            if self._close_error is not None:
+                raise self._close_error
+            return self._closed_result
+        self._finishing = True
+        try:
+            self._drain_collection()
+        finally:
+            self._close_attempted = True
+            try:
+                self._close_transport()
+                self._closed_result = self._approval.close(self._run_id)
+            except Exception as error:
+                self._close_error = error
+                raise
+            responders, self._finish_responders = self._finish_responders, []
+            for respond in responders:
+                respond(self._closed_result)
+        return self._closed_result
+
+
+def _read_stdin():
+    line = sys.stdin.readline()
+    return json.loads(line) if line else None
+
+
+def _read_socket(client):
+    with client.makefile('r', encoding='utf-8') as incoming:
+        return json.loads(incoming.readline())
+
 
 def require_production_main(project=None):
     project = project or PROJECT_ROOT
@@ -122,10 +233,6 @@ def require_production_main(project=None):
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None):
     from apps.oa.approvals.operations import Approval
 
-    approval = None
-    worker = None
-    finishing = False
-    finish_clients = []
     server_path = socket_path(root)
     with round_lock(root):
         if not demo:
@@ -138,6 +245,14 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
         started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
+        server = None
+
+        def close_transport():
+            if server is not None:
+                server.close()
+            server_path.unlink(missing_ok=True)
+
+        session = _RoundSession(approval, run_id, root=root, demo=demo, close_transport=close_transport)
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
                 server.bind(str(server_path))
@@ -158,80 +273,36 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                       'shown': len(shown), 'truncated': len(shown) < len(tasks),
                       'demo': demo, 'socket': str(server_path)})
                 if sys.stdin.seekable():
-                    for line in sys.stdin:
-                        if not input_line(approval, run_id, line):
-                            break
+                    while not session.closed:
+                        session.handle(_read_stdin, source='stdin', respond=emit)
                     return 0
                 with selectors.DefaultSelector() as selector:
-                    selector.register(server, selectors.EVENT_READ)
-                    selector.register(sys.stdin, selectors.EVENT_READ)
-                    try:
-                        while True:
-                            for selected, _events in selector.select():
-                                if selected.fileobj is sys.stdin:
-                                    if worker is not None:
-                                        selector.unregister(worker[1])
-                                        finish_collection(approval, run_id, worker)
-                                        worker = None
-                                    if finishing:
-                                        return 0
-                                    if not input_line(approval, run_id, sys.stdin.readline()):
-                                        return 0
-                                elif worker is not None and selected.fileobj is worker[1]:
-                                    selector.unregister(worker[1])
-                                    finish_collection(approval, run_id, worker)
-                                    worker = None
-                                    if finishing:
-                                        return 0
-                                elif selected.fileobj is server:
-                                    client = server.accept()[0]
-                                    try:
-                                        with client.makefile('r', encoding='utf-8') as incoming:
-                                            request = json.loads(incoming.readline())
-                                        if request.get('operation') == 'finish':
-                                            if request.get('run_id') != run_id:
-                                                raise ValueError('run_mismatch')
-                                            finishing = True
-                                            finish_clients.append(client)
-                                            if worker is None:
-                                                return 0
-                                            continue
-                                        if request.get('operation') == 'collect':
-                                            if finishing:
-                                                reply(client, {'run_id': run_id, 'status': 'blocked', 'reason': 'run_finishing'})
-                                                continue
-                                            if worker is not None:
-                                                blocked = approval.store.run(run_id)['status'] != 'running'
-                                                result = {'run_id': run_id, 'status': 'blocked' if blocked else 'waiting',
-                                                          'reason': 'run_blocked' if blocked else 'collection_in_progress'}
-                                            else:
-                                                context = multiprocessing.get_context('spawn')
-                                                receiver, output = context.Pipe(duplex=False)
-                                                process = context.Process(target=collect_process,
-                                                                          args=(root, demo, run_id, request, output))
-                                                try:
-                                                    process.start()
-                                                except Exception:
-                                                    receiver.close()
-                                                    output.close()
-                                                    process.close()
-                                                    raise
-                                                output.close()
-                                                worker = process, receiver, client
-                                                selector.register(receiver, selectors.EVENT_READ)
-                                                continue
-                                        else:
-                                            result = dispatch(approval, run_id, request)
-                                    except Exception as error:
-                                        result = failure(error)
-                                    reply(client, result)
-                    finally:
-                        if worker is not None:
-                            finish_collection(approval, run_id, worker)
-                            worker = None
+                    selector.register(server, selectors.EVENT_READ, 'socket')
+                    selector.register(sys.stdin, selectors.EVENT_READ, 'stdin')
+                    watched_pipe = None
+                    while not session.closed:
+                        for selected, _events in selector.select():
+                            if selected.data == 'stdin':
+                                session.handle(_read_stdin, source='stdin', respond=emit)
+                            elif selected.data == 'collection':
+                                if selected.fd != watched_pipe:
+                                    continue
+                                selector.unregister(watched_pipe)
+                                watched_pipe = None
+                                session.collection_ready()
+                            else:
+                                client = server.accept()[0]
+                                session.handle(lambda: _read_socket(client), source='socket',
+                                               respond=lambda result, client=client: reply(client, result))
+                            if session.closed:
+                                return 0
+                            incoming = session.collection_pipe
+                            current_pipe = incoming.fileno() if incoming is not None else None
+                            if current_pipe != watched_pipe:
+                                if watched_pipe is not None:
+                                    selector.unregister(watched_pipe)
+                                if current_pipe is not None:
+                                    selector.register(current_pipe, selectors.EVENT_READ, 'collection')
+                                watched_pipe = current_pipe
         finally:
-            server_path.unlink(missing_ok=True)
-            if approval is not None:
-                closed = approval.close(run_id)
-                for client in finish_clients:
-                    reply(client, closed)
+            session.shutdown()
