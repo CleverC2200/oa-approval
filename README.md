@@ -19,20 +19,21 @@ bash .codex/python.sh -m pytest -q tests/serial/test_cli.py::test_demo_runs_coll
 需要逐步操作时，在开发分支启动交互演示：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime/demo pending --demo
+export OA_RUNTIME_ROOT="$PWD/runtime/demo"
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --demo
 ```
 
-保持前台进程的标准输入打开，在另一终端使用相同 `--root runtime/demo`，按下文参数领取和预览，身份与流程取本次输出。演示意见标明是合成内容。结束时向原进程输入 `{"operation":"finish"}`，或关闭标准输入；等待进程退出，socket 和 `approval.lock` 随本轮关闭。再次启动会新建一轮，不续跑旧审核对话。
+保持前台进程的标准输入打开。在另一终端把 `OA_RUNTIME_ROOT` 设为上述同一绝对路径，再按下文参数领取和预览，身份与流程取本次输出。演示意见标明是合成内容。结束时向原进程输入 `{"operation":"finish"}`，或关闭标准输入；等待进程退出，socket 随本轮关闭，并释放 `approval.lock`。再次启动会新建一轮，不续跑旧审核对话。
 
 ## 启动与操作
 
-运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。定时任务使用同一入口：
+运行和验证统一使用 `.codex/python.sh`，复用 Python 3.11 共享环境。真实 `pending` 只接受干净、已发布且与 `origin/main` 一致的 `main`，不满足时在访问 OA 和创建队列前停止。真实运行先把 `OA_RUNTIME_ROOT` 设为本项目 `runtime/` 的绝对路径，定时任务使用同一入口：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime pending --batch-size 50 --limit 50
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" pending --batch-size 50 --limit 50
 ```
 
-`pending` 重新拉取 OA 待办，创建本轮 SQLite 队列并全程持有文件锁，保持前台运行。再次启动同一根目录会返回 `already_running`。默认根目录是本项目的 `runtime/`。本机 Unix socket 把以下操作送到该运行服务，所有 OA 提交由服务主循环串行执行。
+`pending` 重新拉取 OA 待办，创建本轮 SQLite 队列并全程持有文件锁，保持前台运行。再次启动同一根目录会返回 `already_running`。不传 `--root` 时使用代码项目的 `runtime/`，不受启动目录影响。本机 Unix socket 把以下操作送到该运行服务，所有 OA 提交由服务主循环串行执行。
 
 启动输出包含 `run_id`、总数 `total`、按 `workflow_key` 分类的数量 `by_workflow`、展示数 `shown` 和截断标记 `truncated`。默认 `tasks` 只展示队列前 20 条，保留 `id`、`request_id`、`received_at`、`workflow_key`、`status` 和 `title`。`pending --limit 5` 调整展示数，`--limit 0` 不展示任务行；`pending --full` 返回全部待办的完整字段并忽略 `--limit`。这些展示参数不改变队列。
 
@@ -41,12 +42,12 @@ bash .codex/python.sh -m apps.oa.cli --root runtime pending --batch-size 50 --li
 限定处理指定申请时，重复传入 `pending --request-id <申请ID>`。每轮仍重新拉取真实待办，只纳入当前待办中匹配的申请，并在该范围内按 FIFO 排队；已提交成功或结果未知的任务保持原状态，不能重新领取。
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime collect \
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" collect \
   --agent-id "$OA_REVIEW_AGENT_ID" \
   --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"
-bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
-bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt --confirm-write YES
-bash .codex/python.sh -m apps.oa.cli --root runtime postcheck --task-id "$OA_TASK_ID"
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt --confirm-write YES
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" postcheck --task-id "$OA_TASK_ID"
 ```
 
 不传 `--confirm-write YES` 时只保存预览结果，不写 OA。海外回填使用 `--recognition-file`，真实提交还需独立的 `--allow-overseas YES`。实际授权以当前任务为准。
@@ -54,7 +55,7 @@ bash .codex/python.sh -m apps.oa.cli --root runtime postcheck --task-id "$OA_TAS
 `OA_REVIEW_AGENT_ID` 使用原生工具返回的实际 Agent 标识，`OA_TASK_ID` 和 `OA_WORKFLOW_KEY` 使用本轮下一张任务的实际值；领取返回后再次核对身份。三个保护参数必需，省略或错配时拒绝领取。审核技术失败登记使用本地 `fail` 入口：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime fail --task-id "$OA_TASK_ID" --reason 'native reviewer failed: concrete reason'
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" fail --task-id "$OA_TASK_ID" --reason 'native reviewer failed: concrete reason'
 ```
 
 `fail` 由运行中的服务校验，只接受当前轮 `preparing`/`reviewing` 任务，不访问 OA。使用条件及批次收尾见下文 Skill。
@@ -71,14 +72,14 @@ socket `collect` 由唯一采集工作进程执行，原客户端等待最终结
 
 ## 数据与材料
 
-`runtime/approval.sqlite3` 保存轮次、单据、待办、附件、识别内容、意见和提交。相同待办更新已有行，接收时间或可信待办实例变化才建立新待办。每轮仍重新拉待办，不续跑旧 Agent 或旧队列。
+所选运行根目录下的 `approval.sqlite3` 保存轮次、单据、待办、附件、识别内容、意见和提交。相同待办更新已有行，接收时间或可信待办实例变化才建立新待办。每轮仍重新拉待办，不续跑旧 Agent 或旧队列。
 
-原件和准备页保存在本轮材料目录。保留完整表单、关联资料、ZIP/RAR 解包、PDF 全页、Office、Excel 和内嵌图片、XML/OFD、HEIC、图片压缩与 DeepSeek API 识别。压缩副本不代替原件，附件资源与明细归属分别保留。凭据使用进程环境或工作树外的私有 OA 配置，不提交数据库、附件或凭据。
+原件和准备页保存在本轮材料目录。附件缓存默认使用同一运行根目录下的 `attachment-cache.sqlite3`，不同根目录默认隔离；确需共享时显式设置 `OA_FINANCE_PREAUDIT_CACHE_DB` 为同一绝对路径，现有禁用值继续有效。规则按当前流程及必需共用依赖冻结，缺少依赖或出现范围外链接时采集失败。保留完整表单、关联资料、ZIP/RAR 解包、PDF 全页、Office、Excel 和内嵌图片、XML/OFD、HEIC、图片压缩与 DeepSeek API 识别。压缩副本不代替原件，附件资源与明细归属分别保留。凭据使用进程环境或工作树外的私有 OA 配置，不提交数据库、附件或凭据。
 
 TPM 终端形象制作费的参考报价仍使用本地导入入口，导入财务确认的工作簿后再取材料：
 
 ```bash
-bash .codex/python.sh -m apps.oa_finance_preaudit.tpm_price_reference /absolute/path/reference.xlsx --runtime-root runtime
+bash .codex/python.sh -m apps.oa_finance_preaudit.tpm_price_reference /absolute/path/reference.xlsx --runtime-root "${OA_RUNTIME_ROOT:?}"
 ```
 
 未导入时材料会明确记为 `not_configured`，由 Agent 按业务规则说明核验缺口。

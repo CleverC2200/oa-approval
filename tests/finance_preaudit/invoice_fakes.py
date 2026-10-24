@@ -35,5 +35,3 @@ class InvoiceApi:
         if path == invoice_buyers.MAPPING_PATH:
             return {'status': '1', 'targetIds': 'cloud-' + params['ids']}
         raise AssertionError('Unexpected external API')
-
-

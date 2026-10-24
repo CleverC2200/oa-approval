@@ -44,5 +44,3 @@ def repository(tmp_path):
     assert run('git', 'add', '.').returncode == 0
     assert run('git', 'commit', '-qm', 'fixture').returncode == 0
     return root, run, Path(environment['CHECK_CALLS'])
-
-

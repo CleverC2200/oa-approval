@@ -4,12 +4,10 @@
 
 ```bash
 bash .codex/python.sh -m apps.oa_approval.attachment_recognition \
-  --material-file "$OA_MATERIAL_FILE" \
-  --output-dir /absolute/path/new-recognition-directory \
-  --prompt '完整读取文字、数字、日期和印章；看不清的内容明确说明。'
+  --material-file "$OA_MATERIAL_FILE"
 ```
 
-`OA_MATERIAL_FILE` 使用本单 collect 返回的冻结材料路径。只有处理独立图片时才使用可重复的 `--file /absolute/path/page.png`；该输入使用临时资源编号，不能使用真实附件定向参数，保存观察前须对应到原附件。
+`OA_MATERIAL_FILE` 使用本单 collect 返回的冻结材料路径。默认在该材料版本目录的 `recognitions/<新标识>/` 保存结果，每次读取使用新目录；需要指定位置时传 `--output-dir` 指向尚不存在的目录，旧报告和原件保留。只有处理独立图片时才使用可重复的 `--file /absolute/path/page.png`；该输入使用临时资源编号，不能使用真实附件定向参数，保存观察前须对应到原附件。
 
 读取 `collect` 返回的整份冻结材料时，使用 `--material-file /absolute/path/material.json`。`prepared.structured_contents` 的完整解析内容直接交给审核 Agent，报告标记 `source=parser`，保留原始文本、定位和子资源归属，不发送 DeepSeek。全部准备图片仍按现有流程识别，包括已有解析文字的 PDF 图片。只有文本的输入不需要 API key。该参数与单文件输入择一使用。
 
@@ -34,7 +32,7 @@ bash .codex/python.sh -m apps.oa_approval.attachment_recognition \
 工具返回 `report_file`，报告保留逐页/分区回答和来源。使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
 
 ```bash
-bash .codex/python.sh -m apps.oa.cli --root runtime submit --task-id "$OA_TASK_ID" \
+bash .codex/python.sh -m apps.oa.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" \
   --opinion-file /absolute/path/opinion.txt \
   --recognition-file /absolute/path/recognition.json
 ```
