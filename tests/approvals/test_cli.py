@@ -568,6 +568,34 @@ def test_socket_finish_waits_for_collection_and_refuses_new_claims(blocked_colle
     assert not Path(started['socket']).exists()
 
 
+def test_all_finish_clients_receive_closed_after_collection_drains(blocked_collection):
+    import socket
+
+    process, started, first, invoke, collector, channel = blocked_collection
+    finishers = [socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) for _ in range(2)]
+    try:
+        for client in finishers:
+            client.settimeout(15)
+            client.connect(started['socket'])
+            client.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+            assert invoke('status')['owner']['reachable'] is True
+        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
+                      '--agent-workflow-key', 'general_expense')['reason'] == 'run_finishing'
+        channel.sendall(b'r')
+        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        closed = [json.loads(client.makefile().readline()) for client in finishers]
+        assert closed[0] == closed[1]
+        assert closed[0]['status'] == 'closed'
+        assert closed[0]['run_id'] == started['run_id']
+        assert all(client.recv(1) == b'' for client in finishers)
+    finally:
+        for client in finishers:
+            client.close()
+    process.wait(timeout=5)
+    assert process.returncode == 0, process.stderr.read()
+    assert not Path(started['socket']).exists()
+
+
 def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blocked_collection, tmp_path):
     import socket
 
