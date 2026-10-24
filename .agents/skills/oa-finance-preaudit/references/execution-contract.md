@@ -1,6 +1,6 @@
 # 最小审批执行接口
 
-当前执行由 `apps.oa.approvals.cli` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
+当前执行由 `apps.oa.approvals` 和 SQLite 完成。业务判断由审核 Agent 按对应流程规则形成。
 
 ## 采集与提交
 
@@ -30,10 +30,10 @@
 - 表单和商旅权威事实使用完整 `declared_fields.path`、`authority_facts` 中的来源路径及本次工作上下文定位。没有真实附件归属的字段事实不编造附件 ID，也不强行塞入附件观察。
 - DeepSeek 工具生成的整份原始报告可通过 `--recognition-file` 一起保存；其原始回答和来源保持原样，Agent 的补充判断另放附件观察。已有工具生成的观察数组也可直接传入。
 
-默认预览的保存示例，`OA_RUNTIME_ROOT` 沿用本轮 pending 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
+默认预览的保存示例，`OA_RUNTIME_ROOT` 沿用本轮 start 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" submit \
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit \
   --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt \
   --observations-file /absolute/path/observations.json
 ```

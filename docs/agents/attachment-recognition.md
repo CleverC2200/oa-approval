@@ -3,7 +3,7 @@
 图片通过现有 DeepSeek HTTP API 识别，报告标记 `source=deepseek`。凭据通过 `OA_REVIEW_API_KEY` 或现有私有 OA 配置读取，不放进命令参数、材料或 SQLite。
 
 ```bash
-bash .codex/python.sh -m apps.oa.materials.recognize \
+bash .codex/python.sh -m apps.oa.materials recognize \
   --material-file "$OA_MATERIAL_FILE"
 ```
 
@@ -14,7 +14,7 @@ bash .codex/python.sh -m apps.oa.materials.recognize \
 定向复读冻结材料时，从原完整识别报告选取目标 `part`，把 `report.parts[].resource_id` 传给 `--resource-id`，把同一项的 `page_number` 传给 `--page`。`prepared_resource_id` 标识准备子资源，不能用作该选择器；压缩包内页面仍使用报告中的父附件 `resource_id`。只传附件 ID 时读取该资源的图片和解析正文，加页码时只读选中图片页。工具先生成完整定位再筛选，保留原 `part_id`、`evidence_ref`、`prepared_resource_id`、页码和父附件归属。页码依赖附件 ID；无效参数或目标不存在时报错。
 
 ```bash
-bash .codex/python.sh -m apps.oa.materials.recognize \
+bash .codex/python.sh -m apps.oa.materials recognize \
   --material-file /absolute/path/material.json \
   --resource-id attachment-1 --page 2 \
   --region 100 200 900 600 --rotate 90 \
@@ -32,7 +32,7 @@ bash .codex/python.sh -m apps.oa.materials.recognize \
 工具返回 `report_file`，报告保留逐页/分区回答和来源。使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals.cli --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" \
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" \
   --opinion-file /absolute/path/opinion.txt \
   --recognition-file /absolute/path/recognition.json
 ```
