@@ -29,6 +29,16 @@ bash .codex/python.sh -m apps.oa.materials recognize \
 
 同时提供 `--region` 与 `--rotate` 时，先按原图像素坐标裁剪，再旋转裁剪副本。报告中的 `region`、`source_image_size` 和 `image_tiles[].box` 仍对应原图，覆盖范围仍为 `image_region`。超大图也先按原图分块，再旋转各分区；旋转不扩大读取范围，不改变原有 coverage 含义。
 
+需要在长识别过程中取得报告路径时，为 `recognize` 添加 `--progress`。首次原子保存后立即向 stderr 输出一行 JSON，后续每次保存继续输出紧凑进度；stdout 仍只有原来的最终 JSON，退出码保持不变。API 对应 `recognize(..., on_progress=callback)`，回调在每次报告保存后收到同一摘要。显式输出目录与默认新目录均适用。
+
+```bash
+bash .codex/python.sh -m apps.oa.materials recognize \
+  --material-file "$OA_MATERIAL_FILE" --progress
+bash .codex/python.sh -m apps.oa.materials progress /absolute/path/recognition.json
+```
+
+`progress` 只读现有报告，不请求模型或 OA，不创建目录或恢复识别。摘要提供 `status`、`report_file`、`completed_parts`、`planned_parts`、`coverage`、`selection`，失败时提供 `error_code` 和可用的 `failed_part` 定位，不输出识别正文、提示词或凭据。读取计划尚未生成及不含计划的旧报告中，`planned_parts` 为 null。完成计数来自已原子保存的 `parts`；全部部分保存后仍需通过输入复验，状态才会成为 `complete`。定向或局部识别完成保留原覆盖范围；官方无附件显示 `skipped` 和 `reason=official_no_attachments`。不存在、无效或不可读报告返回明确失败，查询命令成功读取有效报告返回 0，报告本身的识别状态另看 `status`。
+
 工具返回 `report_file`，报告保留逐页/分区回答和来源。使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
 
 ```bash
