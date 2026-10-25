@@ -62,6 +62,8 @@ bash .codex/python.sh -m apps.oa.materials compress --help
 bash .codex/python.sh -m apps.oa.references import-tpm --help
 ```
 
+读取冻结材料的规模与原文位置可用 `read /absolute/path/material.json --view outline --format json`。默认 `read` 仍返回完整正文。概要列出字段数、由字段路径记录的各明细表行数、顶层资源数、含归档子资源的逻辑资源总数、归档子资源数、准备图片数和结构化内容数；相同内容与共享准备路径单独列示，不减少逻辑计数。JSON Pointer 指向冻结文件，`text_section` 与 `text_index` 对应完整读取中的节名和零基数组索引。概要不计入已读覆盖，审核仍须完整读取冻结材料和规则。
+
 本地 prepare 保留原件、资源和父级归属，使用新输出目录；本地来源不构成已核实的 OA 来源。识别可能调用模型，调用前按当前授权选择材料与范围。阅读副本不能代替原件。
 
 运行数据与审批账本继续使用所选 root 下的原有布局。原件、历史冻结材料、意见和回执保留。附件缓存默认同 root，显式 `OA_FINANCE_PREAUDIT_CACHE_DB` 可共享或禁用；资源槽沿用现有协调目录约定。凭据保存在进程环境或工作树外的私有配置中。
