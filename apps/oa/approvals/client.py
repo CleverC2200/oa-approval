@@ -8,6 +8,7 @@ import re
 import socket
 
 from apps.oa.approvals.store import Store
+from apps.oa.approvals.status import batch_status
 
 
 def emit(value):
@@ -32,12 +33,14 @@ def send(root, request, *, timeout=None):
             return json.loads(incoming.readline())
 
 
-def query(root, operation, *, run_id=None, task_id=None, full=False):
+def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
     database = root / 'approval.sqlite3'
     if not database.is_file():
         return {'status': 'not_initialized'}
     store = Store(database, read_only=True)
     try:
+        if view == 'batch':
+            store.connection.execute('BEGIN')
         if operation == 'show':
             details = store.details(task_id)
             if not full:
@@ -59,6 +62,9 @@ def query(root, operation, *, run_id=None, task_id=None, full=False):
         result = {'status': 'ok', 'run': run, 'summary': dict(Counter(task['status'] for task in tasks)),
                   'tasks': tasks if full else [{key: task[key] for key in
                     ('id', 'request_id', 'workflow_key', 'received_at', 'status')} for task in tasks]}
+        if view == 'batch':
+            result.pop('tasks')
+            result.update(batch_status(store, run, tasks))
     finally:
         store.connection.close()
     try:
