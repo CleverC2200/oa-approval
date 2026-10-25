@@ -735,14 +735,17 @@ class _ConversionResult:
     structured_contents: tuple[dict, ...]
     manifest_parent: bool = False
 
-    def bind(self, item: dict) -> _ResourceResult:
+    def bind(self, item: dict, *, source_content_sha256: str) -> _ResourceResult:
         resource_id = str(item.get('resource_id') or '')
         name = str(item.get('name') or Path(str(item.get('path') or '')).name)
         parent = str(item.get('parent_resource_id') or '')
 
         def bind_record(record, *, resource_suffix='', name_suffix='', parent_id=''):
             return {'resource_id': resource_id + resource_suffix, 'name': name + name_suffix,
-                    **({'parent_resource_id': parent_id} if parent_id else {}), **deepcopy(record)}
+                    **({'parent_resource_id': parent_id} if parent_id else {}), **deepcopy(record),
+                    'source_resource_id': resource_id, 'source_path': str(item.get('path') or ''),
+                    'source_content_sha256': source_content_sha256,
+                    **({'archive_path': item['archive_path']} if 'archive_path' in item else {})}
 
         return _ResourceResult(
             tuple(bind_record(image.record, resource_suffix=image.resource_suffix, name_suffix=image.name_suffix,
@@ -897,7 +900,7 @@ class _Preparation:
             if key is not None and all(entry.get('status') in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
                                        for entry in result.manifest):
                 self._spreadsheet_contents[key] = result
-        return result.bind(item)
+        return result.bind(item, source_content_sha256=source.source_content_sha256)
 
     def run(self, attachments: list[dict]) -> PreparedMaterial:
         images, manifest, structured, validation = [], [], [], []
