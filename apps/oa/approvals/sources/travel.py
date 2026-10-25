@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from apps.oa.approvals.source_policy import SourcePolicy
+
 from contextlib import contextmanager
 import hashlib
 import html
@@ -21,8 +23,6 @@ from apps.oa.runtime import slots as resource_slots
 from apps.oa.runtime import control as runtime_control
 
 
-TRIP_BASE_URL = os.environ.get("OA_TRIP_BASE_URL", "").rstrip("/")
-OA_BASE_URL = os.environ.get("OA_BASE_URL", "").rstrip("/")
 HREF_RE = re.compile(r'href=["\']([^"\']+)["\']', re.IGNORECASE)
 PENDING_TEXT_MARKERS = ("系统正在处理中，请稍后", "正在处理中，请稍后")
 TRIP_ATTACHMENT_PATH_MARKERS = ("/opera/getFile/", "/opera/share/open/")
@@ -54,26 +54,6 @@ def _browser_slot_timeout(timeout_sec: int) -> float:
     return max(30.0, float(timeout_sec) * 2.0)
 
 
-def _trip_attachment_url(raw_url: str, *, base_url: str) -> str:
-    value = str(raw_url or "").strip()
-    if not value or value.startswith(("#", "javascript:", "data:", "blob:")):
-        return ""
-    url = urllib.parse.urljoin(base_url, html.unescape(value))
-    parsed = urllib.parse.urlparse(url)
-    trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
-    if parsed.scheme != "https" or parsed.hostname != trip_host:
-        return ""
-    if not any(
-        marker.lower() in parsed.path.lower() for marker in TRIP_ATTACHMENT_PATH_MARKERS
-    ):
-        return ""
-    if not TRIP_ATTACHMENT_ID_RE.search(parsed.path):
-        return ""
-    return urllib.parse.urlunsplit(
-        (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
-    )
-
-
 def _attachment_id_from_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
     match = TRIP_ATTACHMENT_ID_RE.search(parsed.path)
@@ -94,9 +74,10 @@ def _attachment_name(raw_name: str, url: str) -> str:
 
 
 class _TripAttachmentDomParser(HTMLParser):
-    def __init__(self, *, base_url: str) -> None:
+    def __init__(self, *, base_url: str, download_url) -> None:
         super().__init__(convert_charrefs=True)
         self.base_url = base_url
+        self.download_url = download_url
         self.candidates: List[Dict[str, str]] = []
 
     def _start(self, tag: str, raw_attrs: List[tuple[str, str | None]]) -> None:
@@ -104,7 +85,7 @@ class _TripAttachmentDomParser(HTMLParser):
         if tag not in {"a", "img", "object", "embed"}:
             return
         raw_url = str(attrs.get("href") or attrs.get("src") or attrs.get("data") or "")
-        url = _trip_attachment_url(raw_url, base_url=self.base_url)
+        url = self.download_url(raw_url, base_url=self.base_url)
         if not url:
             return
         raw_name = str(
@@ -124,103 +105,28 @@ class _TripAttachmentDomParser(HTMLParser):
         self._start(tag.lower(), attrs)
 
 
-def _attachment_resources_from_dom(
-    markup: str, *, base_url: str
-) -> List[Dict[str, Any]]:
-    parser = _TripAttachmentDomParser(base_url=base_url)
-    try:
-        parser.feed(str(markup or ""))
-    except Exception:
-        return []
-    resources: List[Dict[str, Any]] = []
-    seen_urls: set[str] = set()
-    for candidate in parser.candidates:
-        url = str(candidate.get("url") or "")
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        resources.append(
-            {
-                "id": _attachment_id_from_url(url),
-                "name": str(candidate.get("name") or "attachment.bin"),
-                "downloadUrl": url,
-                "allowExtraDownloadHost": True,
-                "source": "travel_platform",
-            }
-        )
-    return resources
-
-
-def _attachment_resources_from_api_payload(
-    payload: Any, inventory: List[Dict[str, Any]] | None = None,
-) -> List[Dict[str, Any]]:
-    resources: List[Dict[str, Any]] = []
-    seen_urls: set[str] = set()
-
-    def add_attachment(item: Any, path: str, owner: str) -> None:
-        if not isinstance(item, dict):
-            if inventory is not None:
-                inventory.append({"stage": "attachment_inventory", "reason": "record_invalid", "source_path": path})
-            return
-        raw_path = html.unescape(str(item.get("fjdz") or "")).strip()
-        url = _trip_attachment_url(raw_path, base_url=f"{TRIP_BASE_URL}/")
-        if not url:
-            relative_path = raw_path.lstrip("/")
-            if relative_path.partition("/")[0].isdigit():
-                url = _trip_attachment_url(f"/fcfile/fcc/opera/getFile/{relative_path}", base_url=f"{TRIP_BASE_URL}/")
-        placeholder = (all(key in item for key in ("fjdz", "fjmc", "fjlx"))
-                       and all(item.get(key) in (None, "") for key in ("fjdz", "fjmc", "fjlx", "wbfjdz", "fjwb"))
-                       and item.get("fjdx") in (None, "", 0, "0"))
-        record = {"stage": "attachment_inventory", "source_path": path,
-                  "reason": "downloadable" if url else "empty_placeholder" if placeholder
-                  else "resource_address_invalid" if raw_path else "resource_address_missing"}
-        for key, value in (("attachment_ref", item.get("id")), ("owner_ref", owner)):
-            if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,80}", value):
-                record[key] = value
-        if url:
-            record["file_ref"] = _attachment_id_from_url(url)
-        if inventory is not None:
-            inventory.append(record)
-        if not url or url in seen_urls:
-            return
-        seen_urls.add(url)
-        resources.append({"id": _attachment_id_from_url(url),
-                          "name": _attachment_name(str(item.get("fjmc") or ""), url),
-                          "downloadUrl": url, "allowExtraDownloadHost": True, "source": "travel_platform"})
-
-    def walk(value: Any, path: str = "payload", owner: str = "main") -> None:
-        if isinstance(value, dict):
-            owner = str(value.get("id") or owner)
-            for key, child in value.items():
-                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(key)):
-                    continue
-                child_path = path + "." + str(key)
-                if str(key).lower() == "fjlist":
-                    if isinstance(child, list):
-                        for index, item in enumerate(child):
-                            add_attachment(item, f"{child_path}[{index}]", owner)
-                    elif inventory is not None:
-                        inventory.append({"stage": "attachment_inventory", "reason": "list_invalid", "source_path": child_path})
-                else:
-                    walk(child, child_path, owner)
-        elif isinstance(value, list):
-            for index, child in enumerate(value):
-                walk(child, f"{path}[{index}]", owner)
-
-    walk(payload)
-    return resources
-
-
-def _merge_attachment_inventory(target: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> None:
-    identities = {(item.get("owner_ref"), item.get("attachment_ref") or item.get("source_path")): item
-                  for item in target}
+def _merge_attachment_inventory(
+    target: List[Dict[str, Any]], incoming: List[Dict[str, Any]]
+) -> None:
+    identities = {
+        (
+            item.get("owner_ref"),
+            item.get("attachment_ref") or item.get("source_path"),
+        ): item
+        for item in target
+    }
     for item in incoming:
-        key = (item.get("owner_ref"), item.get("attachment_ref") or item.get("source_path"))
+        key = (
+            item.get("owner_ref"),
+            item.get("attachment_ref") or item.get("source_path"),
+        )
         previous = identities.get(key)
         if previous is None:
             target.append(dict(item))
             identities[key] = target[-1]
-        elif any(previous.get(field) != item.get(field) for field in ("reason", "file_ref")):
+        elif any(
+            previous.get(field) != item.get(field) for field in ("reason", "file_ref")
+        ):
             previous["reason"] = "inventory_changed"
 
 
@@ -236,8 +142,14 @@ def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
                 and str(value.get("ddlx") or "").strip() == "03001"
                 and order_no
             ):
-                order = {"order_no": order_no, "expense_description": expense_description,
-                         **{key: str(value.get(key) or "").strip() for key in ("sjly", "id", "bxpch")}}
+                order = {
+                    "order_no": order_no,
+                    "expense_description": expense_description,
+                    **{
+                        key: str(value.get(key) or "").strip()
+                        for key in ("sjly", "id", "bxpch")
+                    },
+                }
                 if order not in orders:
                     orders.append(order)
             for child in value.values():
@@ -248,190 +160,6 @@ def _hotel_orders_from_api_payload(payload: Any) -> List[Dict[str, str]]:
 
     walk(payload)
     return orders
-
-
-def _capture_attachment_response(
-    response: Any,
-    resources: List[Dict[str, Any]],
-    diagnostics: List[Dict[str, Any]] | None = None,
-    inventory: List[Dict[str, Any]] | None = None,
-) -> None:
-    parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
-    trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
-    if parsed.hostname != trip_host or parsed.path not in TRIP_ATTACHMENT_API_PATHS:
-        return
-    try:
-        payload = response.json()
-        if (not isinstance(payload, dict) or payload.get("success") is not True
-                or not isinstance(payload.get("result"), (dict, list))
-                or not 200 <= getattr(response, "status", 200) < 300):
-            if inventory is not None:
-                inventory.append({"stage": "attachment_inventory", "reason": "response_invalid"})
-            return
-        observed = []
-        discovered = _attachment_resources_from_api_payload(payload, observed)
-        if inventory is not None:
-            _merge_attachment_inventory(inventory, observed)
-    except Exception as error:
-        if inventory is not None:
-            inventory.append({"stage": "attachment_inventory", "reason": "response_invalid"})
-        if diagnostics is not None:
-            diagnostics.append({"stage": "attachment_api", "reason": "attachment_response_invalid",
-                                "http_status": getattr(response, "status", 200), "exception_type": type(error).__name__})
-        return
-    seen_urls = {str(item.get("downloadUrl") or "") for item in resources}
-    for item in discovered:
-        url = str(item.get("downloadUrl") or "")
-        if not url or url in seen_urls:
-            continue
-        seen_urls.add(url)
-        resources.append(item)
-
-
-def _capture_hotel_order_response(
-    response: Any,
-    orders: List[Dict[str, str]],
-    diagnostics: List[Dict[str, Any]] | None = None,
-) -> None:
-    parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
-    trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
-    if parsed.hostname != trip_host or parsed.path != TRIP_EXPENSE_API_PATH:
-        return
-    try:
-        payload = response.json()
-        discovered = _hotel_orders_from_api_payload(payload)
-        if isinstance(payload, dict) and payload.get("success") is False and diagnostics is not None:
-            diagnostics.append({"stage": "expense_api", "reason": "expense_api_failed",
-                                "http_status": getattr(response, "status", 200), "api_success": False})
-    except Exception as error:
-        if diagnostics is not None:
-            diagnostics.append({"stage": "expense_api", "reason": "expense_response_invalid",
-                                "http_status": getattr(response, "status", 200), "exception_type": type(error).__name__})
-        return
-    for item in discovered:
-        if item not in orders:
-            orders.append(item)
-
-
-def _read_hotel_order_details(
-    context: Any,
-    orders: List[Dict[str, str]],
-    *,
-    timeout_sec: float,
-) -> List[Dict[str, Any]]:
-    details: List[Dict[str, Any]] = []
-    deadline = time.monotonic() + max(0.5, float(timeout_sec))
-    for order in orders:
-        remaining = deadline - time.monotonic()
-        order_no = str(order.get("order_no") or "").strip()
-        if not order_no:
-            continue
-        if remaining <= 0:
-            details.append({**order, "read_status": "failed", "reason": "hotel_order_detail_timeout",
-                            "diagnostics": {"stage": "hotel_detail"}})
-            continue
-        offline = str(order.get("sjly") or "").strip() not in {"", "2"}
-        detail = {**order, "detail_source": "offline_expense" if offline else "online_order"}
-        diagnostics: Dict[str, Any] = {"stage": "hotel_detail"}
-        if offline and not all(str(order.get(key) or "").strip() for key in ("id", "bxpch")):
-            details.append({**detail, "read_status": "failed", "reason": "hotel_expense_identity_missing",
-                            "diagnostics": diagnostics})
-            continue
-        query = urllib.parse.urlencode({"ddbh": order_no})
-        url = f"{TRIP_BASE_URL}{OFFLINE_EXPENSE_DETAIL_PATH}" if offline else f"{TRIP_BASE_URL}{HOTEL_ORDER_DETAIL_PATH}?{query}"
-        referer = (f"{TRIP_BASE_URL}/fcc/fcecf/bxdHome/index.html" if offline else
-                   f"{TRIP_BASE_URL}/fcc/hotel/order/zcd/hotelOrderDetail.html?{query}")
-        reason = ""
-        payload = None
-        try:
-            response = context.request.post(
-                url,
-                **({"data": {"id": order["id"], "ywdh": order_no, "bxpch": order["bxpch"]}} if offline else {}),
-                headers={"referer": referer, "x-requested-with": "XMLHttpRequest"},
-                timeout=max(500, min(int(remaining * 1000), 5000)),
-                max_redirects=0,
-            )
-            status = getattr(response, "status", 200)
-            diagnostics["http_status"] = status
-            if status in {401, 403}:
-                reason = "hotel_order_authentication_failed"
-            elif 300 <= status < 400:
-                reason = "hotel_order_redirected"
-            elif not 200 <= status < 300:
-                reason = "hotel_order_http_failed"
-            else:
-                reason = "hotel_order_response_invalid"
-                payload = response.json()
-                reason = ""
-        except Exception as error:
-            diagnostics["exception_type"] = type(error).__name__
-            reason = ("hotel_order_detail_timeout" if type(error).__name__ == "TimeoutError" else
-                      reason or "hotel_order_detail_read_failed")
-        result = payload.get("result") if isinstance(payload, dict) else None
-        diagnostics["result_type"] = type(result).__name__
-        if isinstance(payload, dict):
-            if isinstance(payload.get("success"), bool):
-                diagnostics["api_success"] = payload["success"]
-            code = payload.get("code")
-            if isinstance(code, int) and not isinstance(code, bool):
-                diagnostics["api_code"] = code
-        identities = {"id": order.get("id"), "ywdh": order_no, "bxpch": order.get("bxpch"),
-                      "sjly": order.get("sjly"), "cpbh": "0300", "ddlx": "03001"} if offline else {"ddbh": order_no}
-        if not reason:
-            if not isinstance(payload, dict):
-                reason = "hotel_order_response_invalid"
-            elif payload.get("success") is False:
-                reason = "hotel_order_api_failed"
-            elif ("success" in payload and not isinstance(payload["success"], bool)) or (offline and payload.get("success") is not True):
-                reason = "hotel_order_response_invalid"
-            elif result is None:
-                reason = "hotel_order_result_missing"
-            elif not isinstance(result, dict):
-                reason = "hotel_order_result_invalid"
-            elif not all(str(result.get(key) or "").strip() for key in identities):
-                reason = "hotel_order_identity_missing"
-            elif any(str(result[key]).strip() != value for key, value in identities.items()):
-                reason = "hotel_order_identity_mismatch"
-        if reason:
-            if isinstance(result, dict):
-                diagnostics["identity_present"] = all(bool(result.get(key)) for key in identities)
-                diagnostics["identity_matches"] = all(str(result.get(key) or "").strip() == value for key, value in identities.items())
-            details.append({**detail, "read_status": "failed", "reason": reason, "diagnostics": diagnostics})
-            continue
-        extension = result.get("fkFymxKzbBean") if offline else result
-        address = str((extension if isinstance(extension, dict) else {}).get("jddz") or "").strip()
-        details.append(
-            {
-                **detail,
-                "read_status": "read",
-                "order_detail": result,
-                "hotel_name": str(result.get("jdmc") or "").strip(),
-                "hotel_address": address,
-                "city": str(result.get("ddcs" if offline else "jdcszwmc") or "").strip(),
-                "district": str(result.get("ddcsqx" if offline else "xzqmc") or "").strip(),
-                "check_in": str(result.get("xcrqs" if offline else "ydrzrq") or "").strip(),
-                "check_out": str(result.get("xcrqz" if offline else "ydldrq") or "").strip(),
-                "date_semantics": "declared" if offline else "reserved",
-                **({"location_semantics": "declared"} if offline else {}),
-            }
-        )
-    return details
-
-
-def _ephemeral_trip_cookie_header(cookies: List[Dict[str, Any]]) -> str:
-    trip_host = urllib.parse.urlparse(TRIP_BASE_URL).hostname or ""
-    values: List[str] = []
-    for cookie in cookies:
-        if not isinstance(cookie, dict):
-            continue
-        domain = str(cookie.get("domain") or "").strip().lower().lstrip(".")
-        if not domain or not (trip_host == domain or trip_host.endswith(f".{domain}")):
-            continue
-        name = str(cookie.get("name") or "").strip()
-        value = str(cookie.get("value") or "")
-        if name:
-            values.append(f"{name}={value}")
-    return "; ".join(values)
 
 
 class _TravelReadDeadline(BaseException):
@@ -469,55 +197,6 @@ def _field_value(fields: List[Dict[str, Any]], names: tuple[str, ...]) -> str:
 
 def _flow_mark(fields: List[Dict[str, Any]]) -> str:
     return _field_value(fields, ("流程编号",))
-
-
-def _trip_url(flow_mark: str) -> str:
-    query = urllib.parse.urlencode(
-        {"czlx": "D", "closed": "1", "bxdh": flow_mark, "isSsoLogin": "1"}
-    )
-    return f"{TRIP_BASE_URL}/fcc/fcecf/bxdHome/index.html?{query}"
-
-
-def _oa_jump_url(fields: List[Dict[str, Any]]) -> str:
-    for item in fields:
-        if str(item.get("name") or "").strip() != "附件数量":
-            continue
-        for key in ("raw_value", "value"):
-            match = HREF_RE.search(str(item.get(key) or ""))
-            if match:
-                return urllib.parse.urljoin(
-                    f"{OA_BASE_URL}/", html.unescape(match.group(1))
-                )
-    return ""
-
-
-def _cdp_endpoint() -> str:
-    return f"http://{attachments.CHROME_REMOTE_DEBUGGING_ADDRESS}:{attachments.CHROME_REMOTE_DEBUGGING_PORT}"
-
-
-def _cdp_available() -> bool:
-    try:
-        with urllib.request.urlopen(
-            f"{_cdp_endpoint()}/json/version", timeout=2
-        ) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-
-def _wait_for_cdp(timeout_sec: float = 5.0) -> bool:
-    deadline = time.monotonic() + timeout_sec
-    while time.monotonic() <= deadline:
-        if _cdp_available():
-            return True
-        time.sleep(0.25)
-    return _cdp_available()
-
-
-def _ensure_cdp_available() -> bool:
-    if _cdp_available():
-        return True
-    return _wait_for_cdp()
 
 
 def _trip_page_pending(text: str) -> bool:
@@ -576,296 +255,25 @@ def _browser_roots(page: Any) -> List[Any]:
     return roots
 
 
-def _browser_snapshot(page: Any, *, fallback_url: str) -> Dict[str, Any]:
-    texts: List[str] = []
-    resources: List[Dict[str, Any]] = []
-    seen_texts: set[str] = set()
-    seen_urls: set[str] = set()
-    content_scan_failed = False
-    for root in _browser_roots(page):
-        try:
-            text = str(root.locator("body").inner_text(timeout=1000) or "").strip()
-        except Exception:
-            text = ""
-        if text and text not in seen_texts:
-            seen_texts.add(text)
-            texts.append(text)
-        try:
-            markup = root.content()
-        except Exception:
-            content_scan_failed = True
-            continue
-        base_url = str(
-            getattr(root, "url", "") or getattr(page, "url", "") or fallback_url
-        )
-        for resource in _attachment_resources_from_dom(markup, base_url=base_url):
-            url = str(resource.get("downloadUrl") or "")
-            if not url or url in seen_urls:
-                continue
-            seen_urls.add(url)
-            resources.append(resource)
-    return {
-        "text": "\n".join(texts),
-        "resources": resources,
-        "content_scan_failed": content_scan_failed,
-    }
-
-
-def _read_attachment_snapshot(
-    page: Any,
+def _trip_read_failure(
+    stage: str,
+    reason: str,
     *,
-    url: str,
-    timeout_sec: float,
-    expected_resource_count: int | None = None,
-    response_resources: List[Dict[str, Any]] | None = None,
+    headless: bool | None = None,
+    error: BaseException | None = None,
+    **facts: Any,
 ) -> Dict[str, Any]:
-    snapshot: Dict[str, Any] = {"text": "", "resources": []}
-    previous: tuple[tuple[str, str], ...] | None = None
-    stable_rounds = 0
-    stable_empty_rounds = 0
-    activated_roots: set[int] = set()
-    deadline = time.monotonic() + max(0.5, float(timeout_sec))
-    while True:
-        for root in _browser_roots(page):
-            root_id = id(root)
-            if root_id not in activated_roots and _activate_attachment_tab(
-                root, timeout_sec=timeout_sec
-            ):
-                activated_roots.add(root_id)
-        snapshot = _browser_snapshot(page, fallback_url=url)
-        seen_urls = {
-            str(item.get("downloadUrl") or "")
-            for item in snapshot.get("resources", [])
-        }
-        for item in response_resources or []:
-            item_url = str(item.get("downloadUrl") or "")
-            if not item_url or item_url in seen_urls:
-                continue
-            seen_urls.add(item_url)
-            snapshot.setdefault("resources", []).append(item)
-        fingerprint = tuple(
-            sorted(
-                (str(item.get("id") or ""), str(item.get("downloadUrl") or ""))
-                for item in snapshot.get("resources", [])
-            )
-        )
-        if snapshot.get("content_scan_failed"):
-            previous = None
-            stable_rounds = 0
-        elif fingerprint == previous:
-            stable_rounds += 1
-        else:
-            previous = fingerprint
-            stable_rounds = 1
-        if fingerprint:
-            stable_empty_rounds = 0
-            count_complete = (
-                expected_resource_count is None
-                or len(fingerprint) >= expected_resource_count
-            )
-            if stable_rounds >= 3 and count_complete:
-                snapshot["resource_scan_stable"] = True
-                break
-        else:
-            stable_empty_rounds = (
-                stable_empty_rounds + 1
-                if not snapshot.get("content_scan_failed")
-                else 0
-            )
-            if (
-                expected_resource_count == 0
-                and stable_empty_rounds >= 3
-                and activated_roots
-            ):
-                break
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        page.wait_for_timeout(max(1, min(500, int(remaining * 1000))))
-    snapshot.setdefault("resource_scan_stable", False)
-    snapshot["attachment_tab_activated"] = bool(activated_roots)
-    snapshot["empty_scan_stable"] = stable_empty_rounds >= 3
-    return snapshot
-
-
-def _read_browser_trip_candidates_uncoordinated(
-    urls: List[str],
-    *,
-    timeout_sec: int,
-    storage_state: Dict[str, Any],
-    headless: bool,
-    expected_marker: str = "",
-    expected_resource_count: int | None = None,
-) -> List[Dict[str, Any]]:
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception as error:
-        return [_trip_read_failure("browser", "browser_unavailable", headless=headless, error=error)]
-
-    results: List[Dict[str, Any]] = []
-    try:
-        with sync_playwright() as playwright:
-            with _wall_clock_timeout(max(1, timeout_sec) + 5):
-                launch_kwargs: Dict[str, Any] = {
-                    "headless": headless,
-                    "timeout": max(1000, timeout_sec * 1000),
-                }
-                if Path(attachments.CHROME_BIN).exists():
-                    launch_kwargs["executable_path"] = attachments.CHROME_BIN
-                browser = playwright.chromium.launch(**launch_kwargs)
-                context = browser.new_context(storage_state=storage_state)
-                deadline = time.monotonic() + max(1, timeout_sec)
-                for index, url in enumerate(urls):
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        results.append(_trip_read_failure("browser", "browser_deadline", headless=headless))
-                        break
-                    budget = max(1.0, remaining / max(1, len(urls) - index))
-                    candidate_deadline = min(deadline, time.monotonic() + budget)
-                    page = context.new_page()
-                    response_resources: List[Dict[str, Any]] = []
-                    attachment_inventory: List[Dict[str, Any]] = []
-                    hotel_orders: List[Dict[str, str]] = []
-                    response_diagnostics: List[Dict[str, Any]] = []
-
-                    def capture_response(response: Any, resources=response_resources,
-                                         inventory=attachment_inventory, orders=hotel_orders,
-                                         diagnostics=response_diagnostics) -> None:
-                        _capture_attachment_response(response, resources, diagnostics, inventory)
-                        _capture_hotel_order_response(response, orders, diagnostics)
-
-                    page.on("response", capture_response)
-                    stage = "navigation"
-                    try:
-                        response = page.goto(
-                            url,
-                            wait_until="domcontentloaded",
-                            timeout=max(1000, int(budget * 1000)),
-                        )
-                        status = getattr(response, "status", 200)
-                        if status >= 400:
-                            results.append(_trip_read_failure("navigation", "login_required" if status in {401, 403} else "page_http_failed",
-                                headless=headless, http_status=status))
-                            continue
-                        page.wait_for_timeout(200)
-                        stage = "page"
-                        initial_text = _read_stable_body_text(
-                            page,
-                            timeout_sec=max(
-                                1, int(candidate_deadline - time.monotonic())
-                            ),
-                        )
-                        hotel_order_details = _read_hotel_order_details(
-                            context,
-                            hotel_orders,
-                            timeout_sec=max(
-                                0.5, candidate_deadline - time.monotonic()
-                            ),
-                        )
-                        stage = "attachment_scan"
-                        snapshot = _read_attachment_snapshot(
-                            page,
-                            url=url,
-                            timeout_sec=max(0.5, candidate_deadline - time.monotonic()),
-                            expected_resource_count=expected_resource_count,
-                            response_resources=response_resources,
-                        )
-                        text = str(snapshot.get("text") or initial_text)
-                        if initial_text and initial_text not in text:
-                            text = f"{initial_text}\n{text}".strip()
-                        observed = list(snapshot.get("resources") or [])
-                        resources = (
-                            observed if snapshot.get("resource_scan_stable") else []
-                        )
-                        if resources:
-                            try:
-                                cookie_header = _ephemeral_trip_cookie_header(
-                                    context.cookies([TRIP_BASE_URL])
-                                )
-                            except Exception:
-                                cookie_header = ""
-                            if cookie_header:
-                                for resource in resources:
-                                    resource["_ephemeral_cookie_header"] = cookie_header
-                        status = "resources_found" if resources else "read_failed"
-                        if (
-                            not resources
-                            and snapshot.get("attachment_tab_activated")
-                            and snapshot.get("empty_scan_stable")
-                        ):
-                            status = "empty"
-                        elif (
-                            not resources
-                            and not snapshot.get("attachment_tab_activated")
-                            and not observed
-                        ):
-                            status = "tab_unavailable"
-                        candidate = {
-                            "text": text,
-                            "resources": resources,
-                            "attachment_scan_status": status,
-                            "attachment_inventory": list(attachment_inventory),
-                            "hotel_order_details": hotel_order_details,
-                            "source_url": str(getattr(page, "url", "") or url),
-                            "browser": "headless" if headless else "visible",
-                            "diagnostics": [{**item, "browser": "headless" if headless else "visible"}
-                                            for item in response_diagnostics],
-                        }
-                        results.append(candidate)
-                        if _trip_candidate_complete(
-                            candidate,
-                            expected_marker=expected_marker,
-                            expected_resource_count=expected_resource_count,
-                        ):
-                            break
-                    except Exception as error:
-                        results.append(_trip_read_failure(stage, f"{stage}_failed", headless=headless, error=error))
-                    finally:
-                        page.close()
-
-    except (_TravelReadDeadline, Exception) as error:
-        results.append(_trip_read_failure("browser", "browser_deadline" if isinstance(error, _TravelReadDeadline) else "browser_failed",
-            headless=headless, error=error))
-    return results
-
-
-def _trip_read_failure(stage: str, reason: str, *, headless: bool | None = None,
-                       error: BaseException | None = None, **facts: Any) -> Dict[str, Any]:
     diagnostic = {"stage": stage, "reason": reason, **facts}
     if headless is not None:
         diagnostic["browser"] = "headless" if headless else "visible"
     if error is not None:
         diagnostic["exception_type"] = type(error).__name__
-    return {"text": "", "resources": [], "attachment_scan_status": "read_failed", "diagnostics": [diagnostic]}
-
-
-def _read_browser_trip_candidates(
-    urls: List[str],
-    *,
-    timeout_sec: int,
-    storage_state: Dict[str, Any],
-    headless: bool,
-    expected_marker: str = "",
-    expected_resource_count: int | None = None,
-) -> List[Dict[str, Any]]:
-    resource_name = "travel-browser" if headless else "visible-browser"
-    capacity = _travel_browser_capacity() if headless else 1
-    try:
-        with resource_slots.acquire(
-            resource_name,
-            capacity=capacity,
-            timeout_sec=_browser_slot_timeout(timeout_sec),
-        ):
-            return _read_browser_trip_candidates_uncoordinated(
-                urls,
-                timeout_sec=timeout_sec,
-                storage_state=storage_state,
-                headless=headless,
-                expected_marker=expected_marker,
-                expected_resource_count=expected_resource_count,
-            )
-    except resource_slots.ResourceSlotTimeout as error:
-        return [_trip_read_failure("browser", "browser_slot_timeout", headless=headless, error=error)]
+    return {
+        "text": "",
+        "resources": [],
+        "attachment_scan_status": "read_failed",
+        "diagnostics": [diagnostic],
+    }
 
 
 def _trip_candidate_complete(
@@ -891,49 +299,6 @@ def _trip_candidate_complete(
     if expected_resource_count == 0:
         return status == "empty"
     return status == "resources_found"
-
-
-def _read_trip_candidate_results(
-    urls: List[str],
-    *,
-    timeout_sec: int,
-    expected_marker: str,
-    allow_visible_fallback: bool,
-    expected_resource_count: int | None = None,
-) -> List[Dict[str, Any]]:
-    state = attachments.rpa_storage_state(timeout_sec=timeout_sec)
-    if not state:
-        return [_trip_read_failure("session", "session_unavailable")]
-    headless_results = _read_browser_trip_candidates(
-        urls,
-        timeout_sec=timeout_sec,
-        storage_state=state,
-        headless=True,
-        expected_marker=expected_marker,
-        expected_resource_count=expected_resource_count,
-    )
-    if any(
-        _trip_candidate_complete(
-            item,
-            expected_marker=expected_marker,
-            expected_resource_count=expected_resource_count,
-        )
-        for item in headless_results
-    ):
-        return headless_results
-    if allow_visible_fallback and attachments.browser_visible_fallback_enabled():
-        return [
-            *headless_results,
-            *_read_browser_trip_candidates(
-                urls,
-                timeout_sec=timeout_sec,
-                storage_state=state,
-                headless=False,
-                expected_marker=expected_marker,
-                expected_resource_count=expected_resource_count,
-            ),
-        ]
-    return headless_results
 
 
 def _detail_subject_ref(
@@ -965,9 +330,7 @@ def _hotel_detail_fields(
             if not isinstance(detail, dict):
                 continue
             address = str(detail.get("hotel_address") or "").strip()
-            expense_description = str(
-                detail.get("expense_description") or ""
-            ).strip()
+            expense_description = str(detail.get("expense_description") or "").strip()
             subject_ref = _detail_subject_ref(fields, expense_description)
             if not subject_ref:
                 order_no = str(detail.get("order_no") or "").strip()
@@ -979,8 +342,16 @@ def _hotel_detail_fields(
             if identity in seen:
                 continue
             seen.add(identity)
-            facts.append({"name": "商旅住宿订单详情", "value": body, "raw_value": body,
-                          "table": "travel_order", "row": len(facts), "subject_ref": subject_ref})
+            facts.append(
+                {
+                    "name": "商旅住宿订单详情",
+                    "value": body,
+                    "raw_value": body,
+                    "table": "travel_order",
+                    "row": len(facts),
+                    "subject_ref": subject_ref,
+                }
+            )
             if not address or detail.get("location_semantics") == "declared":
                 continue
             facts.append(
@@ -996,171 +367,1109 @@ def _hotel_detail_fields(
     return facts
 
 
-def collect_evidence(
-    cfg: Dict[str, Any],
-    data: Dict[str, Any],
-    request_id: str,
-    *,
-    allow_browser_download: bool,
-    timeout_sec: int = 20,
-) -> Dict[str, Any]:
-    result: Dict[str, Any] = {"fields": [], "resources": [], "errors": []}
-    if str(cfg.get("flow_key") or "") != "travel_expense":
-        return result
-
-    fields = evidence_packet.extract_fields(data)
-    def fail(
-        code: str,
-        message: str,
-        *,
-        counts: Dict[str, int] | None = None,
-        diagnostics: List[Dict[str, Any]] | None = None,
-    ) -> Dict[str, Any]:
-        error: Dict[str, Any] = {"code": code, "message": message}
-        if counts:
-            error["counts"] = dict(counts)
-        if diagnostics:
-            error["diagnostics"] = diagnostics
-        result["errors"] = [error]
-        return result
-
-    if not allow_browser_download:
-        return fail(
-            TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
-            "本轮未授权读取商旅附件信息",
-            diagnostics=[{"stage": "authorization", "reason": "browser_read_not_authorized"}],
-        )
-    flow_mark = _flow_mark(fields)
-    if not flow_mark:
-        return fail(
-            TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
-            "缺少流程编号，无法读取商旅附件信息",
-            diagnostics=[{"stage": "identity", "reason": "flow_marker_missing"}],
-        )
-    if runtime_control.stop_requested():
-        return fail(runtime_control.STOP_CODE, "运行已请求停止，商旅附件信息未继续读取")
-    if not _ensure_cdp_available():
-        return fail(
-            TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
-            "商旅附件读取浏览器不可用",
-            diagnostics=[{"stage": "browser", "reason": "browser_unavailable"}],
+class TravelSource:
+    def __init__(self, policy: SourcePolicy, *, transfer=None):
+        self.policy = policy
+        self.transfer = (
+            transfer if transfer is not None else attachments.DownloadTransfer(policy)
         )
 
-    candidates: List[str] = []
-    for url in (_oa_jump_url(fields), _trip_url(flow_mark)):
-        if url and url not in candidates:
-            candidates.append(url)
-    declared_attachment_match = re.search(
-        r"\d+",
-        _field_value(fields, ("附件数量",)),
-    )
-    expected_resource_count = (
-        0
-        if declared_attachment_match is not None
-        and int(declared_attachment_match.group()) == 0
-        else None
-    )
-    try:
-        candidate_results = _read_trip_candidate_results(
-            candidates,
-            timeout_sec=timeout_sec,
-            expected_marker=flow_mark,
-            allow_visible_fallback=True,
-            expected_resource_count=expected_resource_count,
+    def _trip_attachment_url(self, raw_url: str, *, base_url: str) -> str:
+        value = str(raw_url or "").strip()
+        if not value or value.startswith(("#", "javascript:", "data:", "blob:")):
+            return ""
+        url = urllib.parse.urljoin(base_url, html.unescape(value))
+        parsed = urllib.parse.urlparse(url)
+        trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
+        if parsed.scheme != "https" or parsed.hostname != trip_host:
+            return ""
+        if not any(
+            marker.lower() in parsed.path.lower()
+            for marker in TRIP_ATTACHMENT_PATH_MARKERS
+        ):
+            return ""
+        if not TRIP_ATTACHMENT_ID_RE.search(parsed.path):
+            return ""
+        return urllib.parse.urlunsplit(
+            (parsed.scheme, parsed.netloc, parsed.path, parsed.query, "")
         )
-    except Exception as error:
-        candidate_results = [_trip_read_failure("browser", "browser_failed", error=error)]
 
-    valid_results: List[Dict[str, Any]] = []
-    merged_resources: List[Dict[str, Any]] = []
-    seen_resource_ids: set[str] = set()
-    diagnostics: List[Dict[str, Any]] = []
-    for candidate in candidate_results:
-        if not isinstance(candidate, dict):
-            continue
-        text = str(candidate.get("text") or "")
-        diagnostics.extend(candidate.get("diagnostics") or [])
-        if not text or "登录" in text[:100] or flow_mark not in text:
-            if text:
-                diagnostics.append({"stage": "page", "reason": "login_required" if "登录" in text[:100] else "flow_marker_mismatch",
-                    **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
-            elif not candidate.get("diagnostics"):
-                diagnostics.append({"stage": "page", "reason": "page_empty",
-                    **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
-            continue
-        if _trip_page_pending(text):
-            diagnostics.append({"stage": "page", "reason": "page_pending",
-                **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
-            continue
-        status = str(candidate.get("attachment_scan_status") or "")
-        if status not in {"empty", "resources_found"}:
-            diagnostics.append({"stage": "attachment_scan", "reason": "attachment_tab_unavailable" if status == "tab_unavailable" else "attachment_scan_unstable",
-                **({"browser": candidate["browser"]} if candidate.get("browser") else {})})
-        valid_results.append(candidate)
-        for item in candidate.get("resources", []):
-            if not isinstance(item, dict):
+    def _attachment_resources_from_dom(
+        self, markup: str, *, base_url: str
+    ) -> List[Dict[str, Any]]:
+        parser = _TripAttachmentDomParser(
+            base_url=base_url, download_url=self._trip_attachment_url
+        )
+        try:
+            parser.feed(str(markup or ""))
+        except Exception:
+            return []
+        resources: List[Dict[str, Any]] = []
+        seen_urls: set[str] = set()
+        for candidate in parser.candidates:
+            url = str(candidate.get("url") or "")
+            if not url or url in seen_urls:
                 continue
-            url = str(item.get("downloadUrl") or "").strip()
-            if not url:
-                continue
-            raw_id = str(item.get("id") or _attachment_id_from_url(url)).strip()
-            resource_id = (
-                raw_id
-                if raw_id.startswith("travel_platform:")
-                else f"travel_platform:{raw_id}"
-            )
-            if resource_id in seen_resource_ids:
-                continue
-            seen_resource_ids.add(resource_id)
-            merged_resources.append(
+            seen_urls.add(url)
+            resources.append(
                 {
-                    **item,
-                    "id": resource_id,
+                    "id": _attachment_id_from_url(url),
+                    "name": str(candidate.get("name") or "attachment.bin"),
+                    "downloadUrl": url,
                     "allowExtraDownloadHost": True,
                     "source": "travel_platform",
-                    "source_request_id": str(request_id),
-                    "discovery_ref": f"travel_platform:{flow_mark}",
+                }
+            )
+        return resources
+
+    def _attachment_resources_from_api_payload(
+        self,
+        payload: Any,
+        inventory: List[Dict[str, Any]] | None = None,
+    ) -> List[Dict[str, Any]]:
+        resources: List[Dict[str, Any]] = []
+        seen_urls: set[str] = set()
+
+        def add_attachment(item: Any, path: str, owner: str) -> None:
+            if not isinstance(item, dict):
+                if inventory is not None:
+                    inventory.append(
+                        {
+                            "stage": "attachment_inventory",
+                            "reason": "record_invalid",
+                            "source_path": path,
+                        }
+                    )
+                return
+            raw_path = html.unescape(str(item.get("fjdz") or "")).strip()
+            url = self._trip_attachment_url(
+                raw_path, base_url=f"{self.policy.travel_origin}/"
+            )
+            if not url:
+                relative_path = raw_path.lstrip("/")
+                if relative_path.partition("/")[0].isdigit():
+                    url = self._trip_attachment_url(
+                        f"/fcfile/fcc/opera/getFile/{relative_path}",
+                        base_url=f"{self.policy.travel_origin}/",
+                    )
+            placeholder = (
+                all(key in item for key in ("fjdz", "fjmc", "fjlx"))
+                and all(
+                    item.get(key) in (None, "")
+                    for key in ("fjdz", "fjmc", "fjlx", "wbfjdz", "fjwb")
+                )
+                and item.get("fjdx") in (None, "", 0, "0")
+            )
+            record = {
+                "stage": "attachment_inventory",
+                "source_path": path,
+                "reason": "downloadable"
+                if url
+                else "empty_placeholder"
+                if placeholder
+                else "resource_address_invalid"
+                if raw_path
+                else "resource_address_missing",
+            }
+            for key, value in (
+                ("attachment_ref", item.get("id")),
+                ("owner_ref", owner),
+            ):
+                if isinstance(value, str) and re.fullmatch(
+                    r"[A-Za-z0-9_-]{1,80}", value
+                ):
+                    record[key] = value
+            if url:
+                record["file_ref"] = _attachment_id_from_url(url)
+            if inventory is not None:
+                inventory.append(record)
+            if not url or url in seen_urls:
+                return
+            seen_urls.add(url)
+            resources.append(
+                {
+                    "id": _attachment_id_from_url(url),
+                    "name": _attachment_name(str(item.get("fjmc") or ""), url),
+                    "downloadUrl": url,
+                    "allowExtraDownloadHost": True,
+                    "source": "travel_platform",
                 }
             )
 
-    if valid_results:
-        seen_bodies: set[str] = set()
-        for item in valid_results:
-            body = str(item.get("text") or "").strip()
-            if body in seen_bodies:
+        def walk(value: Any, path: str = "payload", owner: str = "main") -> None:
+            if isinstance(value, dict):
+                owner = str(value.get("id") or owner)
+                for key, child in value.items():
+                    if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,63}", str(key)):
+                        continue
+                    child_path = path + "." + str(key)
+                    if str(key).lower() == "fjlist":
+                        if isinstance(child, list):
+                            for index, item in enumerate(child):
+                                add_attachment(item, f"{child_path}[{index}]", owner)
+                        elif inventory is not None:
+                            inventory.append(
+                                {
+                                    "stage": "attachment_inventory",
+                                    "reason": "list_invalid",
+                                    "source_path": child_path,
+                                }
+                            )
+                    else:
+                        walk(child, child_path, owner)
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    walk(child, f"{path}[{index}]", owner)
+
+        walk(payload)
+        return resources
+
+    def _capture_attachment_response(
+        self,
+        response: Any,
+        resources: List[Dict[str, Any]],
+        diagnostics: List[Dict[str, Any]] | None = None,
+        inventory: List[Dict[str, Any]] | None = None,
+    ) -> None:
+        parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
+        trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
+        if parsed.hostname != trip_host or parsed.path not in TRIP_ATTACHMENT_API_PATHS:
+            return
+        try:
+            payload = response.json()
+            if (
+                not isinstance(payload, dict)
+                or payload.get("success") is not True
+                or not isinstance(payload.get("result"), (dict, list))
+                or not 200 <= getattr(response, "status", 200) < 300
+            ):
+                if inventory is not None:
+                    inventory.append(
+                        {"stage": "attachment_inventory", "reason": "response_invalid"}
+                    )
+                return
+            observed = []
+            discovered = self._attachment_resources_from_api_payload(payload, observed)
+            if inventory is not None:
+                _merge_attachment_inventory(inventory, observed)
+        except Exception as error:
+            if inventory is not None:
+                inventory.append(
+                    {"stage": "attachment_inventory", "reason": "response_invalid"}
+                )
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "stage": "attachment_api",
+                        "reason": "attachment_response_invalid",
+                        "http_status": getattr(response, "status", 200),
+                        "exception_type": type(error).__name__,
+                    }
+                )
+            return
+        seen_urls = {str(item.get("downloadUrl") or "") for item in resources}
+        for item in discovered:
+            url = str(item.get("downloadUrl") or "")
+            if not url or url in seen_urls:
                 continue
-            seen_bodies.add(body)
-            result["fields"].append({"name": "商旅页面内容", "value": body, "raw_value": body,
-                                     "table": "travel_order", "row": len(result["fields"])})
-        result["fields"].extend(_hotel_detail_fields(fields, valid_results))
-    inventory: List[Dict[str, Any]] = []
-    for candidate in valid_results:
-        _merge_attachment_inventory(inventory, candidate.get("attachment_inventory") or [])
-    if any(item.get("reason") not in {"downloadable", "empty_placeholder"} for item in inventory):
-        return fail("travel_attachment_resources_incomplete", "商旅附件记录含无法读取的文件引用", diagnostics=inventory)
-    if inventory:
-        result["attachment_scan"] = {
-            "status": "resources_found" if merged_resources else "empty",
-            "source": "travel_platform", "source_request_id": str(request_id),
-            "discovery_ref": f"travel_platform:{flow_mark}", "inventory": inventory,
+            seen_urls.add(url)
+            resources.append(item)
+
+    def _capture_hotel_order_response(
+        self,
+        response: Any,
+        orders: List[Dict[str, str]],
+        diagnostics: List[Dict[str, Any]] | None = None,
+    ) -> None:
+        parsed = urllib.parse.urlparse(str(getattr(response, "url", "") or ""))
+        trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
+        if parsed.hostname != trip_host or parsed.path != TRIP_EXPENSE_API_PATH:
+            return
+        try:
+            payload = response.json()
+            discovered = _hotel_orders_from_api_payload(payload)
+            if (
+                isinstance(payload, dict)
+                and payload.get("success") is False
+                and diagnostics is not None
+            ):
+                diagnostics.append(
+                    {
+                        "stage": "expense_api",
+                        "reason": "expense_api_failed",
+                        "http_status": getattr(response, "status", 200),
+                        "api_success": False,
+                    }
+                )
+        except Exception as error:
+            if diagnostics is not None:
+                diagnostics.append(
+                    {
+                        "stage": "expense_api",
+                        "reason": "expense_response_invalid",
+                        "http_status": getattr(response, "status", 200),
+                        "exception_type": type(error).__name__,
+                    }
+                )
+            return
+        for item in discovered:
+            if item not in orders:
+                orders.append(item)
+
+    def _read_hotel_order_details(
+        self,
+        context: Any,
+        orders: List[Dict[str, str]],
+        *,
+        timeout_sec: float,
+    ) -> List[Dict[str, Any]]:
+        details: List[Dict[str, Any]] = []
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        for order in orders:
+            remaining = deadline - time.monotonic()
+            order_no = str(order.get("order_no") or "").strip()
+            if not order_no:
+                continue
+            if remaining <= 0:
+                details.append(
+                    {
+                        **order,
+                        "read_status": "failed",
+                        "reason": "hotel_order_detail_timeout",
+                        "diagnostics": {"stage": "hotel_detail"},
+                    }
+                )
+                continue
+            offline = str(order.get("sjly") or "").strip() not in {"", "2"}
+            detail = {
+                **order,
+                "detail_source": "offline_expense" if offline else "online_order",
+            }
+            diagnostics: Dict[str, Any] = {"stage": "hotel_detail"}
+            if offline and not all(
+                str(order.get(key) or "").strip() for key in ("id", "bxpch")
+            ):
+                details.append(
+                    {
+                        **detail,
+                        "read_status": "failed",
+                        "reason": "hotel_expense_identity_missing",
+                        "diagnostics": diagnostics,
+                    }
+                )
+                continue
+            query = urllib.parse.urlencode({"ddbh": order_no})
+            url = (
+                f"{self.policy.travel_origin}{OFFLINE_EXPENSE_DETAIL_PATH}"
+                if offline
+                else f"{self.policy.travel_origin}{HOTEL_ORDER_DETAIL_PATH}?{query}"
+            )
+            referer = (
+                f"{self.policy.travel_origin}/fcc/fcecf/bxdHome/index.html"
+                if offline
+                else f"{self.policy.travel_origin}/fcc/hotel/order/zcd/hotelOrderDetail.html?{query}"
+            )
+            reason = ""
+            payload = None
+            try:
+                response = context.request.post(
+                    url,
+                    **(
+                        {
+                            "data": {
+                                "id": order["id"],
+                                "ywdh": order_no,
+                                "bxpch": order["bxpch"],
+                            }
+                        }
+                        if offline
+                        else {}
+                    ),
+                    headers={"referer": referer, "x-requested-with": "XMLHttpRequest"},
+                    timeout=max(500, min(int(remaining * 1000), 5000)),
+                    max_redirects=0,
+                )
+                status = getattr(response, "status", 200)
+                diagnostics["http_status"] = status
+                if status in {401, 403}:
+                    reason = "hotel_order_authentication_failed"
+                elif 300 <= status < 400:
+                    reason = "hotel_order_redirected"
+                elif not 200 <= status < 300:
+                    reason = "hotel_order_http_failed"
+                else:
+                    reason = "hotel_order_response_invalid"
+                    payload = response.json()
+                    reason = ""
+            except Exception as error:
+                diagnostics["exception_type"] = type(error).__name__
+                reason = (
+                    "hotel_order_detail_timeout"
+                    if type(error).__name__ == "TimeoutError"
+                    else reason or "hotel_order_detail_read_failed"
+                )
+            result = payload.get("result") if isinstance(payload, dict) else None
+            diagnostics["result_type"] = type(result).__name__
+            if isinstance(payload, dict):
+                if isinstance(payload.get("success"), bool):
+                    diagnostics["api_success"] = payload["success"]
+                code = payload.get("code")
+                if isinstance(code, int) and not isinstance(code, bool):
+                    diagnostics["api_code"] = code
+            identities = (
+                {
+                    "id": order.get("id"),
+                    "ywdh": order_no,
+                    "bxpch": order.get("bxpch"),
+                    "sjly": order.get("sjly"),
+                    "cpbh": "0300",
+                    "ddlx": "03001",
+                }
+                if offline
+                else {"ddbh": order_no}
+            )
+            if not reason:
+                if not isinstance(payload, dict):
+                    reason = "hotel_order_response_invalid"
+                elif payload.get("success") is False:
+                    reason = "hotel_order_api_failed"
+                elif (
+                    "success" in payload and not isinstance(payload["success"], bool)
+                ) or (offline and payload.get("success") is not True):
+                    reason = "hotel_order_response_invalid"
+                elif result is None:
+                    reason = "hotel_order_result_missing"
+                elif not isinstance(result, dict):
+                    reason = "hotel_order_result_invalid"
+                elif not all(str(result.get(key) or "").strip() for key in identities):
+                    reason = "hotel_order_identity_missing"
+                elif any(
+                    str(result[key]).strip() != value
+                    for key, value in identities.items()
+                ):
+                    reason = "hotel_order_identity_mismatch"
+            if reason:
+                if isinstance(result, dict):
+                    diagnostics["identity_present"] = all(
+                        bool(result.get(key)) for key in identities
+                    )
+                    diagnostics["identity_matches"] = all(
+                        str(result.get(key) or "").strip() == value
+                        for key, value in identities.items()
+                    )
+                details.append(
+                    {
+                        **detail,
+                        "read_status": "failed",
+                        "reason": reason,
+                        "diagnostics": diagnostics,
+                    }
+                )
+                continue
+            extension = result.get("fkFymxKzbBean") if offline else result
+            address = str(
+                (extension if isinstance(extension, dict) else {}).get("jddz") or ""
+            ).strip()
+            details.append(
+                {
+                    **detail,
+                    "read_status": "read",
+                    "order_detail": result,
+                    "hotel_name": str(result.get("jdmc") or "").strip(),
+                    "hotel_address": address,
+                    "city": str(
+                        result.get("ddcs" if offline else "jdcszwmc") or ""
+                    ).strip(),
+                    "district": str(
+                        result.get("ddcsqx" if offline else "xzqmc") or ""
+                    ).strip(),
+                    "check_in": str(
+                        result.get("xcrqs" if offline else "ydrzrq") or ""
+                    ).strip(),
+                    "check_out": str(
+                        result.get("xcrqz" if offline else "ydldrq") or ""
+                    ).strip(),
+                    "date_semantics": "declared" if offline else "reserved",
+                    **({"location_semantics": "declared"} if offline else {}),
+                }
+            )
+        return details
+
+    def _ephemeral_trip_cookie_header(self, cookies: List[Dict[str, Any]]) -> str:
+        trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
+        values: List[str] = []
+        for cookie in cookies:
+            if not isinstance(cookie, dict):
+                continue
+            domain = str(cookie.get("domain") or "").strip().lower().lstrip(".")
+            if not domain or not (
+                trip_host == domain or trip_host.endswith(f".{domain}")
+            ):
+                continue
+            name = str(cookie.get("name") or "").strip()
+            value = str(cookie.get("value") or "")
+            if name:
+                values.append(f"{name}={value}")
+        return "; ".join(values)
+
+    def _trip_url(self, flow_mark: str) -> str:
+        query = urllib.parse.urlencode(
+            {"czlx": "D", "closed": "1", "bxdh": flow_mark, "isSsoLogin": "1"}
+        )
+        return f"{self.policy.travel_origin}/fcc/fcecf/bxdHome/index.html?{query}"
+
+    def _oa_jump_url(self, fields: List[Dict[str, Any]]) -> str:
+        for item in fields:
+            if str(item.get("name") or "").strip() != "附件数量":
+                continue
+            for key in ("raw_value", "value"):
+                match = HREF_RE.search(str(item.get(key) or ""))
+                if match:
+                    return urllib.parse.urljoin(
+                        f"{self.policy.attachments.oa_origin}/",
+                        html.unescape(match.group(1)),
+                    )
+        return ""
+
+    def _cdp_endpoint(self) -> str:
+        return self.policy.browser.cdp_endpoint
+
+    def _cdp_available(self) -> bool:
+        try:
+            with urllib.request.urlopen(
+                f"{self._cdp_endpoint()}/json/version", timeout=2
+            ) as resp:
+                return resp.status == 200
+        except Exception:
+            return False
+
+    def _wait_for_cdp(self, timeout_sec: float = 5.0) -> bool:
+        deadline = time.monotonic() + timeout_sec
+        while time.monotonic() <= deadline:
+            if self._cdp_available():
+                return True
+            time.sleep(0.25)
+        return self._cdp_available()
+
+    def _ensure_cdp_available(self) -> bool:
+        if self._cdp_available():
+            return True
+        return self._wait_for_cdp()
+
+    def _browser_snapshot(self, page: Any, *, fallback_url: str) -> Dict[str, Any]:
+        texts: List[str] = []
+        resources: List[Dict[str, Any]] = []
+        seen_texts: set[str] = set()
+        seen_urls: set[str] = set()
+        content_scan_failed = False
+        for root in _browser_roots(page):
+            try:
+                text = str(root.locator("body").inner_text(timeout=1000) or "").strip()
+            except Exception:
+                text = ""
+            if text and text not in seen_texts:
+                seen_texts.add(text)
+                texts.append(text)
+            try:
+                markup = root.content()
+            except Exception:
+                content_scan_failed = True
+                continue
+            base_url = str(
+                getattr(root, "url", "") or getattr(page, "url", "") or fallback_url
+            )
+            for resource in self._attachment_resources_from_dom(
+                markup, base_url=base_url
+            ):
+                url = str(resource.get("downloadUrl") or "")
+                if not url or url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                resources.append(resource)
+        return {
+            "text": "\n".join(texts),
+            "resources": resources,
+            "content_scan_failed": content_scan_failed,
         }
-    if merged_resources:
-        result["resources"] = merged_resources
-        return result
-    if any(
-        str(item.get("attachment_scan_status") or "") == "empty"
-        for item in valid_results
-    ):
-        result["attachment_scan"] = {
-            **result.get("attachment_scan", {}),
-            "status": "empty",
-            "source": "travel_platform",
-            "source_request_id": str(request_id),
-            "discovery_ref": f"travel_platform:{flow_mark}",
-        }
-        return result
-    return fail(
-        TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
-        "商旅附件页面或附件信息页签未能完成稳定读取",
-        diagnostics=diagnostics or [{"stage": "browser", "reason": "no_candidate_result"}],
-    )
+
+    def _read_attachment_snapshot(
+        self,
+        page: Any,
+        *,
+        url: str,
+        timeout_sec: float,
+        expected_resource_count: int | None = None,
+        response_resources: List[Dict[str, Any]] | None = None,
+    ) -> Dict[str, Any]:
+        snapshot: Dict[str, Any] = {"text": "", "resources": []}
+        previous: tuple[tuple[str, str], ...] | None = None
+        stable_rounds = 0
+        stable_empty_rounds = 0
+        activated_roots: set[int] = set()
+        deadline = time.monotonic() + max(0.5, float(timeout_sec))
+        while True:
+            for root in _browser_roots(page):
+                root_id = id(root)
+                if root_id not in activated_roots and _activate_attachment_tab(
+                    root, timeout_sec=timeout_sec
+                ):
+                    activated_roots.add(root_id)
+            snapshot = self._browser_snapshot(page, fallback_url=url)
+            seen_urls = {
+                str(item.get("downloadUrl") or "")
+                for item in snapshot.get("resources", [])
+            }
+            for item in response_resources or []:
+                item_url = str(item.get("downloadUrl") or "")
+                if not item_url or item_url in seen_urls:
+                    continue
+                seen_urls.add(item_url)
+                snapshot.setdefault("resources", []).append(item)
+            fingerprint = tuple(
+                sorted(
+                    (str(item.get("id") or ""), str(item.get("downloadUrl") or ""))
+                    for item in snapshot.get("resources", [])
+                )
+            )
+            if snapshot.get("content_scan_failed"):
+                previous = None
+                stable_rounds = 0
+            elif fingerprint == previous:
+                stable_rounds += 1
+            else:
+                previous = fingerprint
+                stable_rounds = 1
+            if fingerprint:
+                stable_empty_rounds = 0
+                count_complete = (
+                    expected_resource_count is None
+                    or len(fingerprint) >= expected_resource_count
+                )
+                if stable_rounds >= 3 and count_complete:
+                    snapshot["resource_scan_stable"] = True
+                    break
+            else:
+                stable_empty_rounds = (
+                    stable_empty_rounds + 1
+                    if not snapshot.get("content_scan_failed")
+                    else 0
+                )
+                if (
+                    expected_resource_count == 0
+                    and stable_empty_rounds >= 3
+                    and activated_roots
+                ):
+                    break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            page.wait_for_timeout(max(1, min(500, int(remaining * 1000))))
+        snapshot.setdefault("resource_scan_stable", False)
+        snapshot["attachment_tab_activated"] = bool(activated_roots)
+        snapshot["empty_scan_stable"] = stable_empty_rounds >= 3
+        return snapshot
+
+    def _read_browser_trip_candidates_uncoordinated(
+        self,
+        urls: List[str],
+        *,
+        timeout_sec: int,
+        storage_state: Dict[str, Any],
+        headless: bool,
+        expected_marker: str = "",
+        expected_resource_count: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        try:
+            from playwright.sync_api import sync_playwright
+        except Exception as error:
+            return [
+                _trip_read_failure(
+                    "browser", "browser_unavailable", headless=headless, error=error
+                )
+            ]
+
+        results: List[Dict[str, Any]] = []
+        try:
+            with sync_playwright() as playwright:
+                with _wall_clock_timeout(max(1, timeout_sec) + 5):
+                    launch_kwargs: Dict[str, Any] = {
+                        "headless": headless,
+                        "timeout": max(1000, timeout_sec * 1000),
+                    }
+                    if Path(str(self.policy.browser.chrome_binary)).exists():
+                        launch_kwargs["executable_path"] = str(
+                            self.policy.browser.chrome_binary
+                        )
+                    browser = playwright.chromium.launch(**launch_kwargs)
+                    context = browser.new_context(storage_state=storage_state)
+                    deadline = time.monotonic() + max(1, timeout_sec)
+                    for index, url in enumerate(urls):
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            results.append(
+                                _trip_read_failure(
+                                    "browser", "browser_deadline", headless=headless
+                                )
+                            )
+                            break
+                        budget = max(1.0, remaining / max(1, len(urls) - index))
+                        candidate_deadline = min(deadline, time.monotonic() + budget)
+                        page = context.new_page()
+                        response_resources: List[Dict[str, Any]] = []
+                        attachment_inventory: List[Dict[str, Any]] = []
+                        hotel_orders: List[Dict[str, str]] = []
+                        response_diagnostics: List[Dict[str, Any]] = []
+
+                        def capture_response(
+                            response: Any,
+                            resources=response_resources,
+                            inventory=attachment_inventory,
+                            orders=hotel_orders,
+                            diagnostics=response_diagnostics,
+                        ) -> None:
+                            self._capture_attachment_response(
+                                response, resources, diagnostics, inventory
+                            )
+                            self._capture_hotel_order_response(
+                                response, orders, diagnostics
+                            )
+
+                        page.on("response", capture_response)
+                        stage = "navigation"
+                        try:
+                            response = page.goto(
+                                url,
+                                wait_until="domcontentloaded",
+                                timeout=max(1000, int(budget * 1000)),
+                            )
+                            status = getattr(response, "status", 200)
+                            if status >= 400:
+                                results.append(
+                                    _trip_read_failure(
+                                        "navigation",
+                                        "login_required"
+                                        if status in {401, 403}
+                                        else "page_http_failed",
+                                        headless=headless,
+                                        http_status=status,
+                                    )
+                                )
+                                continue
+                            page.wait_for_timeout(200)
+                            stage = "page"
+                            initial_text = _read_stable_body_text(
+                                page,
+                                timeout_sec=max(
+                                    1, int(candidate_deadline - time.monotonic())
+                                ),
+                            )
+                            hotel_order_details = self._read_hotel_order_details(
+                                context,
+                                hotel_orders,
+                                timeout_sec=max(
+                                    0.5, candidate_deadline - time.monotonic()
+                                ),
+                            )
+                            stage = "attachment_scan"
+                            snapshot = self._read_attachment_snapshot(
+                                page,
+                                url=url,
+                                timeout_sec=max(
+                                    0.5, candidate_deadline - time.monotonic()
+                                ),
+                                expected_resource_count=expected_resource_count,
+                                response_resources=response_resources,
+                            )
+                            text = str(snapshot.get("text") or initial_text)
+                            if initial_text and initial_text not in text:
+                                text = f"{initial_text}\n{text}".strip()
+                            observed = list(snapshot.get("resources") or [])
+                            resources = (
+                                observed if snapshot.get("resource_scan_stable") else []
+                            )
+                            if resources:
+                                try:
+                                    cookie_header = self._ephemeral_trip_cookie_header(
+                                        context.cookies([self.policy.travel_origin])
+                                    )
+                                except Exception:
+                                    cookie_header = ""
+                                if cookie_header:
+                                    for resource in resources:
+                                        resource["_ephemeral_cookie_header"] = (
+                                            cookie_header
+                                        )
+                            status = "resources_found" if resources else "read_failed"
+                            if (
+                                not resources
+                                and snapshot.get("attachment_tab_activated")
+                                and snapshot.get("empty_scan_stable")
+                            ):
+                                status = "empty"
+                            elif (
+                                not resources
+                                and not snapshot.get("attachment_tab_activated")
+                                and not observed
+                            ):
+                                status = "tab_unavailable"
+                            candidate = {
+                                "text": text,
+                                "resources": resources,
+                                "attachment_scan_status": status,
+                                "attachment_inventory": list(attachment_inventory),
+                                "hotel_order_details": hotel_order_details,
+                                "source_url": str(getattr(page, "url", "") or url),
+                                "browser": "headless" if headless else "visible",
+                                "diagnostics": [
+                                    {
+                                        **item,
+                                        "browser": "headless"
+                                        if headless
+                                        else "visible",
+                                    }
+                                    for item in response_diagnostics
+                                ],
+                            }
+                            results.append(candidate)
+                            if _trip_candidate_complete(
+                                candidate,
+                                expected_marker=expected_marker,
+                                expected_resource_count=expected_resource_count,
+                            ):
+                                break
+                        except Exception as error:
+                            results.append(
+                                _trip_read_failure(
+                                    stage,
+                                    f"{stage}_failed",
+                                    headless=headless,
+                                    error=error,
+                                )
+                            )
+                        finally:
+                            page.close()
+
+        except (_TravelReadDeadline, Exception) as error:
+            results.append(
+                _trip_read_failure(
+                    "browser",
+                    "browser_deadline"
+                    if isinstance(error, _TravelReadDeadline)
+                    else "browser_failed",
+                    headless=headless,
+                    error=error,
+                )
+            )
+        return results
+
+    def _read_browser_trip_candidates(
+        self,
+        urls: List[str],
+        *,
+        timeout_sec: int,
+        storage_state: Dict[str, Any],
+        headless: bool,
+        expected_marker: str = "",
+        expected_resource_count: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        resource_name = "travel-browser" if headless else "visible-browser"
+        capacity = _travel_browser_capacity() if headless else 1
+        try:
+            with resource_slots.acquire(
+                resource_name,
+                capacity=capacity,
+                timeout_sec=_browser_slot_timeout(timeout_sec),
+            ):
+                return self._read_browser_trip_candidates_uncoordinated(
+                    urls,
+                    timeout_sec=timeout_sec,
+                    storage_state=storage_state,
+                    headless=headless,
+                    expected_marker=expected_marker,
+                    expected_resource_count=expected_resource_count,
+                )
+        except resource_slots.ResourceSlotTimeout as error:
+            return [
+                _trip_read_failure(
+                    "browser", "browser_slot_timeout", headless=headless, error=error
+                )
+            ]
+
+    def _read_trip_candidate_results(
+        self,
+        urls: List[str],
+        *,
+        timeout_sec: int,
+        expected_marker: str,
+        allow_visible_fallback: bool,
+        expected_resource_count: int | None = None,
+    ) -> List[Dict[str, Any]]:
+        state = self.transfer.rpa_storage_state(timeout_sec=timeout_sec)
+        if not state:
+            return [_trip_read_failure("session", "session_unavailable")]
+        headless_results = self._read_browser_trip_candidates(
+            urls,
+            timeout_sec=timeout_sec,
+            storage_state=state,
+            headless=True,
+            expected_marker=expected_marker,
+            expected_resource_count=expected_resource_count,
+        )
+        if any(
+            _trip_candidate_complete(
+                item,
+                expected_marker=expected_marker,
+                expected_resource_count=expected_resource_count,
+            )
+            for item in headless_results
+        ):
+            return headless_results
+        if allow_visible_fallback and attachments.browser_visible_fallback_enabled():
+            return [
+                *headless_results,
+                *self._read_browser_trip_candidates(
+                    urls,
+                    timeout_sec=timeout_sec,
+                    storage_state=state,
+                    headless=False,
+                    expected_marker=expected_marker,
+                    expected_resource_count=expected_resource_count,
+                ),
+            ]
+        return headless_results
+
+    def collect_evidence(
+        self,
+        cfg: Dict[str, Any],
+        data: Dict[str, Any],
+        request_id: str,
+        *,
+        allow_browser_download: bool,
+        timeout_sec: int = 20,
+    ) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"fields": [], "resources": [], "errors": []}
+        if str(cfg.get("flow_key") or "") != "travel_expense":
+            return result
+
+        fields = evidence_packet.extract_fields(data)
+
+        def fail(
+            code: str,
+            message: str,
+            *,
+            counts: Dict[str, int] | None = None,
+            diagnostics: List[Dict[str, Any]] | None = None,
+        ) -> Dict[str, Any]:
+            error: Dict[str, Any] = {"code": code, "message": message}
+            if counts:
+                error["counts"] = dict(counts)
+            if diagnostics:
+                error["diagnostics"] = diagnostics
+            result["errors"] = [error]
+            return result
+
+        if not allow_browser_download:
+            return fail(
+                TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
+                "本轮未授权读取商旅附件信息",
+                diagnostics=[
+                    {"stage": "authorization", "reason": "browser_read_not_authorized"}
+                ],
+            )
+        flow_mark = _flow_mark(fields)
+        if not flow_mark:
+            return fail(
+                TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
+                "缺少流程编号，无法读取商旅附件信息",
+                diagnostics=[{"stage": "identity", "reason": "flow_marker_missing"}],
+            )
+        if runtime_control.stop_requested():
+            return fail(
+                runtime_control.STOP_CODE, "运行已请求停止，商旅附件信息未继续读取"
+            )
+        if not self._ensure_cdp_available():
+            return fail(
+                TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
+                "商旅附件读取浏览器不可用",
+                diagnostics=[{"stage": "browser", "reason": "browser_unavailable"}],
+            )
+
+        candidates: List[str] = []
+        for url in (self._oa_jump_url(fields), self._trip_url(flow_mark)):
+            if url and url not in candidates:
+                candidates.append(url)
+        declared_attachment_match = re.search(
+            r"\d+",
+            _field_value(fields, ("附件数量",)),
+        )
+        expected_resource_count = (
+            0
+            if declared_attachment_match is not None
+            and int(declared_attachment_match.group()) == 0
+            else None
+        )
+        try:
+            candidate_results = self._read_trip_candidate_results(
+                candidates,
+                timeout_sec=timeout_sec,
+                expected_marker=flow_mark,
+                allow_visible_fallback=True,
+                expected_resource_count=expected_resource_count,
+            )
+        except Exception as error:
+            candidate_results = [
+                _trip_read_failure("browser", "browser_failed", error=error)
+            ]
+
+        valid_results: List[Dict[str, Any]] = []
+        merged_resources: List[Dict[str, Any]] = []
+        seen_resource_ids: set[str] = set()
+        diagnostics: List[Dict[str, Any]] = []
+        for candidate in candidate_results:
+            if not isinstance(candidate, dict):
+                continue
+            text = str(candidate.get("text") or "")
+            diagnostics.extend(candidate.get("diagnostics") or [])
+            if not text or "登录" in text[:100] or flow_mark not in text:
+                if text:
+                    diagnostics.append(
+                        {
+                            "stage": "page",
+                            "reason": "login_required"
+                            if "登录" in text[:100]
+                            else "flow_marker_mismatch",
+                            **(
+                                {"browser": candidate["browser"]}
+                                if candidate.get("browser")
+                                else {}
+                            ),
+                        }
+                    )
+                elif not candidate.get("diagnostics"):
+                    diagnostics.append(
+                        {
+                            "stage": "page",
+                            "reason": "page_empty",
+                            **(
+                                {"browser": candidate["browser"]}
+                                if candidate.get("browser")
+                                else {}
+                            ),
+                        }
+                    )
+                continue
+            if _trip_page_pending(text):
+                diagnostics.append(
+                    {
+                        "stage": "page",
+                        "reason": "page_pending",
+                        **(
+                            {"browser": candidate["browser"]}
+                            if candidate.get("browser")
+                            else {}
+                        ),
+                    }
+                )
+                continue
+            status = str(candidate.get("attachment_scan_status") or "")
+            if status not in {"empty", "resources_found"}:
+                diagnostics.append(
+                    {
+                        "stage": "attachment_scan",
+                        "reason": "attachment_tab_unavailable"
+                        if status == "tab_unavailable"
+                        else "attachment_scan_unstable",
+                        **(
+                            {"browser": candidate["browser"]}
+                            if candidate.get("browser")
+                            else {}
+                        ),
+                    }
+                )
+            valid_results.append(candidate)
+            for item in candidate.get("resources", []):
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("downloadUrl") or "").strip()
+                if not url:
+                    continue
+                raw_id = str(item.get("id") or _attachment_id_from_url(url)).strip()
+                resource_id = (
+                    raw_id
+                    if raw_id.startswith("travel_platform:")
+                    else f"travel_platform:{raw_id}"
+                )
+                if resource_id in seen_resource_ids:
+                    continue
+                seen_resource_ids.add(resource_id)
+                merged_resources.append(
+                    {
+                        **item,
+                        "id": resource_id,
+                        "allowExtraDownloadHost": True,
+                        "source": "travel_platform",
+                        "source_request_id": str(request_id),
+                        "discovery_ref": f"travel_platform:{flow_mark}",
+                    }
+                )
+
+        if valid_results:
+            seen_bodies: set[str] = set()
+            for item in valid_results:
+                body = str(item.get("text") or "").strip()
+                if body in seen_bodies:
+                    continue
+                seen_bodies.add(body)
+                result["fields"].append(
+                    {
+                        "name": "商旅页面内容",
+                        "value": body,
+                        "raw_value": body,
+                        "table": "travel_order",
+                        "row": len(result["fields"]),
+                    }
+                )
+            result["fields"].extend(_hotel_detail_fields(fields, valid_results))
+        inventory: List[Dict[str, Any]] = []
+        for candidate in valid_results:
+            _merge_attachment_inventory(
+                inventory, candidate.get("attachment_inventory") or []
+            )
+        if any(
+            item.get("reason") not in {"downloadable", "empty_placeholder"}
+            for item in inventory
+        ):
+            return fail(
+                "travel_attachment_resources_incomplete",
+                "商旅附件记录含无法读取的文件引用",
+                diagnostics=inventory,
+            )
+        if inventory:
+            result["attachment_scan"] = {
+                "status": "resources_found" if merged_resources else "empty",
+                "source": "travel_platform",
+                "source_request_id": str(request_id),
+                "discovery_ref": f"travel_platform:{flow_mark}",
+                "inventory": inventory,
+            }
+        if merged_resources:
+            result["resources"] = merged_resources
+            return result
+        if any(
+            str(item.get("attachment_scan_status") or "") == "empty"
+            for item in valid_results
+        ):
+            result["attachment_scan"] = {
+                **result.get("attachment_scan", {}),
+                "status": "empty",
+                "source": "travel_platform",
+                "source_request_id": str(request_id),
+                "discovery_ref": f"travel_platform:{flow_mark}",
+            }
+            return result
+        return fail(
+            TRAVEL_ATTACHMENT_DISCOVERY_FAILED_CODE,
+            "商旅附件页面或附件信息页签未能完成稳定读取",
+            diagnostics=diagnostics
+            or [{"stage": "browser", "reason": "no_candidate_result"}],
+        )

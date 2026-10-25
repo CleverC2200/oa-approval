@@ -1,3 +1,5 @@
+
+from tests.approvals.source_fakes import POLICY
 from pathlib import Path
 import re
 import shutil
@@ -54,7 +56,7 @@ def rule_case(tmp_path, monkeypatch):
                     'resources': [{'resource_id': 'synthetic', 'local_readonly_path': str(source)}],
                     'prepared': {'images': [], 'structured_contents': [], 'manifest': []}}
 
-        app = Approval(tmp_path / 'runtime', api=RuleApi(), configs=[], collector=collect)
+        app = Approval(tmp_path / 'runtime', api=RuleApi(), configs=[], collector=collect, source_policy=POLICY)
         started = app.pending()
         task = started['tasks'][0]
         return app, started['run_id'], {'agent_id': 'synthetic-reviewer',

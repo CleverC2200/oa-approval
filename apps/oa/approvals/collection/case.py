@@ -10,7 +10,6 @@ import urllib.parse
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.materials import resources
-from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
@@ -351,10 +350,11 @@ def _travel_resources(
     allow_browser_download: bool,
     attachment_timeout_sec: int,
     attachment_scan: dict[str, Any] | None = None,
+    travel_source,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     if str(config.get("flow_key") or "") != "travel_expense":
         return [], []
-    result = travel_orders.collect_evidence(
+    result = travel_source.collect_evidence(
         config,
         workflow,
         request_id,
@@ -405,7 +405,7 @@ def _travel_resources(
 
 def _merge_resources(
     form_resources: list[dict[str, Any]],
-    discovered_resources: list[dict[str, Any]],
+    discovered_resources: list[dict[str, Any]], *, origins,
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     identities: dict[str, tuple[str, str]] = {}
@@ -426,9 +426,9 @@ def _merge_resources(
             resource.get("downloadUrl") or resource.get("download_url") or ""
         ).strip()
         try:
-            url_identity = remote.normalize_download_url(
+            url_identity = origins.download_url(
                 raw_url,
-                allow_extra_hosts=bool(resource.get("allowExtraDownloadHost")),
+                allow_extra=bool(resource.get("allowExtraDownloadHost")),
             )
         except ValueError:
             url_identity = raw_url
@@ -490,12 +490,16 @@ def collect_case(
     request_id: str,
     *,
     oa_api: object,
+    source_policy,
     configs: Sequence[dict[str, Any]],
     allow_browser_download: bool,
     attachment_root: Path | None = None,
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
 ) -> dict[str, Any]:
+    download_sources = attachments.build_download_sources(source_policy)
+    transfer = download_sources.transfer
+    travel_source = travel_orders.TravelSource(source_policy, transfer=transfer)
     workflow, raw_resources = oa_api.request_context(str(request_id))
     try:
         config = flow.select_config_for_workflow(
@@ -517,7 +521,7 @@ def collect_case(
 
     form_resources = evidence_packet.logical_attachment_resources(
         workflow,
-        raw_resources,
+        raw_resources, origins=source_policy.attachments,
     )
     travel_scan: dict[str, Any] = {}
     discovered_resources, travel_facts = _travel_resources(
@@ -526,14 +530,14 @@ def collect_case(
         request_id=str(request_id),
         allow_browser_download=allow_browser_download,
         attachment_timeout_sec=attachment_timeout_sec,
-        attachment_scan=travel_scan,
+        attachment_scan=travel_scan, travel_source=travel_source,
     )
     authority_facts.extend(travel_facts)
     original_resources = invoice_originals.resources(
         str(request_id), workflow, str(config.get("flow_key") or ""), invoice_evidence,
-        base_url=remote.OA_HOST,
+        base_url=source_policy.attachments.oa_origin,
     )
-    logical_resources = _merge_resources(form_resources, discovered_resources + original_resources)
+    logical_resources = _merge_resources(form_resources, discovered_resources + original_resources, origins=source_policy.attachments)
     original_sources = {item["id"]: item["_invoice_original"] for item in original_resources}
     logical_resources = [
         {**item, "_invoice_original": original_sources[str(item["id"])]}
@@ -547,7 +551,7 @@ def collect_case(
         )
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
-        source_resources = _merge_resources(form_resources, discovered_resources)
+        source_resources = _merge_resources(form_resources, discovered_resources, origins=source_policy.attachments)
         inventory = travel_scan.get("inventory") or []
         source_file_ids = {_trip_content_id(item) for item in source_resources}
         inventory_complete = all(
@@ -582,7 +586,7 @@ def collect_case(
         _resource_descriptor(item, request_id=str(request_id))
         for item in logical_resources
     ]
-    prepared = {"images": [], "structured_contents": [], "manifest": []}
+    prepared_result = attachment_extractors.PreparedMaterial({"images": [], "structured_contents": [], "manifest": []})
     if logical_resources:
         attachment_dir = Path(
             attachment_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_attachments"
@@ -592,8 +596,8 @@ def collect_case(
             target = dict(resource)
             target["id"] = descriptor["raw_resource_id"]
             download_targets.append(target)
-        downloaded, download_errors = attachments.download_resources(
-            download_targets,
+        download_result = attachments.download_resources(
+            download_targets, sources=download_sources,
             dest_dir=attachment_dir
             / str(config.get("flow_key") or "unknown")
             / str(request_id),
@@ -602,9 +606,10 @@ def collect_case(
             request_id=str(request_id),
             flow_key=str(config.get("flow_key") or ""),
         )
+        downloaded, download_errors = download_result.items, download_result.errors
         if download_errors or len(downloaded) != len(download_targets):
             code = (
-                str(download_errors[0].get("code") or "attachment_download_failed")
+                download_errors[0].code
                 if download_errors
                 else "attachment_download_incomplete"
             )
@@ -632,7 +637,7 @@ def collect_case(
             ):
                 bound_item["parent_resource_id"] = descriptor["resource_id"]
             bound_downloads.append(bound_item)
-        images, manifest, structured_contents = attachment_extractors.prepare_materials(
+        prepared_result = attachment_extractors.prepare_materials(
             bound_downloads,
             compact_pdf=config.get("flow_key") == "general_expense",
             compact_spreadsheet=config.get("flow_key") == "tpm_small_marketing_fee",
@@ -641,13 +646,8 @@ def collect_case(
             ).expanduser().resolve()
             / str(request_id),
         )
-        prepared = {
-            "images": images,
-            "structured_contents": structured_contents,
-            "manifest": manifest,
-        }
-
-    invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared)
+    prepared = prepared_result.to_record()
+    invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared_result)
     warnings = [
         {
             "code": "invoice_document_reference_unresolved",

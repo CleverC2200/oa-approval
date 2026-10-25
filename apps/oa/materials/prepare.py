@@ -106,8 +106,7 @@ def prepare(*, files=None, manifest=None, output_dir: Path):
             if key in identities:
                 raise ValueError('material_resource_identity_conflict')
             identities[key] = item['resource_id']
-        images, prepared_manifest, structured = formats.prepare_materials(resources, out_dir=output / 'prepared')
-        artifact['prepared'] = {'images': images, 'manifest': prepared_manifest, 'structured_contents': structured}
+        artifact['prepared'] = formats.prepare_materials(resources, out_dir=output / 'prepared').to_record()
         for path, digest in sources.items():
             if _source_hash(path) != digest:
                 raise ValueError('material_source_changed')

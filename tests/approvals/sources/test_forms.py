@@ -1,3 +1,5 @@
+
+from tests.approvals.source_fakes import POLICY
 import json
 import os
 from pathlib import Path
@@ -17,7 +19,7 @@ def workflow(html):
 def test_html_only_attachments_are_collected_with_source_ownership():
     data = workflow('''<span onclick="toURL('/news/download.do?fileid=101&filename=现场.jpeg',false);">照片</span>''')
     data["workflowRequestLogs"] = [{"annexDocHtmls": '''<span onclick="toURL('/news/download.do?fileid=102&filename=清单.xlsx',false);">清单</span>'''}]
-    rows = evidence_packet.logical_attachment_resources(data, [])
+    rows = evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments)
     assert [r["id"] for r in rows] == ["101", "102"]
     assert rows[0]["downloadUrl"] == "/weaver/weaver.file.FileDownload?fileid=101"
     assert rows[0]["_trusted_owner_detail_id"] == "detail[0].row[0]"
@@ -28,11 +30,11 @@ def test_html_only_attachments_are_collected_with_source_ownership():
 def test_html_discovery_deduplicates_ids_without_guessing_row_ownership():
     data = workflow("<a href='/news/download.do?fileid=101&amp;filename=a.jpeg'>a</a>")
     data["workflowDetailTableInfos"][0]["workflowRequestTableRecords"] *= 2
-    rows = evidence_packet.logical_attachment_resources(data, [])
+    rows = evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments)
     assert len(rows) == 1
     assert not rows[0].get("_trusted_owner_detail_id")
     listed = [{"id": "101", "name": "a.jpeg", "downloadUrl": "/download/101"}]
-    assert len(evidence_packet.logical_attachment_resources(data, listed)) == 1
+    assert len(evidence_packet.logical_attachment_resources(data, listed, origins=POLICY.attachments)) == 1
 
 
 def test_html_discovery_ignores_external_and_non_download_links():
@@ -40,13 +42,13 @@ def test_html_discovery_ignores_external_and_non_download_links():
     <a href='/news/download.do?fileid=102&fileid=103&filename=a.jpeg'>ambiguous</a>
     <span title='/news/download.do?fileid=104&filename=a.jpeg'>plain metadata</span>
     <a href='javascript:alert(1)'>bad</a>""")
-    assert evidence_packet.logical_attachment_resources(data, []) == []
+    assert evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments) == []
 
 
 def test_rejected_field_link_cannot_assign_log_attachment_to_detail():
     data = workflow("<a href='https://external.invalid/news/download.do?fileid=101&filename=a.xlsx'>bad</a>")
     data['workflowRequestLogs'] = [{'annexDocHtmls': "<a href='/news/download.do?fileid=101&filename=a.xlsx'>good</a>"}]
-    rows = evidence_packet.logical_attachment_resources(data, [])
+    rows = evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments)
     assert len(rows) == 1
     assert not rows[0].get('_trusted_owner_detail_id')
     assert rows[0]['_trusted_source_field_path'] == 'workflowRequestLogs[0].annexDocHtmls'
@@ -56,18 +58,18 @@ def test_rejected_field_link_cannot_assign_log_attachment_to_detail():
     "ftp://external.invalid/news/download.do?fileid=101&filename=a.xlsx",
     "HTTPS://external.invalid/news/download.do?fileid=101&filename=a.xlsx",
     "javascript:/news/download.do?fileid=101&filename=a.xlsx",
-    "https://oa.example.com:444/news/download.do?fileid=101&filename=a.xlsx",
+    "https://oa.example.test:444/news/download.do?fileid=101&filename=a.xlsx",
 ])
 def test_raw_origin_is_validated_before_native_url_conversion(monkeypatch, url):
-    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.com')
+    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.test')
     data = workflow(f"<a href='{url}'>bad</a>")
-    assert evidence_packet.logical_attachment_resources(data, []) == []
+    assert evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments) == []
 
 
 def test_same_origin_absolute_link_and_fileid_only_are_kept(monkeypatch):
-    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.com')
-    data = workflow("<a href='HTTPS://oa.example.com/news/download.do?fileid=101'>attachment</a>")
-    rows = evidence_packet.logical_attachment_resources(data, [])
+    monkeypatch.setenv('OA_BASE_URL', 'https://oa.example.test')
+    data = workflow("<a href='HTTPS://oa.example.test/news/download.do?fileid=101'>attachment</a>")
+    rows = evidence_packet.logical_attachment_resources(data, [], origins=POLICY.attachments)
     assert rows[0]['downloadUrl'] == '/weaver/weaver.file.FileDownload?fileid=101'
     assert rows[0]['name'] == 'attachment-101.bin'
 
@@ -92,16 +94,20 @@ socket.getaddrinfo = reject
 socket.socket.connect = reject
 environment.PROJECT_ROOT = Path(os.environ['OA_AUTH_ENV_FILE']).parent / 'checkout'
 from apps.oa.approvals import operations, forms
+from apps.oa.approvals.source_policy import load_source_policy
+
+assert not getattr(environment.load_local_env, "_loaded", False)
+policy = load_source_policy()
 
 url = 'https://files.example.test/opera/getFile/123/invoice.pdf'
 workflow = {'workflowMainTableInfo': {'requestRecords': [{'workflowRequestTableFields': [
     {'fieldName': 'attachment', 'fieldShowName': '附件', 'fieldValue': url, 'fieldShowValue': url}
 ]}]}}
-rows = forms.logical_attachment_resources(workflow, [])
+rows = forms.logical_attachment_resources(workflow, [], origins=policy.attachments)
 trip = forms.logical_attachment_resources({}, [
     {'id': 'listed-1', 'name': 'invoice-a.pdf', 'downloadUrl': url},
     {'id': 'listed-2', 'name': 'invoice-b.pdf', 'downloadUrl': url.replace('/getFile/', '/share/open/')}
-])
+], origins=policy.attachments)
 print(json.dumps({'rows': rows, 'trip_ids': [row['id'] for row in trip]}))
 '''
     result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[3],

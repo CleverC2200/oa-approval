@@ -2,22 +2,33 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from dataclasses import dataclass
+from functools import partial
 import json
 import hashlib
 import os
 from pathlib import Path
 import threading
 import time
-from typing import Any, Dict, List, Tuple
-import urllib.parse
+from typing import Any, Dict, List, Literal, Protocol, Tuple
 
 from apps.oa.approvals.collection import cache as attachment_cache
 from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import browser_session as rpa_session
-from apps.oa.approvals.sources.download_errors import ATTACHMENT_ACCESS_DENIED_CODE
+from apps.oa.approvals.sources.download_errors import (
+    Downloaded,
+    DownloadError,
+    Failed,
+    Unavailable,
+    TransferOutcome,
+)
+from apps.oa.approvals.sources.originals import OriginalContext
 from apps.oa.materials import archives
-from apps.oa.materials.resources import attachment_resources, resource_name, resource_key
-from apps.oa.runtime import slots as resource_slots
+from apps.oa.materials.resources import (
+    attachment_resources,
+    resource_name,
+    resource_key,
+)
 from apps.oa.runtime import control as runtime_control
 
 
@@ -25,11 +36,20 @@ MANIFEST_NAME = "manifest.json"
 ATTACHMENT_IDENTITY_CONFLICT_CODE = "attachment_resource_identity_conflict"
 DEFAULT_DOWNLOAD_CONCURRENCY = 4
 MAX_DOWNLOAD_CONCURRENCY = 8
+_FATAL_DOWNLOAD_ERROR_CODES = {
+    remote.OA_SESSION_EXPIRED_CODE,
+    remote.CHROME_LAUNCH_TIMEOUT_CODE,
+    remote.DOWNLOAD_TIMEOUT_CODE,
+    runtime_control.STOP_CODE,
+    *rpa_session.FATAL_SESSION_CODES,
+}
 
 
 def _unique_attachment_resources(
     resources: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
+    *,
+    transfer,
+) -> tuple[list[dict], tuple[DownloadError, ...]]:
     unique: List[Dict[str, Any]] = []
     identities: Dict[str, str] = {}
     for resource in attachment_resources(resources):
@@ -38,7 +58,7 @@ def _unique_attachment_resources(
             resource.get("downloadUrl") or resource.get("download_url") or ""
         ).strip()
         try:
-            identity = remote.normalize_download_url(
+            identity = transfer.normalize_download_url(
                 raw_url,
                 allow_extra_hosts=bool(resource.get("allowExtraDownloadHost")),
             )
@@ -50,13 +70,13 @@ def _unique_attachment_resources(
             unique.append(resource)
             continue
         if previous != identity:
-            return [], [
-                {
-                    "code": ATTACHMENT_IDENTITY_CONFLICT_CODE,
-                    "message": f"资源 {key} 对应多个下载地址，无法确认附件身份",
-                }
-            ]
-    return unique, []
+            return [], (
+                DownloadError(
+                    ATTACHMENT_IDENTITY_CONFLICT_CODE,
+                    f"资源 {key} 对应多个下载地址，无法确认附件身份",
+                ),
+            )
+    return unique, ()
 
 
 def _download_worker_count(pending_count: int, raw_concurrency: str) -> int:
@@ -216,10 +236,10 @@ def _cached_attachment_entry(
 
 def _attachment_content_sha256(path: Path) -> str:
     try:
-        with path.open('rb') as source:
-            return hashlib.file_digest(source, 'sha256').hexdigest()
+        with path.open("rb") as source:
+            return hashlib.file_digest(source, "sha256").hexdigest()
     except OSError:
-        return ''
+        return ""
 
 
 def _record_attachment_entry(
@@ -242,254 +262,397 @@ def _record_attachment_entry(
     )
 
 
-def _initialize_workflow_document_context(
-    resource: Dict[str, Any], url: str, *, timeout_sec: int,
-) -> bool:
-    from apps.oa.approvals.collection import invoice_originals
-    from apps.oa.approvals.sources import native_documents
-    from apps.oa.approvals.sources import official_sql
+@dataclass(frozen=True, slots=True)
+class DownloadSources:
+    transfer: ResourceTransfer
+    originals: OriginalSource | None
 
-    if not native_documents.accepts(resource, url, base_url=remote.OA_HOST):
-        return False
-    request_id = str(resource.get('_workflow_request_id') or '')
-    file_id = str(resource.get('id') or '')
-    try:
-        document_id = official_sql.workflow_attachment_document(request_id, file_id)
-        if not document_id:
-            document_id = invoice_originals.source_for_download(request_id, file_id).get('document_id', '')
-        return native_documents.verify(
-            resource, url, base_url=remote.OA_HOST, document_id=document_id,
-            timeout_sec=timeout_sec,
+
+class ResourceTransfer(Protocol):
+    def normalize_download_url(
+        self, raw_url: str, *, allow_extra_hosts: bool = False
+    ) -> str: ...
+
+    def direct(
+        self, resource: dict, *, dest_dir: Path, timeout_sec: int
+    ) -> TransferOutcome: ...
+
+    def browser(
+        self, resource: dict, *, dest_dir: Path, timeout_sec: int
+    ) -> TransferOutcome: ...
+
+
+class OriginalSource(Protocol):
+    def snapshot(self, request_id: str) -> OriginalContext: ...
+
+    def verify(
+        self, context: OriginalContext, resource: dict, *, timeout_sec: int
+    ) -> bool: ...
+
+    def read(
+        self,
+        context: OriginalContext,
+        resource: dict,
+        *,
+        dest_dir: Path,
+        timeout_sec: int,
+    ) -> TransferOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadResult:
+    items: tuple[dict, ...]
+    errors: tuple[DownloadError, ...]
+    disposition: Literal["complete", "partial", "blocked"]
+
+
+@dataclass(frozen=True, slots=True)
+class _Cached:
+    item: dict
+
+
+def build_download_sources(source_policy) -> DownloadSources:
+    from apps.oa.approvals.collection.invoice_originals import (
+        read_original_context,
+        initialize_workflow_document,
+    )
+    from apps.oa.approvals.sources.originals import OriginalSources
+
+    transfer = remote.DownloadTransfer(
+        source_policy,
+        initialize_context=partial(
+            initialize_workflow_document, source_policy=source_policy
+        ),
+    )
+    return DownloadSources(
+        transfer,
+        OriginalSources(
+            source_policy,
+            transfer,
+            read_context=partial(read_original_context, source_policy=source_policy),
+        ),
+    )
+
+
+class _ContentPool:
+    def __init__(self, dest_dir: Path):
+        self.dest_dir = dest_dir
+        self.existing_paths = frozenset(dest_dir.iterdir())
+        self.paths = {}
+        self.lock = threading.Lock()
+
+    def share(self, path: Path, *, newly_downloaded: bool = False) -> Path:
+        with self.lock:
+            digest = _attachment_content_sha256(path)
+            if not digest:
+                raise RuntimeError("attachment_content_unreadable")
+            key = (path.suffix.lower(), digest)
+            previous = self.paths.get(key)
+            if previous is None:
+                self.paths[key] = path
+                return path
+            if (
+                newly_downloaded
+                and path != previous
+                and path not in self.existing_paths
+                and path.parent.resolve() == self.dest_dir.resolve()
+                and not path.is_symlink()
+            ):
+                path.unlink()
+            return previous
+
+
+def _stop_error() -> DownloadError:
+    return DownloadError(
+        runtime_control.STOP_CODE, "已请求停止财务预审，停止本单附件下载"
+    )
+
+
+class _DownloadBatch:
+    def __init__(
+        self,
+        targets,
+        *,
+        sources,
+        dest_dir,
+        timeout_sec,
+        request_id,
+        flow_key,
+        reuse_cache,
+    ):
+        self.targets = targets
+        self.sources = sources
+        self.dest_dir = dest_dir
+        self.timeout_sec = timeout_sec
+        self.request_id = request_id
+        self.cache_request_id, self.cache_flow_key = _cache_scope(
+            dest_dir, request_id=request_id, flow_key=flow_key
         )
-    except rpa_session.RpaSessionError:
-        raise
-    except Exception:
-        return False
+        self.reuse_cache = reuse_cache
+        self.content = _ContentPool(dest_dir)
+        self.legacy_resources = _load_manifest(dest_dir).setdefault("resources", {})
+        self.original_context = None
+        self.outcomes = [Unavailable() for _ in targets]
+        self.items = []
+        self.errors = []
+        self.cache_entries = []
 
+    def run(self) -> DownloadResult:
+        if runtime_control.stop_requested():
+            return DownloadResult((), (_stop_error(),), "blocked")
+        if any(resource.get("_invoice_original") for resource in self.targets):
+            errors = self._check_originals()
+            if errors:
+                return DownloadResult((), errors, "blocked")
+        self._obtain()
+        self._materialize()
+        if self.original_context is not None:
+            errors = self._check_terminal_sources()
+            if errors:
+                return DownloadResult((), errors, "blocked")
+        self._publish_cache()
+        _remove_legacy_manifest(self.dest_dir)
+        return DownloadResult(
+            tuple(self.items),
+            tuple(self.errors),
+            "partial" if self.errors else "complete",
+        )
 
-def _download_resource_direct(
-    resource: Dict[str, Any], *, dest_dir: Path, timeout_sec: int, original_batch=None,
-) -> Tuple[Path | None, str]:
-    name = resource_name(resource) or "attachment.bin"
-    try:
-        with resource_slots.acquire(
-            "attachment-direct",
-            capacity=remote._global_download_capacity(),
-            timeout_sec=remote._resource_slot_wait_timeout(timeout_sec),
-        ):
-            if original_batch is not None and resource.get('_invoice_original'):
-                return original_batch.download(resource, dest_dir=dest_dir, timeout_sec=timeout_sec)
-            return remote._download_resource_direct_uncoordinated(
-                resource,
-                dest_dir=dest_dir,
-                timeout_sec=timeout_sec,
-                initialize_context=_initialize_workflow_document_context,
+    def _check_originals(self) -> tuple[DownloadError, ...]:
+        try:
+            self.original_context = self.sources.originals.snapshot(self.request_id)
+        except rpa_session.RpaSessionError as error:
+            return (DownloadError(error.code, "发票原件会话核验失败"),)
+        except Exception:
+            return (
+                DownloadError("resource_ownership_untrusted", "发票原件归属核验失败"),
             )
-    except resource_slots.ResourceSlotTimeout:
-        return None, (
-            f"{remote.RESOURCE_SLOT_TIMEOUT_CODE}: {name}: 等待全局附件下载通道超时"
+        for resource in self.targets:
+            if not resource.get("_invoice_original"):
+                continue
+            try:
+                valid = self.sources.originals.verify(
+                    self.original_context, resource, timeout_sec=self.timeout_sec
+                )
+            except rpa_session.RpaSessionError as error:
+                return (DownloadError(error.code, "发票原件会话核验失败"),)
+            except ValueError:
+                valid = False
+            if not valid:
+                return (
+                    DownloadError(
+                        "resource_ownership_untrusted", "发票原件归属核验失败"
+                    ),
+                )
+        return ()
+
+    def _check_terminal_sources(self) -> tuple[DownloadError, ...]:
+        if runtime_control.stop_requested():
+            return (_stop_error(),)
+        try:
+            current = self.sources.originals.snapshot(self.request_id)
+            valid = (
+                bool(self.original_context.sources)
+                and current.sources == self.original_context.sources
+            )
+        except rpa_session.RpaSessionError as error:
+            return (DownloadError(error.code, "发票原件会话核验失败"),)
+        except Exception:
+            valid = False
+        if runtime_control.stop_requested():
+            return (_stop_error(),)
+        return (
+            ()
+            if valid
+            else (
+                DownloadError(
+                    "resource_ownership_untrusted", "发票原件批量下载归属已变化"
+                ),
+            )
         )
+
+    def _cached(self, resource) -> dict | None:
+        if not self.reuse_cache:
+            return None
+        entry = _cached_attachment_entry(
+            self.dest_dir,
+            resource,
+            request_id=self.cache_request_id,
+            flow_key=self.cache_flow_key,
+            legacy_resources=self.legacy_resources,
+            migrate_legacy=self.original_context is None,
+        )
+        if entry and resource.get("_invoice_original"):
+            path = _resolve_stored_path(self.dest_dir, entry.get("path"))
+            if (
+                entry.get("invoice_original_source") != resource["_invoice_original"]
+                or not entry.get("content_sha256")
+                or entry["content_sha256"] != _attachment_content_sha256(path)
+            ):
+                return None
+        return (
+            _manifest_entry_to_item(self.dest_dir, resource, entry) if entry else None
+        )
+
+    def _direct(self, resource) -> TransferOutcome:
+        if resource.get("_invoice_original") and self.original_context is not None:
+            outcome = self.sources.originals.read(
+                self.original_context,
+                resource,
+                dest_dir=self.dest_dir,
+                timeout_sec=self.timeout_sec,
+            )
+        else:
+            outcome = self.sources.transfer.direct(
+                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+            )
+        if isinstance(outcome, Downloaded):
+            return Downloaded(self.content.share(outcome.path, newly_downloaded=True))
+        return outcome
+
+    def _obtain(self):
+        pending = []
+        for index, resource in enumerate(self.targets):
+            cached = self._cached(resource)
+            if cached:
+                cached["path"] = str(self.content.share(Path(cached["path"])))
+                self.outcomes[index] = _Cached(cached)
+            else:
+                pending.append((index, resource))
+        raw_concurrency = str(
+            os.environ.get("OA_ATTACHMENT_DOWNLOAD_CONCURRENCY") or ""
+        ).strip()
+        if not pending:
+            return
+        with ThreadPoolExecutor(
+            max_workers=_download_worker_count(len(pending), raw_concurrency)
+        ) as executor:
+            futures = [
+                (index, executor.submit(copy_context().run, self._direct, resource))
+                for index, resource in pending
+            ]
+            for index, future in futures:
+                try:
+                    self.outcomes[index] = future.result()
+                except Exception as error:
+                    self.outcomes[index] = Failed(
+                        DownloadError(
+                            "attachment_download_failed",
+                            f"{resource_name(self.targets[index]) or 'attachment.bin'}: 附件下载失败: {type(error).__name__}",
+                        )
+                    )
+
+    def _expanded(self, resource, item, *, cached):
+        item, error = archives._attach_archive_children(self.dest_dir, resource, item)
+        if error:
+            code = (
+                "attachment_download_failed" if cached else "attachment_archive_failed"
+            )
+            return Failed(DownloadError(code, error))
+        return item
+
+    def _materialize_one(self, resource, outcome):
+        if isinstance(outcome, _Cached):
+            return self._expanded(resource, outcome.item, cached=True)
+        if isinstance(outcome, Unavailable):
+            outcome = self.sources.transfer.browser(
+                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+            )
+            if isinstance(outcome, Downloaded):
+                outcome = Downloaded(
+                    self.content.share(outcome.path, newly_downloaded=True)
+                )
+        if not isinstance(outcome, Downloaded):
+            return outcome
+        path = outcome.path
+        if not remote.valid_attachment_file(path):
+            code = remote._file_download_fail_code(path) or "attachment_download_failed"
+            return Failed(
+                DownloadError(
+                    code, f"{resource_name(resource) or path.name}: 下载文件无效"
+                )
+            )
+        item = {
+            "resource_id": str(resource.get("id") or ""),
+            "name": resource_name(resource) or path.name,
+            "path": str(path),
+            "reused": False,
+        }
+        return self._expanded(resource, item, cached=False)
+
+    def _materialize(self):
+        for resource, outcome in zip(self.targets, self.outcomes):
+            item = self._materialize_one(resource, outcome)
+            if isinstance(item, Failed):
+                self.errors.append(item.error)
+                if item.error.code in _FATAL_DOWNLOAD_ERROR_CODES:
+                    self.errors.insert(0, self.errors.pop())
+                    break
+            elif isinstance(item, dict):
+                self.items.append(item)
+                self.cache_entries.append((resource, item))
+
+    def _publish_cache(self):
+        for resource, item in self.cache_entries:
+            metadata = {}
+            if resource.get("_invoice_original"):
+                digest = _attachment_content_sha256(Path(item["path"]))
+                if not digest:
+                    continue
+                metadata = {
+                    "invoice_original_source": dict(resource["_invoice_original"]),
+                    "content_sha256": digest,
+                }
+            _record_attachment_entry(
+                self.dest_dir,
+                resource,
+                item,
+                request_id=self.cache_request_id,
+                flow_key=self.cache_flow_key,
+                metadata=metadata,
+            )
 
 
 def download_resources(
     resources: List[Dict[str, Any]],
     *,
+    sources: DownloadSources,
     dest_dir: Path,
     timeout_sec: int,
     allow_browser_download: bool,
     request_id: str = "",
     flow_key: str = "",
     reuse_cache: bool = False,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, str]]]:
-    targets, identity_errors = _unique_attachment_resources(resources)
-    if identity_errors:
-        return [], identity_errors
-    targets = [dict(resource, _workflow_request_id=str(request_id).strip()) for resource in targets]
+) -> DownloadResult:
+    targets, errors = _unique_attachment_resources(resources, transfer=sources.transfer)
+    if errors:
+        return DownloadResult((), errors, "blocked")
+    targets = [
+        dict(resource, _workflow_request_id=str(request_id).strip())
+        for resource in targets
+    ]
     if not targets:
-        return [], []
+        return DownloadResult((), (), "complete")
     if not allow_browser_download and not remote.is_enabled(
         os.environ.get("OA_ALLOW_BROWSER_DOWNLOAD")
     ):
-        return [], [
-            {
-                "code": "attachment_download_disabled",
-                "message": "附件下载未授权，需传 --allow-browser-download",
-            }
-        ]
-
-    downloaded: List[Dict[str, Any]] = []
-    errors: List[Dict[str, str]] = []
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    existing_paths = frozenset(dest_dir.iterdir())
-    cache_request_id, cache_flow_key = _cache_scope(
-        dest_dir, request_id=request_id, flow_key=flow_key
-    )
-    legacy_manifest = _load_manifest(dest_dir)
-    legacy_resources = legacy_manifest.setdefault("resources", {})
-    if runtime_control.stop_requested():
-        return [], [
-            runtime_control.stop_error("已请求停止财务预审，停止本单附件下载")
-        ]
-
-    content_paths: dict[tuple[str, str], Path] = {}
-    content_lock = threading.Lock()
-
-    def share_content(path: Path, *, newly_downloaded: bool = False) -> Path:
-        with content_lock:
-            digest = _attachment_content_sha256(path)
-            if not digest:
-                raise RuntimeError("attachment_content_unreadable")
-            key = (path.suffix.lower(), digest)
-            previous = content_paths.get(key)
-            if previous is None:
-                content_paths[key] = path
-                return path
-            if (newly_downloaded and path != previous and path not in existing_paths
-                    and path.parent.resolve() == dest_dir.resolve() and not path.is_symlink()):
-                path.unlink()
-            return previous
-
-    def download(resource: Dict[str, Any]) -> Tuple[Path | None, str]:
-        path, error = _download_resource_direct(
-            resource, dest_dir=dest_dir, timeout_sec=timeout_sec, original_batch=original_batch,
+        return DownloadResult(
+            (),
+            (
+                DownloadError(
+                    "attachment_download_disabled",
+                    "附件下载未授权，需传 --allow-browser-download",
+                ),
+            ),
+            "blocked",
         )
-        if path is not None and not error:
-            path = share_content(path, newly_downloaded=True)
-        return path, error
-
-    outcomes: List[Dict[str, Any]] = [{} for _item in targets]
-    pending: List[tuple[int, Dict[str, Any]]] = []
-    original_batch = None
-    if any(resource.get('_invoice_original') for resource in targets):
-        from apps.oa.approvals.collection.invoice_originals import DownloadBatch
-
-        try:
-            original_batch = DownloadBatch(
-                str(request_id).strip(), base_url=remote.OA_HOST, cookie_header=remote._rpa_cookie_header,
-                native_read=remote._direct_session_cookie_download,
-            )
-        except rpa_session.RpaSessionError as error:
-            return [], [{'code': error.code, 'message': '发票原件会话核验失败'}]
-        except Exception:
-            return [], [{'code': 'resource_ownership_untrusted', 'message': '发票原件归属核验失败'}]
-        errors = original_batch.prepare(targets, timeout_sec=timeout_sec)
-        if errors:
-            return [], errors
-    for index, resource in enumerate(targets):
-        cached_entry = _cached_attachment_entry(
-            dest_dir,
-            resource,
-            request_id=cache_request_id,
-            flow_key=cache_flow_key,
-            legacy_resources=legacy_resources,
-            migrate_legacy=original_batch is None,
-        ) if reuse_cache else None
-        if cached_entry and original_batch is not None:
-            cached_entry = original_batch.accept_cache(
-                resource, cached_entry, _resolve_stored_path(dest_dir, cached_entry.get('path')),
-            )
-        if cached_entry:
-            cached_item = _manifest_entry_to_item(dest_dir, resource, cached_entry)
-            if cached_item:
-                cached_item["path"] = str(share_content(Path(cached_item["path"])))
-                outcomes[index] = {"item": cached_item}
-                continue
-        pending.append((index, resource))
-
-    raw_concurrency = str(
-        os.environ.get("OA_ATTACHMENT_DOWNLOAD_CONCURRENCY") or ""
-    ).strip()
-    worker_count = _download_worker_count(len(pending), raw_concurrency)
-    if pending:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            futures = [
-                (
-                    index,
-                    executor.submit(
-                        copy_context().run,
-                        download,
-                        resource,
-                    ),
-                )
-                for index, resource in pending
-            ]
-            for index, future in futures:
-                try:
-                    path, err = future.result()
-                except Exception as error:
-                    path, err = None, (
-                        f"{resource_name(targets[index]) or 'attachment.bin'}: "
-                        f"附件下载失败: {type(error).__name__}"
-                    )
-                outcomes[index] = {"path": path, "error": err}
-
-    cache_entries = []
-    for index, resource in enumerate(targets):
-        outcome = outcomes[index]
-        cached_item = outcome.get("item")
-        if isinstance(cached_item, dict):
-            item, archive_err = archives._attach_archive_children(
-                dest_dir, resource, cached_item
-            )
-            path = None
-            err = archive_err
-        else:
-            path = outcome.get("path")
-            err = str(outcome.get("error") or "")
-            if path is None and not err:
-                path, err = remote._download_resource_with_browser(
-                    resource,
-                    dest_dir=dest_dir,
-                    timeout_sec=timeout_sec,
-                )
-                if path is not None and not err:
-                    path = share_content(path, newly_downloaded=True)
-            item = None
-        if err:
-            code = remote.download_error_code(err)
-            errors.append({"code": code, "message": err})
-            if code in remote.FATAL_DOWNLOAD_ERROR_CODES:
-                errors.insert(0, errors.pop())
-                break
-            continue
-        if item is None and path is not None:
-            if not remote.valid_attachment_file(path):
-                code = remote._file_download_fail_code(path) or "attachment_download_failed"
-                errors.append(
-                    {
-                        "code": code,
-                        "message": f"{resource_name(resource) or path.name}: 下载文件无效",
-                    }
-                )
-                if code in remote.FATAL_DOWNLOAD_ERROR_CODES:
-                    errors.insert(0, errors.pop())
-                    break
-                continue
-            item = {
-                "resource_id": str(resource.get("id") or ""),
-                "name": resource_name(resource) or path.name,
-                "path": str(path),
-                "reused": False,
-            }
-            item, archive_err = archives._attach_archive_children(dest_dir, resource, item)
-            if archive_err:
-                errors.append(
-                    {"code": "attachment_archive_failed", "message": archive_err}
-                )
-                continue
-        if item is not None:
-            downloaded.append(item)
-            cache_entries.append((resource, item))
-    if original_batch is not None:
-        errors_after_download = original_batch.finish()
-        if errors_after_download:
-            return [], errors_after_download
-    for resource, item in cache_entries:
-        metadata = original_batch.cache_metadata(resource, Path(item['path'])) if original_batch else {}
-        if metadata is not None:
-            _record_attachment_entry(
-                dest_dir, resource, item,
-                request_id=cache_request_id, flow_key=cache_flow_key, metadata=metadata,
-            )
-    _remove_legacy_manifest(dest_dir)
-    return downloaded, errors
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    return _DownloadBatch(
+        targets,
+        sources=sources,
+        dest_dir=dest_dir,
+        timeout_sec=timeout_sec,
+        request_id=str(request_id).strip(),
+        flow_key=flow_key,
+        reuse_cache=reuse_cache,
+    ).run()

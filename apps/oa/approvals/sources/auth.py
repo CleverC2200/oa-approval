@@ -24,14 +24,6 @@ class AuthFailure(RuntimeError):
         self.diagnostics = [diagnostic]
 
 
-
-
-
-
-
-
-
-
 def configuration_status() -> dict[str, object]:
     load_local_env()
     configured = [name for name in REQUIRED_AUTH_ENV if str(os.environ.get(name) or "").strip()]
@@ -44,15 +36,6 @@ def configuration_status() -> dict[str, object]:
         "required": len(REQUIRED_AUTH_ENV),
         "source": source,
     }
-
-
-
-
-def host() -> str:
-    value = env("OA_BASE_URL").rstrip("/")
-    if not value:
-        raise RuntimeError("缺少 OA_BASE_URL")
-    return value
 
 
 def auth_pair() -> tuple[str, str]:
@@ -98,9 +81,10 @@ def _pem_file_from_b64(spk_b64: str, tmp_dir: str) -> str:
     return path
 
 
-def credentials(oa_uid: str = "") -> tuple[str, str]:
+def credentials(oa_uid: str = "", *, base_url: str) -> tuple[str, str]:
     try:
-        base_url = host()
+        if not base_url:
+            raise RuntimeError("缺少 OA_BASE_URL")
         app_id, secret = auth_pair()
         user_id = str(oa_uid or env("OA_UID")).strip()
         spk = env("OA_APP_PUBLIC_KEY")

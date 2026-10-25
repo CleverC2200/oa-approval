@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY
+
 from io import BytesIO
 
 from copy import deepcopy
@@ -17,6 +19,7 @@ import pytest
 from apps.oa.approvals.sources import oa as api
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.approvals.sources import downloads as remote
+from apps.oa.approvals.sources import originals as original_source
 from apps.oa.approvals.sources import auth
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
@@ -49,12 +52,10 @@ def original_transport(monkeypatch, tmp_path):
                 'oa': {'doc_id': '303', 'img_id': '202'}},
     )
     document.close()
-    monkeypatch.setattr(api, 'build_api', lambda _config: client)
+    monkeypatch.setattr(api, 'build_api', lambda _config, **kwargs: client)
     monkeypatch.setattr(flow, 'load_all_configs', lambda: [CONFIG])
     monkeypatch.setattr(official_sql, 'workflow_attachment_document', lambda *_args: '')
-    monkeypatch.setattr(remote, 'OA_HOST', 'https://oa.example.test')
-    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', set())
-    monkeypatch.setattr(remote, '_rpa_cookie_header', lambda *_a, **_kw: 'session=fixed')
+    monkeypatch.setattr(remote.DownloadTransfer, '_rpa_cookie_header', staticmethod(lambda *_a, **_kw: 'session=fixed'))
     monkeypatch.setattr(auth, 'env', lambda key, default='': '77' if key == 'OA_UID' else default)
     monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path / 'cache.sqlite3'))
 
@@ -82,7 +83,7 @@ def original_transport(monkeypatch, tmp_path):
                 from urllib.error import HTTPError
                 raise HTTPError(request.full_url, 403, 'forbidden', {}, None)
             if state.cloud_failure == 'redirect':
-                from apps.oa.approvals.collection.invoice_originals import _NoCloudRedirect
+                from apps.oa.approvals.sources.originals import _NoCloudRedirect
                 return _NoCloudRedirect().redirect_request(request, None, 302, '', {}, 'https://other.invalid/collect')
             if state.after_cloud_download:
                 state.after_cloud_download()
@@ -106,14 +107,14 @@ def original_transport(monkeypatch, tmp_path):
         return Response(json.dumps(body).encode(), request.full_url)
 
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
-    monkeypatch.setattr(attachments.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
-    monkeypatch.setattr(remote, '_download_resource_with_browser', lambda *_a, **_kw: pytest.fail('classified denial must stop'))
+    monkeypatch.setattr(original_source.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(remote.DownloadTransfer, 'browser', staticmethod(lambda *_a, **_kw: pytest.fail('classified denial must stop')))
     return state
 
 def collect_original(state, tmp_path):
     return collect_case('101', oa_api=state.client, configs=[state.client.config],
                         allow_browser_download=True, attachment_root=tmp_path / 'attachments',
-                        prepared_root=tmp_path / 'prepared')
+                        prepared_root=tmp_path / 'prepared', source_policy=POLICY)
 
 def test_collect_reads_linked_original_body_via_native_context(original_transport, tmp_path):
     state = original_transport
@@ -176,14 +177,13 @@ def test_cloud_download_rechecks_live_identity_before_preparation(original_trans
 
 @pytest.mark.parametrize('failure', ['json', 'truncated', 'oversized', 'http', 'redirect'])
 def test_cloud_failure_keeps_collection_unavailable(original_transport, tmp_path, monkeypatch, failure):
-    from apps.oa.approvals.collection import invoice_originals
     state = original_transport
     state.still_denied = True
     state.cloud_pdf = b'{}' if failure == 'json' else state.pdf
     if failure == 'truncated':
         state.cloud_headers['Content-Length'] = str(len(state.pdf) + 1)
     if failure == 'oversized':
-        monkeypatch.setattr(invoice_originals, '_MAX_ORIGINAL_BYTES', 16)
+        monkeypatch.setattr(original_source, '_MAX_ORIGINAL_BYTES', 16)
     state.cloud_failure = failure
     expected = {'http': 'attachment_access_denied', 'redirect': 'attachment_download_failed'}.get(
         failure, 'attachment_content_incomplete')
@@ -234,12 +234,14 @@ def test_bound_original_download_or_preparation_failure_stops_collection(origina
 def test_forged_original_hint_cannot_initialize_unlinked_document(original_transport, tmp_path):
     state = original_transport
     state.detail.pop('oa')
-    files, errors = attachments.download_resources([
+    download_result = attachments.download_resources([
         {'id': '202', 'name': 'original.pdf',
          'downloadUrl': 'https://oa.example.test/weaver/weaver.file.FileDownload?fileid=202',
          '_invoice_original': {'document_id': '303', 'native_file_id': '202'}},
     ], dest_dir=tmp_path / 'files', timeout_sec=1, allow_browser_download=True,
-        request_id='101', flow_key=CONFIG['flow_key'])
+        request_id='101', flow_key=CONFIG['flow_key'], sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert not files and errors[0]['code'] == 'resource_ownership_untrusted'
     assert not state.initialized
     assert not any(r[0] == '/api/doc/detail/basicInfo' for r in state.requests)
@@ -253,6 +255,19 @@ def test_multiple_file_records_keep_partial_body_coverage(original_transport, tm
     assert [f['body_read_status'] for f in invoice['files']] == ['content_read', 'not_read']
     from apps.oa.approvals.collection.invoice_originals import body_coverage
     assert body_coverage(invoice, material['resources'], material['prepared']) == 'partial_read'
+
+
+def test_invoice_body_rejects_parent_only_prepared_pages():
+    from apps.oa.materials.prepared import read_prepared
+    from apps.oa.approvals.collection.invoice_originals import bind_prepared_bodies
+
+    evidence = {'invoices': [{'files': [{'original_source': {'native_file_id': 'receipt'}}]}]}
+    prepared = read_prepared({
+        'manifest': [{'resource_id': 'receipt', 'status': 'pdf_rendered', 'page_count': 1, 'image_count': 1}],
+        'images': [{'resource_id': 'child', 'parent_resource_id': 'receipt', 'source_content_sha256': 'a' * 64}],
+    })
+    with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+        bind_prepared_bodies(evidence, [{'resource_id': 'receipt', 'media_type': 'application/pdf'}], prepared)
 
 @pytest.mark.parametrize('mapping', ['missing_document', 'multiple_pdfs', 'deleted_pdf'])
 def test_unmapped_original_keeps_authoritative_invoice_without_guessing_download(original_transport, tmp_path, mapping):
@@ -414,7 +429,7 @@ def many_originals(original_transport, monkeypatch):
         return Response(body, request.full_url)
 
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
-    monkeypatch.setattr(attachments.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
+    monkeypatch.setattr(original_source.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
     return state
 
 def test_many_originals_keep_full_body_coverage_with_bounded_context_reads(many_originals, tmp_path):
@@ -554,10 +569,12 @@ def test_explicit_original_cache_reuse_checks_current_document_and_bytes(
         '_invoice_original': source,
     }]
     before = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
-    files, errors = attachments.download_resources(
+    download_result = attachments.download_resources(
         targets, dest_dir=path.parent, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     after = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
     if cached_state == 'document_changed':
         assert files == [] and errors[0]['code'] == 'resource_ownership_untrusted'
@@ -597,7 +614,6 @@ def test_failed_mixed_original_batch_never_publishes_cache(
             return Response(request.full_url)
         return original_open(request, **kwargs)
 
-    monkeypatch.setattr(remote, 'EXTRA_DOWNLOAD_HOSTS', {'files.example.test'})
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     context = state.client.request_context
     reads = []
@@ -615,20 +631,24 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     monkeypatch.setattr(attachments.runtime_control, 'stop_requested', lambda: bool(stopped))
     state.client.request_context = changing_context
     destination = tmp_path / 'mixed'
-    files, errors = attachments.download_resources(
+    download_result = attachments.download_resources(
         targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'],
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     expected = 'resource_ownership_untrusted' if failure == 'binding_changed' else 'oa_run_stopped'
     assert files == [] and errors[0]['code'] == expected
     assert list(destination.glob('*.pdf'))
     state.detail['oa']['doc_id'] = '303'
     stopped.clear()
     state.client.request_context = context
-    files, errors = attachments.download_resources(
+    download_result = attachments.download_resources(
         targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
-    )
+     sources=attachments.build_download_sources(POLICY))
+    files = list(download_result.items)
+    errors = [error.to_record() for error in download_result.errors]
     assert errors == []
     assert [item['resource_id'] for item in files] == ['202', 'ordinary']
     assert all(item['reused'] is False for item in files)

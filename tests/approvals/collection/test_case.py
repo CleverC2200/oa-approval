@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from tests.approvals.source_fakes import POLICY, download_sources
+from apps.oa.approvals.sources.download_errors import Downloaded
+
 
 import tempfile
 
@@ -85,15 +88,15 @@ FLOW_CONFIGS = (
 def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, config):
     resource = {"id": "resource-001", "name": "scan.pdf", "downloadUrl": "/download/scan.pdf"}
     monkeypatch.setattr(case_bundle, "_travel_resources", lambda *_a, **_k: ([], []))
-    monkeypatch.setattr(case_bundle.evidence_packet, "logical_attachment_resources", lambda *_: [resource])
-    monkeypatch.setattr(case_bundle.attachments, "download_resources", lambda *_a, **_k: ([{
+    monkeypatch.setattr(case_bundle.evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
+    monkeypatch.setattr(case_bundle.attachments, "download_resources", lambda *_a, **_k: attachments.DownloadResult(({
         "resource_id": "resource-001", "name": "scan.pdf", "path": str(tmp_path / "scan.pdf"),
-    }], []))
+    },), (), "complete"))
     captured = []
 
     def prepare(_downloads, *, out_dir, compact_pdf=False, compact_spreadsheet=False):
         captured.append((compact_pdf, compact_spreadsheet))
-        return [], [], []
+        return case_bundle.attachment_extractors.PreparedMaterial({"images": [], "manifest": [], "structured_contents": []})
 
     monkeypatch.setattr(case_bundle.attachment_extractors, "prepare_materials", prepare)
     monkeypatch.setattr(case_bundle.invoice_buyers, "read_invoice_buyers", lambda *_a, **_k: {
@@ -101,7 +104,7 @@ def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, c
     })
     collect_case("recorded-request", oa_api=RecordedOaApi(config["workflow_id"], config["workflow_name"]),
                  configs=FLOW_CONFIGS, allow_browser_download=False,
-                 attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared")
+                 attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared", source_policy=POLICY)
     assert captured == [(config['flow_key'] == 'general_expense', config['flow_key'] == 'tpm_small_marketing_fee')]
 
 
@@ -187,14 +190,14 @@ def test_collection_preserves_populated_fields_and_reading_state(config: dict, c
         patch.object(invoice_buyers, "read_invoice_buyers", return_value={
             "read_status": "not_applicable", "invoices": [],
         }),
-        patch.object(travel_orders, "collect_evidence", return_value={
+        patch.object(travel_orders.TravelSource, "collect_evidence", return_value={
             "fields": [], "resources": [], "errors": [],
         }),
     ):
         material = collect_case(
             "recorded-request", oa_api=FieldApi(config["workflow_id"], config["workflow_name"]),
             configs=FLOW_CONFIGS, allow_browser_download=False,
-        )
+         source_policy=POLICY)
     fields = material["declared_fields"]
     assert [item["value"] for item in fields] == [
         "示例食品有限公司", "示例食品有限公司", "0000123456", "",
@@ -318,13 +321,13 @@ def test_archive_limit_error_reaches_flow_admission_without_preparing_partial_fi
     resource = {"id": "recorded-archive", "name": archive.name, "downloadUrl": "/recorded/too-many.zip"}
     monkeypatch.setattr(case_bundle, "_travel_resources", lambda **_kw: ([], []))
     monkeypatch.setattr(case_bundle, "_authority_facts", lambda **_kw: [])
-    monkeypatch.setattr(evidence_packet, "logical_attachment_resources", lambda *_: [resource])
-    monkeypatch.setattr(attachments, "_download_resource_direct", lambda *_a, **_kw: (archive, ""))
+    monkeypatch.setattr(evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
+    monkeypatch.setattr(attachments, "build_download_sources", lambda _policy: download_sources(lambda *_a, **_kw: Downloaded(archive)))
     monkeypatch.setattr(attachments.runtime_control, "stop_requested", lambda: False)
     prepared = []
     monkeypatch.setattr(attachment_extractors, "prepare_materials", lambda *_a, **_kw: prepared.append(True))
     with pytest.raises(RuntimeError, match="^attachment_archive_failed$"):
         collect_case("recorded-request", oa_api=RecordedOaApi("195039", "TPM小额市场费用报销申请流程"),
                      configs=FLOW_CONFIGS, allow_browser_download=True,
-                     attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared")
+                     attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared", source_policy=POLICY)
     assert prepared == []

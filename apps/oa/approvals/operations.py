@@ -3,6 +3,7 @@ from __future__ import annotations
 from apps.oa.approvals.rules import freeze_rules
 
 from contextlib import contextmanager
+from functools import partial
 from copy import deepcopy
 from datetime import datetime, timezone
 import fcntl
@@ -55,14 +56,14 @@ def expected_overseas_snapshot(material, plan):
         row["values"].update(update["values"])
     return expected
 
-def check_overseas_fields(api, request_id, material, plan):
+def check_overseas_fields(api, request_id, material, plan, *, origins):
     data,resources = api.request_context(request_id)
-    after = overseas_snapshot(data,resources,request_id,writable=False)
+    after = overseas_snapshot(data,resources,request_id,writable=False,origins=origins)
     return business.postcheck_fields_match(after,expected_overseas_snapshot(material,plan))
 
-def submit_overseas(api, writer, request_id, material, plan):
+def submit_overseas(api, writer, request_id, material, plan, *, origins):
     data,resources = api.request_context(request_id)
-    current = overseas_snapshot(data,resources,request_id)
+    current = overseas_snapshot(data,resources,request_id,origins=origins)
     business._require(business.stable_snapshot(current) == business.stable_snapshot(material["snapshot"]),"invoice_target_changed")
     details = business.detail_data(data,current,plan)
     fields_by_row = {tuple(row['key'].rsplit(':', 1)): set(row['field_names'].values())
@@ -76,17 +77,18 @@ def submit_overseas(api, writer, request_id, material, plan):
             "failure_code":SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
     pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
     done = handled_since(api.handled_rows(),request_id,started_at)
-    fields_match = check_overseas_fields(api,request_id,material,plan)
+    fields_match = check_overseas_fields(api,request_id,material,plan,origins=origins)
     result = verification_result(done,pending,submit_ok=True,fields_match=fields_match)
     return {**result,"failure_code":None if result["postcheck_done_hit"] else POSTCHECK_TIMEOUT}
 
 
 class Approval:
-    def __init__(self, root, *, api=None, configs=None, collector=None, writer=None):
+    def __init__(self, root, *, api=None, configs=None, collector=None, writer=None, source_policy=None):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.root / "approval.sqlite3")
         self.api, self.configs, self.collector, self.writer = api, configs, collector, writer
+        self.source_policy = source_policy
 
     def _api(self):
         if self.api is not None:
@@ -94,7 +96,7 @@ class Approval:
         from apps.oa.approvals.sources import oa as api
         from apps.oa.approvals import flows as flow
         self.configs = self.configs if self.configs is not None else flow.load_all_configs()
-        return api.build_api(self.configs[0])
+        return api.build_api(self.configs[0],source_policy=self.source_policy)
 
     def pending(self, workflows=None, batch_size=None, request_ids=None):
         rows = []
@@ -137,11 +139,11 @@ class Approval:
             with attachment_cache.runtime_root(self.root):
                 if task["workflow_key"] == "overseas_invoice":
                     from apps.oa.approvals.collection import overseas
-                    material = overseas.collect(self._api(),task["request_id"],directory)
+                    material = overseas.collect(self._api(),task["request_id"],directory,source_policy=self.source_policy)
                 else:
                     if self.collector is None:
                         from apps.oa.approvals.collection.case import collect_case
-                        self.collector = collect_case
+                        self.collector = partial(collect_case, source_policy=self.source_policy)
                     material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
                         allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared")
                     if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
@@ -227,16 +229,16 @@ class Approval:
                 if plan is not None:
                     if self.api is None and self.writer is None:
                         from apps.oa.approvals.sources.overseas import build_api
-                        read_api = write_api = build_api()
+                        read_api = write_api = build_api(source_policy=self.source_policy)
                     else:
                         read_api = self._api()
                         write_api = self.writer if self.writer is not None else self.api
-                    result = submit_overseas(read_api,write_api,task["request_id"],material,plan)
+                    result = submit_overseas(read_api,write_api,task["request_id"],material,plan,origins=self.source_policy.attachments)
                 else:
                     writer = self.writer
                     if writer is None:
                         from apps.oa.approvals.sources.writer import build_writer_api
-                        writer = build_writer_api()
+                        writer = build_writer_api(source_policy=self.source_policy)
                     result = writer.submit_and_verify(task["request_id"],opinion)
             except Exception:
                 result = {**verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
@@ -260,7 +262,7 @@ class Approval:
             if task["workflow_key"] == "overseas_invoice":
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
-                fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])))
+                fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),origins=self.source_policy.attachments)
             result = verification_result(handled,pending,fields_match=fields_match)
             status = submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
