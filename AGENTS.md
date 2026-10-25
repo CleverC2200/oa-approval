@@ -24,3 +24,17 @@
 代码不保留注释和文档字符串，以命名与结构表达逻辑；改动原因、取舍及有效验证写入提交说明。解释器指令保留执行所需的 shebang。不把数据库、凭据、原始附件及运行记录加入 Git。
 
 普通可逆实现取舍自行处理。用户要求先对齐时只读分析。提交说明用英文 Conventional Commits，解释原因与有效验证。
+
+## Agent skills
+
+### Issue tracker
+
+创建、查询或处理工程议题时，读取 [GitHub tracker 约定](docs/agents/issue-tracker.md)。
+
+### Triage labels
+
+分类议题或调整处理状态时，读取 [triage 标签映射](docs/agents/triage-labels.md)。
+
+### Domain docs
+
+消费领域术语或相关设计决策时，读取 [领域文档约定](docs/agents/domain.md)。

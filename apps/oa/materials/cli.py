@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 
@@ -16,6 +17,8 @@ def _parser():
     read = commands.add_parser('read', help='Read the complete material text without changing files.')
     read.add_argument('material_file', type=Path)
     read.add_argument('--format', choices=('text', 'json'), default='text')
+    read.add_argument('--view', choices=('full', 'outline'), default='full',
+                      help='Outline returns structural counts and original locations; it does not count as reading coverage.')
     recognize = commands.add_parser('recognize', help='Read attachments through the authorized model interface.')
     source = recognize.add_mutually_exclusive_group(required=True)
     source.add_argument('--file', action='append', type=Path, dest='files')
@@ -24,6 +27,9 @@ def _parser():
     recognize.add_argument('--page', type=int)
     recognize.add_argument('--prompt')
     recognize.add_argument('--output-dir', type=Path)
+    recognize.add_argument('--progress', action='store_true', help='Emit compact saved progress as JSON lines on stderr.')
+    progress = commands.add_parser('progress', help='Read compact recognition progress without requests or writes.')
+    progress.add_argument('report_file', type=Path)
     recognize.add_argument('--timeout-seconds', type=float, default=90)
     recognize.add_argument('--budget-seconds', type=float, default=1800)
     recognize.add_argument('--region', type=int, nargs=4, metavar=('X0', 'Y0', 'X1', 'Y1'))
@@ -44,6 +50,8 @@ def _recognize(args):
 
     values = vars(args).copy()
     values.pop('operation')
+    if values.pop('progress'):
+        values['on_progress'] = lambda event: print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
     if values['prompt'] is None:
         values['prompt'] = recognize.DEFAULT_PROMPT
     try:
@@ -56,6 +64,20 @@ def _recognize(args):
         return 0 if report['status'] in {'complete', 'skipped'} else 1
     except (OSError, ValueError) as error:
         code = str(error) if str(error) in {'attachment_api_key_missing', 'attachment_recognition_input_invalid', 'attachment_recognition_timeout_invalid', 'attachment_region_invalid', 'attachment_region_source_invalid', 'attachment_rotation_invalid', 'attachment_resource_invalid', 'attachment_page_invalid'} else 'attachment_recognition_start_failed'
+        print(json.dumps({'status': 'failed', 'error_code': code}))
+        return 1
+
+
+def _progress(args):
+    from apps.oa.materials.progress import progress
+
+    try:
+        print(json.dumps(progress(args.report_file), ensure_ascii=False))
+        return 0
+    except (OSError, ValueError) as error:
+        code = str(error)
+        if code not in {'attachment_recognition_report_missing', 'attachment_recognition_report_invalid'}:
+            code = 'attachment_recognition_report_unreadable'
         print(json.dumps({'status': 'failed', 'error_code': code}))
         return 1
 
@@ -75,16 +97,18 @@ def main(argv=None):
         return _recognize(args)
     if args.operation == 'compress':
         return _compress(args)
+    if args.operation == 'progress':
+        return _progress(args)
     try:
         if args.operation == 'read':
             from apps.oa.materials.read import read
 
-            text = read(args.material_file)
+            text = read(args.material_file, view=args.view)
             if args.format == 'text':
                 print(text, end='')
             else:
                 print(json.dumps({'status': 'complete', 'material_file': str(args.material_file.absolute()),
-                                  'text': text}, ensure_ascii=False))
+                                  **({'text': text} if args.view == 'full' else {'outline': json.loads(text)})}, ensure_ascii=False))
             return 0
         from apps.oa.materials.prepare import prepare
 

@@ -8,6 +8,8 @@ import sqlite3
 from uuid import uuid4
 
 
+MAX_INFLIGHT = 3
+AGENT_CLAIM_LIMIT = 5
 INFLIGHT_STATUSES = ("preparing", "reviewing", "reviewed", "submitting")
 
 
@@ -161,7 +163,7 @@ class Store:
             if not isinstance(agent_id,str) or not agent_id.strip():
                 return unclaimed("refused", "agent_identity_required")
             busy = [task for task in tasks if task["status"] in INFLIGHT_STATUSES]
-            if len(busy) >= 3:
+            if len(busy) >= MAX_INFLIGHT:
                 return unclaimed("waiting", "inflight_limit")
             if any(task["agent_id"] == agent_id for task in busy):
                 return unclaimed("waiting", "agent_busy")
@@ -183,7 +185,7 @@ class Store:
             previous = [task for task in tasks if task["agent_id"] == agent_id]
             if any(task["workflow_key"] != agent_workflow_key for task in previous):
                 return unclaimed("refused", "agent_generation_workflow_mismatch")
-            if len(previous) >= 5:
+            if len(previous) >= AGENT_CLAIM_LIMIT:
                 return unclaimed("refused", "agent_claim_limit")
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
             return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"])}
@@ -291,6 +293,10 @@ class Store:
             "contents":[dict(row) for row in self.connection.execute("SELECT c.* FROM attachment_contents c JOIN attachments a ON a.id=c.attachment_id WHERE a.task_id=? ORDER BY c.id",(task_id,))],
             "reviews":[dict(row) for row in self.connection.execute("SELECT * FROM reviews WHERE task_id=? ORDER BY id",(task_id,))],
             "submissions":[dict(row) for row in self.connection.execute("SELECT * FROM submissions WHERE task_id=? ORDER BY id",(task_id,))]}
+
+    def submissions(self, run_id):
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM submissions WHERE run_id=? ORDER BY id", (run_id,))]
 
     def close(self, run_id):
         summary = {}
