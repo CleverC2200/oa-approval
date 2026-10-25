@@ -26,6 +26,7 @@ def main(argv=None):
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
+    status.add_argument('--view', choices=['batch'], help='紧凑批次范围、Agent 占用和账本验收事实')
     show = commands.add_parser('show', help='只读任务、材料、审核和提交事实，不调用OA')
     show.add_argument('--task-id', type=int, required=True)
     show.add_argument('--full', action='store_true')
@@ -73,7 +74,7 @@ def main(argv=None):
                 return 0
         if args.operation in {'status', 'show'}:
             result = query(root, args.operation, run_id=getattr(args, 'run_id', None),
-                           task_id=getattr(args, 'task_id', None), full=args.full)
+                           task_id=getattr(args, 'task_id', None), full=args.full, view=getattr(args, 'view', None))
             emit(result)
             return 0
         request = {'operation': args.operation}
