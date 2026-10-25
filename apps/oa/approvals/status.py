@@ -51,7 +51,8 @@ def submission_acceptance(store, run_id, tasks):
             receipt = json.loads(submission['result_json'])
             verified = (submission['status'] == 'submitted' and submission['completed_at'] is not None
                         and all(receipt.get(key) is True for key in ('submit_ok', 'done_hit', 'postcheck_done_hit'))
-                        and receipt.get('fields_match') is not False)
+                        and (receipt.get('fields_match') is True if task['workflow_key'] == 'overseas_invoice'
+                             else receipt.get('fields_match') is not False))
             attempts.append({key: submission[key] for key in
                 ('id', 'review_id', 'status', 'started_at', 'completed_at')} | {
                 key: receipt.get(key) for key in

@@ -281,3 +281,21 @@ def test_batch_queue_exhaustion_keeps_unknown_submission_blocked(tmp_path, capsy
     assert status['run']['status'] == 'blocked'
     assert status['acceptance']['unknown_attempt_count'] == 1
     assert status['acceptance']['all_verified'] is False
+
+
+def test_overseas_acceptance_requires_explicit_field_verification(tmp_path, capsys):
+    app = create_demo(tmp_path)
+    run_id = app.store.start_run([
+        {'request_id': str(value), 'received_at': '2026-10-22 10:00:00', 'workflow_key': 'overseas_invoice'}
+        for value in range(101, 104)], batch_size=3)
+    verified = {'submit_ok': True, 'done_hit': True, 'postcheck_done_hit': True}
+    for task, fields in zip(app.store.tasks(run_id), [{}, {'fields_match': False}, {'fields_match': True}]):
+        record_submission(app.store, task['id'], status='submitted', result={**verified, **fields})
+    assert cli.main(['--root', str(tmp_path), 'status', '--run-id', run_id, '--view', 'batch']) == 0
+    acceptance = json.loads(capsys.readouterr().out)['acceptance']
+    assert acceptance['verified_attempt_count'] == 1
+    assert acceptance['unverified_attempt_count'] == 2
+    assert acceptance['all_verified'] is False
+    receipts = [task['submissions'][0] for task in acceptance['tasks']]
+    assert [item['fields_match'] for item in receipts] == [None, False, True]
+    assert [item['verified'] for item in receipts] == [False, False, True]
