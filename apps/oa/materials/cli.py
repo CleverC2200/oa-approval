@@ -16,6 +16,8 @@ def _parser():
     read = commands.add_parser('read', help='Read the complete material text without changing files.')
     read.add_argument('material_file', type=Path)
     read.add_argument('--format', choices=('text', 'json'), default='text')
+    read.add_argument('--view', choices=('full', 'outline'), default='full',
+                      help='Outline returns structural counts and original locations; it does not count as reading coverage.')
     recognize = commands.add_parser('recognize', help='Read attachments through the authorized model interface.')
     source = recognize.add_mutually_exclusive_group(required=True)
     source.add_argument('--file', action='append', type=Path, dest='files')
@@ -79,12 +81,12 @@ def main(argv=None):
         if args.operation == 'read':
             from apps.oa.materials.read import read
 
-            text = read(args.material_file)
+            text = read(args.material_file, view=args.view)
             if args.format == 'text':
                 print(text, end='')
             else:
                 print(json.dumps({'status': 'complete', 'material_file': str(args.material_file.absolute()),
-                                  'text': text}, ensure_ascii=False))
+                                  **({'text': text} if args.view == 'full' else {'outline': json.loads(text)})}, ensure_ascii=False))
             return 0
         from apps.oa.materials.prepare import prepare
 
