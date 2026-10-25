@@ -121,13 +121,19 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
     return routes
 
 
-def read(material_file: Path) -> str:
+def read(material_file: Path, *, view: str = 'full') -> str:
     material_file = Path(material_file).absolute()
     if material_file.is_symlink() or not material_file.is_file():
         raise ValueError('material_file_invalid')
     material = json.loads(material_file.read_text())
     if not isinstance(material, dict):
         raise ValueError('material_file_invalid')
+    if view == 'outline':
+        from apps.oa.materials.navigation import outline
+
+        return _json(outline(material)) + '\n'
+    if view != 'full':
+        raise ValueError('material_read_view_invalid')
     view = render(material)
     routes = _image_tool_routes(material, material_file)
     if routes:
