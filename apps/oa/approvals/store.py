@@ -7,6 +7,8 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from apps.oa.materials.reports import review_contents
+
 
 MAX_INFLIGHT = 3
 AGENT_CLAIM_LIMIT = 5
@@ -248,11 +250,7 @@ class Store:
     def review(self, task_id, opinion, recognition=None, observations=None):
         task = self.get_task(task_id)
         recognized = encoded(recognition)
-        contents = []
-        if isinstance(recognition,dict) and recognition.get("kind") == "deepseek_attachment_recognition":
-            contents = [{**part,"locator":part["evidence_ref"],"source":part.get("source") or "deepseek",
-                "content":part["answer"],"status":"read"} for part in recognition["parts"]]
-        contents.extend(observations or [])
+        contents = [*review_contents(recognition), *(observations or [])]
         with self.connection:
             self.connection.execute("INSERT OR IGNORE INTO reviews(task_id,run_id,opinion,recognition_json,material_sha256,material_file,frozen_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
                 (task_id,task["last_run_id"],opinion,recognized,task["material_sha256"],task["material_file"],task["frozen_json"],now()))
