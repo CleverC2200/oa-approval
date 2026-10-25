@@ -3,6 +3,8 @@ from pathlib import Path
 import subprocess
 import sys
 
+import pytest
+
 from apps.oa.approvals import cli
 from apps.oa.approvals.demo import create_demo
 
@@ -299,3 +301,30 @@ def test_overseas_acceptance_requires_explicit_field_verification(tmp_path, caps
     receipts = [task['submissions'][0] for task in acceptance['tasks']]
     assert [item['fields_match'] for item in receipts] == [None, False, True]
     assert [item['verified'] for item in receipts] == [False, False, True]
+
+
+@pytest.mark.parametrize(('workflow_key', 'fields', 'stored_status', 'completed_at', 'expected_status', 'verified'), [
+    ('general_expense', {}, 'submitted', 'finished', 'submitted', True),
+    ('overseas_invoice', {}, 'submitted', 'finished', 'submitted', False),
+    ('overseas_invoice', {'fields_match': True}, 'submitted', 'finished', 'submitted', True),
+    ('general_expense', {'fields_match': False}, 'submitted', 'finished', 'submitted', False),
+    ('general_expense', {'done_hit': 1}, 'submitted', 'finished', 'unknown', False),
+    ('general_expense', {}, 'unknown', 'finished', 'submitted', False),
+    ('general_expense', {}, 'submitted', None, 'submitted', False),
+])
+def test_receipt_assessment_preserves_legacy_facts_and_separates_task_status(
+        workflow_key, fields, stored_status, completed_at, expected_status, verified):
+    from apps.oa.approvals.receipts import assess_submission, submission_status
+
+    receipt = {'submit_ok': True, 'done_hit': True, 'postcheck_done_hit': True,
+               'legacy_evidence': {'unrecognized': ['kept']}, **fields}
+    submission = {'status': stored_status, 'completed_at': completed_at, 'result_json': json.dumps(receipt)}
+    original = submission.copy()
+
+    evidence = assess_submission(submission, workflow_key=workflow_key)
+
+    assert evidence.receipt == receipt
+    assert ('fields_match' in evidence.receipt) is ('fields_match' in fields)
+    assert evidence.verified is verified
+    assert submission_status(evidence.receipt) == expected_status
+    assert submission == original
