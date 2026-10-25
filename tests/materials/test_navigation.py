@@ -193,3 +193,92 @@ def test_outline_reports_matching_frozen_source_hashes_without_prepared_content(
         'content_sha256': 'a' * 64, 'sources': [
             {'resource_id': 'first', 'parent_resource_id': None},
             {'resource_id': 'second', 'parent_resource_id': None}]}]
+
+
+def test_real_collection_outline_keeps_archive_sources_and_page_counts(tmp_path, monkeypatch, capsys):
+    from io import BytesIO
+    from pathlib import Path
+    from zipfile import ZipFile
+
+    import fitz
+    from PIL import Image
+    import pytest
+
+    from apps.oa.approvals.collection import downloads
+    from apps.oa.approvals.operations import Approval
+    from apps.oa.approvals.sources.download_errors import Downloaded
+    from tests.approvals.collection.test_case import FLOW_CONFIGS, RecordedOaApi
+    from tests.approvals.source_fakes import POLICY, download_sources
+
+    image = BytesIO()
+    Image.new('RGB', (2, 2), 'white').save(image, format='PNG')
+    with fitz.open() as document:
+        document.new_page().insert_text((20, 20), 'Synthetic page one')
+        document.new_page().insert_text((20, 20), 'Synthetic page two')
+        pdf = document.tobytes()
+    original = tmp_path / 'synthetic.zip'
+    with ZipFile(original, 'w') as archive:
+        archive.writestr('scan.png', image.getvalue())
+        archive.writestr('nested/report.pdf', pdf)
+        archive.writestr('invoice.xml', '<Invoice><Amount>12.50</Amount></Invoice>')
+    monkeypatch.setattr(downloads, 'build_download_sources', lambda _policy:
+                        download_sources(lambda *_a, **_kw: Downloaded(original)))
+
+    class ArchiveOA(RecordedOaApi):
+        def pending_rows(self):
+            return [{'request_id': 'synthetic', 'received_at': '2026-10-25 09:00:00',
+                     'operator_id': 'tester', 'workflow_key': 'business_entertainment'}]
+
+        def handled_rows(self):
+            return []
+
+        def request_context(self, request_id):
+            workflow, _ = super().request_context(request_id)
+            workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'] = [
+                {'workflowRequestTableFields': [{'fieldName': 'attachment', 'fieldShowName': '附件',
+                  'filedHtmlShow': f'<a href="/news/download.do?fileid={rid}&filename={rid}.zip">archive</a>'}]}
+                for rid in ('archive-a', 'archive-b')]
+            return workflow, [{'id': rid, 'name': rid + '.zip', 'downloadUrl': '/synthetic/' + rid + '.zip'}
+                              for rid in ('archive-a', 'archive-b')]
+
+    app = Approval(tmp_path / 'runtime', api=ArchiveOA('138024', '业务招待费报销申请流程'),
+                   configs=FLOW_CONFIGS, source_policy=POLICY)
+    task = app.collect(app.pending()['run_id'], agent_id='archive-agent', expected_task_id=1,
+                       agent_workflow_key='business_entertainment')
+    material_file = Path(task['material_file'])
+    material = json.loads(material_file.read_text())
+    assert all('extracted_files' not in resource for resource in material['resources'])
+    before = material_file.read_bytes(), Path(task['rule_file']).read_bytes()
+
+    assert cli.main(['read', str(material_file), '--view', 'outline', '--format', 'json']) == 0
+    outline = json.loads(capsys.readouterr().out)['outline']
+    assert outline['counts']['root_resources'] == 2
+    assert outline['counts']['logical_resources'] == 8
+    assert outline['counts']['archive_child_resources'] == 6
+    assert outline['counts']['prepared_images'] == 6
+    assert outline['counts']['structured_contents'] == 4
+    resources = {item['resource_id']: item for item in outline['navigation']['resources']}
+    matching_sources = {frozenset(source['resource_id'] for source in group['sources'])
+                        for group in outline['content_reuse']['matching_source_content']}
+    assert matching_sources == {frozenset({'archive-a::1', 'archive-b::1'}),
+                                frozenset({'archive-a::2', 'archive-b::2'}),
+                                frozenset({'archive-a::3', 'archive-b::3'})}
+    for rid, owner in [('archive-a', 'detail[0].row[0]'), ('archive-b', 'detail[0].row[1]')]:
+        assert resources[rid]['owner_detail_id'] == owner
+        for suffix, archive_path in [('::1', 'scan.png'), ('::2', 'nested/report.pdf'), ('::3', 'invoice.xml')]:
+            child = resources[rid + suffix]
+            assert child['parent_resource_id'] == rid
+            assert child['owner_detail_id'] == owner
+            assert child['source_field_path'] == owner + '.field[0]'
+            assert child['archive_path'] == archive_path
+            assert Path(child['original_path']).is_file()
+            target = material
+            for part in child['pointer'].strip('/').split('/'):
+                target = target[int(part)] if isinstance(target, list) else target[part]
+            assert target['source_resource_id'] == rid + suffix
+            assert target['source_path'] == child['original_path']
+    assert (material_file.read_bytes(), Path(task['rule_file']).read_bytes()) == before
+    assert app.submit(task['task_id'], opinion='合成材料预览')['status'] == 'preview'
+    Path(resources['archive-a::3']['original_path']).write_text('changed synthetic source')
+    with pytest.raises(ValueError, match='frozen_material_changed'):
+        app.submit(task['task_id'], opinion='合成材料预览')

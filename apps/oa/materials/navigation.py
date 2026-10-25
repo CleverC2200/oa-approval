@@ -25,6 +25,48 @@ def _resources(resources: list, pointer: str = '/resources', parent: str | None 
                               resource.get('resource_id'))
 
 
+def _prepared_sources(prepared: dict):
+    for section in ('images', 'structured_contents', 'manifest'):
+        for index, item in enumerate(_records(prepared, section)):
+            pointer = f'/prepared/{section}/{index}'
+            yield pointer, item
+            for child_index, child in enumerate(_records(item, 'skipped_videos')):
+                yield f'{pointer}/skipped_videos/{child_index}', child
+
+
+def _resource_entries(resources: list, prepared: dict) -> list:
+    entries = list(_resources(resources))
+    known = {item.get('resource_id') for _, item, _ in entries}
+    archives = {item.get('resource_id') for item in _records(prepared, 'manifest')
+                if item.get('status') == 'archive_extracted'}
+    for pointer, item in _prepared_sources(prepared):
+        resource_id = item.get('source_resource_id') or item.get('resource_id')
+        parent = item.get('parent_resource_id')
+        if not resource_id or resource_id in known:
+            continue
+        if 'source_resource_id' not in item and (parent not in archives or item.get('kind') == 'docx_image'):
+            continue
+        entries.append((pointer, {**item, 'resource_id': resource_id,
+                                  'path': item.get('source_path')}, parent))
+        known.add(resource_id)
+    return entries
+
+
+def _resource_navigation(entries: list) -> list:
+    by_id = {item.get('resource_id'): item for _, item, _ in entries}
+    navigation = []
+    for pointer, resource, parent in entries:
+        owner = by_id.get(parent, {})
+        navigation.append({
+            'pointer': pointer, 'resource_id': resource.get('resource_id'), 'parent_resource_id': parent,
+            'owner_detail_id': resource.get('owner_detail_id') or owner.get('owner_detail_id'),
+            'source_field_path': resource.get('source_field_path') or owner.get('source_field_path'),
+            'original_path': resource.get('local_readonly_path') or resource.get('path'),
+            **({'archive_path': resource['archive_path']} if 'archive_path' in resource else {}),
+        })
+    return navigation
+
+
 def _reuse(resource_entries: list, prepared: dict) -> dict:
     sources = {}
     paths = {}
@@ -32,11 +74,13 @@ def _reuse(resource_entries: list, prepared: dict) -> dict:
         digest = resource.get('source_content_sha256') or resource.get('content_sha256')
         if digest:
             sources.setdefault(digest, {})[(resource.get('resource_id'), parent)] = None
+    parents = {item.get('resource_id'): parent for _, item, parent in resource_entries}
     for section in ('images', 'structured_contents'):
         for index, item in enumerate(prepared.get(section) or []):
             digest = item.get('source_content_sha256')
             if digest:
-                sources.setdefault(digest, {})[(item.get('resource_id'), item.get('parent_resource_id'))] = None
+                resource_id = item.get('source_resource_id') or item.get('resource_id')
+                sources.setdefault(digest, {})[(resource_id, parents.get(resource_id, item.get('parent_resource_id')))] = None
             if item.get('path'):
                 paths.setdefault(item['path'], []).append(f'/prepared/{section}/{index}')
     return {
@@ -58,7 +102,7 @@ def outline(material: dict) -> dict:
         raise ValueError('material_file_invalid')
     images = _records(prepared, 'images')
     structured = _records(prepared, 'structured_contents')
-    resource_entries = list(_resources(resources))
+    resource_entries = _resource_entries(resources, prepared)
     tables = {}
     for field in fields:
         match = re.fullmatch(r'(detail\[[0-9]+\])\.row\[([0-9]+)\]\.field\[[0-9]+\]', str(field.get('path') or ''))
@@ -82,12 +126,7 @@ def outline(material: dict) -> dict:
         'navigation': {
             'fields': [_location('declared_fields', index) | {'field_path': field.get('path')}
                        for index, field in enumerate(fields)],
-            'resources': [{'pointer': pointer, 'resource_id': resource.get('resource_id'),
-                           'parent_resource_id': parent, 'owner_detail_id': resource.get('owner_detail_id'),
-                           'source_field_path': resource.get('source_field_path'),
-                           'original_path': resource.get('local_readonly_path') or resource.get('path'),
-                           **({'archive_path': resource['archive_path']} if 'archive_path' in resource else {})}
-                          for pointer, resource, parent in resource_entries],
+            'resources': _resource_navigation(resource_entries),
             'images': [_location('prepared.images', index) | {
                 'resource_id': page.get('resource_id'), 'parent_resource_id': page.get('parent_resource_id'),
                 'page_number': location['page_number'], 'evidence_ref': location['evidence_ref'],
