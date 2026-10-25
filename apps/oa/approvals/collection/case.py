@@ -17,6 +17,7 @@ from apps.oa.approvals.collection import invoice_originals
 from apps.oa.approvals.sources import official_sql
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources import travel as travel_orders
+from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 
 
 _FIELD_RESOURCE_RE = re.compile(r"^field_(detail_\d+)_(\d+)_\d+$")
@@ -343,64 +344,20 @@ def _prepare_packaging_resources(
 
 
 def _travel_resources(
-    *,
-    config: dict[str, Any],
-    workflow: dict[str, Any],
-    request_id: str,
-    allow_browser_download: bool,
-    attachment_timeout_sec: int,
-    attachment_scan: dict[str, Any] | None = None,
-    travel_source,
-) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
+    *, config, workflow, request_id, allow_browser_download,
+    attachment_timeout_sec, travel_source,
+) -> TravelEvidence:
     if str(config.get("flow_key") or "") != "travel_expense":
-        return [], []
+        return TravelEvidence.empty()
     result = travel_source.collect_evidence(
-        config,
-        workflow,
-        request_id,
-        allow_browser_download=allow_browser_download,
+        config, workflow, request_id, allow_browser_download=allow_browser_download,
         timeout_sec=attachment_timeout_sec,
     )
-    errors = [item for item in result.get("errors", []) if isinstance(item, dict)]
-    if errors:
-        error = errors[0]
-        raise CollectionFailure(
-            str(error.get("code") or "travel_attachment_failed"),
-            error.get("counts"),
-            error.get("diagnostics"),
-        )
-    resources = [item for item in result.get("resources", []) if isinstance(item, dict)]
-    for resource in resources:
-        if (
-            str(resource.get("source") or "") != "travel_platform"
-            or str(resource.get("source_request_id") or "") != request_id
-            or not str(resource.get("discovery_ref") or "").startswith(
-                "travel_platform:"
-            )
-        ):
-            raise RuntimeError("resource_ownership_untrusted")
-    fields = [
-        {
-            "source": "travel_platform",
-            "name": str(item.get("name") or ""),
-            "value": str(item.get("value") or ""),
-            "subject_ref": str(item.get("subject_ref") or item.get("name") or ""),
-        }
-        for item in result.get("fields", [])
-        if isinstance(item, dict)
-        and str(item.get("name") or "").strip()
-        and str(item.get("value") or "").strip()
-    ]
-    scan = result.get("attachment_scan") or {}
-    if scan and (
-        scan.get("source") != "travel_platform"
-        or scan.get("source_request_id") != request_id
-        or not str(scan.get("discovery_ref") or "").startswith("travel_platform:")
-    ):
-        raise RuntimeError("resource_ownership_untrusted")
-    if attachment_scan is not None:
-        attachment_scan.update(scan)
-    return resources, fields
+    if result.errors:
+        error = result.errors[0]
+        raise CollectionFailure(error.code or "travel_attachment_failed", error.counts, list(error.diagnostics))
+    result.require_request_binding(request_id)
+    return result
 
 
 def _merge_resources(
@@ -523,16 +480,17 @@ def collect_case(
         workflow,
         raw_resources, origins=source_policy.attachments,
     )
-    travel_scan: dict[str, Any] = {}
-    discovered_resources, travel_facts = _travel_resources(
+    travel_evidence = _travel_resources(
         config=config,
         workflow=workflow,
         request_id=str(request_id),
         allow_browser_download=allow_browser_download,
         attachment_timeout_sec=attachment_timeout_sec,
-        attachment_scan=travel_scan, travel_source=travel_source,
+        travel_source=travel_source,
     )
-    authority_facts.extend(travel_facts)
+    discovered_resources = list(travel_evidence.download_targets)
+    travel_scan = travel_evidence.attachment_scan_record() or {}
+    authority_facts.extend(travel_evidence.facts)
     original_resources = invoice_originals.resources(
         str(request_id), workflow, str(config.get("flow_key") or ""), invoice_evidence,
         base_url=source_policy.attachments.oa_origin,
@@ -552,35 +510,20 @@ def collect_case(
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
         source_resources = _merge_resources(form_resources, discovered_resources, origins=source_policy.attachments)
-        inventory = travel_scan.get("inventory") or []
-        source_file_ids = {_trip_content_id(item) for item in source_resources}
-        inventory_complete = all(
-            item.get("reason") == "empty_placeholder"
-            or (item.get("reason") == "downloadable" and item.get("file_ref") in source_file_ids)
-            for item in inventory
+        coverage = travel_evidence.coverage(
+            source_file_ids={_trip_content_id(item) for item in source_resources},
+            source_resource_count=len(source_resources), declared_count=declared_attachment_count,
         )
-        trusted_source_sighting_count = len(inventory) if inventory else len(source_resources)
-        if (
-            not inventory_complete
-            or (
-                declared_attachment_count is not None
-                and trusted_source_sighting_count < declared_attachment_count
-            )
-        ):
+        if not coverage.complete:
             raise CollectionFailure(
                 "travel_attachment_resources_incomplete",
-                {
-                    "declared_attachment_count": declared_attachment_count,
+                {**coverage.counts,
                     "discovered_resource_count": len(logical_resources),
                     "form_resource_count": len(form_resources),
                     "travel_resource_count": len(discovered_resources),
-                    "trusted_source_sighting_count": trusted_source_sighting_count,
-                    "native_attachment_record_count": len(inventory),
-                    "empty_placeholder_count": sum(item.get("reason") == "empty_placeholder" for item in inventory),
-                    "unique_source_resource_count": len(source_resources),
                     "invoice_original_resource_count": len(original_resources),
                 },
-                inventory + [{"stage": "attachment_count", "reason": "source_inventory_incomplete"}],
+                list(coverage.diagnostics),
             )
     descriptors = [
         _resource_descriptor(item, request_id=str(request_id))
