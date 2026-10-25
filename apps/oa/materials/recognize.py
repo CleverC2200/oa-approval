@@ -446,10 +446,11 @@ def _plan_reading(snapshot: _InputSnapshot, selection: _Selection) -> _ReadPlan:
 
 
 class _RecognitionSession:
-    def __init__(self, options: _RecognitionOptions, *, post, monotonic):
+    def __init__(self, options: _RecognitionOptions, *, post, monotonic, on_progress=None):
         self.options = options
         self._post = post
         self._monotonic = monotonic
+        self._on_progress = on_progress
         options.output_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
         self.report_file = options.output_dir / 'recognition.json'
         self.report = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,
@@ -466,6 +467,10 @@ class _RecognitionSession:
     def _save(self) -> None:
         runtime_control.write_control_bytes_atomic(
             self.report_file, (json.dumps(self.report, ensure_ascii=False) + '\n').encode())
+        if self._on_progress is not None:
+            from apps.oa.materials.progress import summarize
+
+            self._on_progress(summarize(self.report, self.report_file))
 
     def _check_budget(self) -> None:
         if self._monotonic() >= self.deadline:
@@ -476,6 +481,7 @@ class _RecognitionSession:
             self._snapshot.load(self.options)
             self.report.update(self._snapshot.report_fields(self.options.selection))
             plan = _plan_reading(self._snapshot, self.options.selection)
+            self.report['read_plan'] = [part['part_id'] for part, _ in plan.parts]
             key = _api_key() if plan.has_images else ''
             if plan.has_images and not key:
                 raise ValueError('attachment_api_key_missing')
@@ -614,7 +620,8 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
               prompt: str = DEFAULT_PROMPT, output_dir: Path | None = None,
               timeout_seconds: float = 90, budget_seconds: float = 1800,
               region: list[int] | tuple[int, int, int, int] | None = None,
-              rotate: int = 0, resource_id: str | None = None, page: int | None = None) -> dict:
+              rotate: int = 0, resource_id: str | None = None, page: int | None = None,
+              on_progress=None) -> dict:
     if bool(files) == bool(material_file) or not isinstance(prompt, str) or not prompt.strip():
         raise ValueError('attachment_recognition_input_invalid')
     if resource_id is not None and (not material_file or not isinstance(resource_id, str) or not resource_id.strip()):
@@ -640,4 +647,4 @@ def recognize(*, files: list[Path] | None = None, material_file: Path | None = N
     output_dir = Path(output_dir or recognition_root / 'recognitions' / uuid4().hex).expanduser().absolute()
     options = _RecognitionOptions(files, material_file, prompt, output_dir, timeout_seconds, budget_seconds,
                                   _Selection(resource_id, page, region, rotate))
-    return _RecognitionSession(options, post=_post, monotonic=time.monotonic).run()
+    return _RecognitionSession(options, post=_post, monotonic=time.monotonic, on_progress=on_progress).run()
