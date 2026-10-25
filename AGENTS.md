@@ -25,6 +25,16 @@
 
 普通可逆实现取舍自行处理。用户要求先对齐时只读分析。提交说明用英文 Conventional Commits，解释原因与有效验证。
 
+### 预审规则与执行机制
+
+执行步骤统一见财务预审 Skill；下表区分已有程序约束与主 Agent 的执行约定。
+
+| 规则 | 执行机制与验证入口 |
+| --- | --- |
+| 批次、Agent 计数与回执事实 | SQLite 及 `approvals status --view batch`；`tests/approvals/test_capability_cli.py` |
+| 识别摘要与完整正文分离 | `materials recognize` stdout 与报告文件；`tests/materials/test_recognition_progress.py` |
+| 工具等待与状态接管 | 财务预审 Skill 的主 Agent 执行规则；原生工具调用发生在仓库 CI 之外 |
+
 ## Agent skills
 
 ### Issue tracker

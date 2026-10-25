@@ -39,7 +39,9 @@ bash .codex/python.sh -m apps.oa.materials progress /absolute/path/recognition.j
 
 `progress` 只读现有报告，不请求模型或 OA，不创建目录或恢复识别。摘要提供 `status`、`report_file`、`completed_parts`、`planned_parts`、`coverage`、`selection`，失败时提供 `error_code` 和可用的 `failed_part` 定位，不输出识别正文、提示词或凭据。读取计划尚未生成及不含计划的旧报告中，`planned_parts` 为 null。完成计数来自已原子保存的 `parts`；全部部分保存后仍需通过输入复验，状态才会成为 `complete`。定向或局部识别完成保留原覆盖范围；官方无附件显示 `skipped` 和 `reason=official_no_attachments`。不存在、无效或不可读报告返回明确失败，查询命令成功读取有效报告返回 0，报告本身的识别状态另看 `status`。
 
-工具返回 `report_file`，报告保留逐页/分区回答和来源。使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
+`recognize` 的最终 stdout 已是紧凑 JSON，包含状态、`report_file`、数字类型的 `parts` 数量、覆盖范围、选择范围、补充观察路径及失败原因。主 Agent 直接接管这份摘要；将 stdout 重定向保存时，原工具会话也应返回这份摘要，避免进程结束后再用 `jq` 或 `progress` 只查询相同状态和路径。完整逐页/分区回答和来源只保存在 `report_file`，由审核 Agent 完整读取。
+
+使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
 
 ```bash
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" \
