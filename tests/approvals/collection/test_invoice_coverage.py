@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from apps.oa.approvals.sources import travel_browser
+from tests.approvals.travel_fakes import recorded_observations
+
 from tests.approvals.source_fakes import POLICY
 
 import json
@@ -136,10 +139,10 @@ def test_six_finance_collectors_preserve_same_invoice_coverage(config, monkeypat
             return workflow, resources
 
         api.request_context = request_context
-        monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
-        monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(lambda *_a, **_k: [{
+        monkeypatch.setattr(travel_browser.BrowserAdapter, 'ensure_available', staticmethod(lambda: True))
+        recorded_observations(monkeypatch, lambda *_a, **_k: [{
             'text': 'SYNTHETIC-TRAVEL', 'resources': [], 'attachment_scan_status': 'empty',
-        }]))
+        }])
     material = collect_case('synthetic-request', oa_api=api, configs=[config],
                             allow_browser_download=config['flow_key'] == 'travel_expense', source_policy=POLICY)
     assert material['invoice_evidence']['invoices'][0]['fields']['total']['value'] == '43.00'

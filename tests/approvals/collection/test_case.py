@@ -1,4 +1,5 @@
 from __future__ import annotations
+from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 
 from tests.approvals.source_fakes import POLICY, download_sources
 from apps.oa.approvals.sources.download_errors import Downloaded
@@ -87,7 +88,7 @@ FLOW_CONFIGS = (
 @pytest.mark.parametrize("config", FLOW_CONFIGS, ids=lambda value: value['flow_key'])
 def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, config):
     resource = {"id": "resource-001", "name": "scan.pdf", "downloadUrl": "/download/scan.pdf"}
-    monkeypatch.setattr(case_bundle, "_travel_resources", lambda *_a, **_k: ([], []))
+    monkeypatch.setattr(case_bundle, "_travel_resources", lambda *_a, **_k: TravelEvidence.empty())
     monkeypatch.setattr(case_bundle.evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
     monkeypatch.setattr(case_bundle.attachments, "download_resources", lambda *_a, **_k: attachments.DownloadResult(({
         "resource_id": "resource-001", "name": "scan.pdf", "path": str(tmp_path / "scan.pdf"),
@@ -190,9 +191,7 @@ def test_collection_preserves_populated_fields_and_reading_state(config: dict, c
         patch.object(invoice_buyers, "read_invoice_buyers", return_value={
             "read_status": "not_applicable", "invoices": [],
         }),
-        patch.object(travel_orders.TravelSource, "collect_evidence", return_value={
-            "fields": [], "resources": [], "errors": [],
-        }),
+        patch.object(travel_orders.TravelSource, "collect_evidence", return_value=TravelEvidence.empty()),
     ):
         material = collect_case(
             "recorded-request", oa_api=FieldApi(config["workflow_id"], config["workflow_name"]),
@@ -319,7 +318,7 @@ def test_archive_limit_error_reaches_flow_admission_without_preparing_partial_fi
         for index in range(archives.ARCHIVE_MAX_FILES + 1):
             output.writestr(f"{index}.txt", "recorded")
     resource = {"id": "recorded-archive", "name": archive.name, "downloadUrl": "/recorded/too-many.zip"}
-    monkeypatch.setattr(case_bundle, "_travel_resources", lambda **_kw: ([], []))
+    monkeypatch.setattr(case_bundle, "_travel_resources", lambda **_kw: TravelEvidence.empty())
     monkeypatch.setattr(case_bundle, "_authority_facts", lambda **_kw: [])
     monkeypatch.setattr(evidence_packet, "logical_attachment_resources", lambda *_, **kwargs: [resource])
     monkeypatch.setattr(attachments, "build_download_sources", lambda _policy: download_sources(lambda *_a, **_kw: Downloaded(archive)))

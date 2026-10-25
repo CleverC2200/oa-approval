@@ -11,6 +11,7 @@ import pytest
 from apps.oa.approvals.collection import downloads as attachments
 from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import travel as travel_orders
+from apps.oa.approvals.sources import travel_hotel, travel_browser
 
 travel_source = travel_orders.TravelSource(POLICY)
 
@@ -42,9 +43,9 @@ def native_attachment_rows():
 def test_native_attachment_records_are_distinct_from_downloads_and_invoices(browser_transport):
     browser_transport.outcomes[True] = {'expense_rows': native_attachment_rows()}
     evidence = collect_travel(count='6')
-    assert evidence['errors'] == []
-    assert len(evidence['resources']) == 4
-    inventory = evidence['attachment_scan']['inventory']
+    assert evidence.errors == ()
+    assert len(evidence.download_targets) == 4
+    inventory = evidence.attachment_scan_record()['inventory']
     assert len(inventory) == 6
     assert [item['reason'] for item in inventory].count('empty_placeholder') == 2
     assert {item['owner_ref'] for item in inventory} == {'expense-a', 'expense-b', 'expense-c'}
@@ -59,46 +60,55 @@ def test_unreadable_attachment_record_is_not_an_empty_placeholder(browser_transp
     rows[0]['fjList'][0].update(change)
     browser_transport.outcomes[True] = {'expense_rows': rows}
     evidence = collect_travel(count='6')
-    assert evidence['errors'][0]['code'] == 'travel_attachment_resources_incomplete'
-    diagnostic = next(item for item in evidence['errors'][0]['diagnostics']
+    assert evidence.errors[0].code == 'travel_attachment_resources_incomplete'
+    diagnostic = next(item for item in evidence.errors[0].diagnostics
                       if item.get('attachment_ref') == 'attachment-a')
     assert diagnostic['reason'] in {'resource_address_missing', 'resource_address_invalid'}
-    assert 'synthetic-secret' not in json.dumps(evidence['errors'])
+    assert 'synthetic-secret' not in json.dumps([error.diagnostics for error in evidence.errors])
 
 
 def test_repeated_native_responses_do_not_inflate_attachment_record_count(browser_transport):
     rows = native_attachment_rows()
     browser_transport.outcomes[True] = {'expense_rows': rows + rows}
     evidence = collect_travel(count='6')
-    assert len(evidence['attachment_scan']['inventory']) == 6
-    assert len(evidence['resources']) == 4
+    assert len(evidence.attachment_scan_record()['inventory']) == 6
+    assert len(evidence.download_targets) == 4
 
 
 def test_wrong_candidate_cannot_supply_attachments_to_the_target_page(browser_transport, monkeypatch):
     wrong_url = 'https://trip.example.test/wrong'
     target_url = 'https://trip.example.test/target'
     browser_transport.candidate_outcomes = {
-        wrong_url: {'text': 'SYNTHETIC-OTHER-REQUEST', 'expense_rows': native_attachment_rows()},
+        wrong_url: {
+            'text': 'SYNTHETIC-OTHER-REQUEST',
+            'expense_rows': native_attachment_rows() + [{
+                'cpbh': '0300', 'ddlx': '03001', 'ywdh': 'BL-SYNTHETIC',
+                'fysm': '合成住宿', 'sjly': '3', 'id': 'expense-1', 'bxpch': 'batch-1',
+            }],
+            'hotel_payload': {'success': True, 'result': expense_result()},
+        },
         target_url: {'text': 'SYNTHETIC-TRAVEL 暂无数据'},
     }
     monkeypatch.setattr(travel_orders.TravelSource, '_oa_jump_url', staticmethod(lambda _: wrong_url))
     monkeypatch.setattr(travel_orders.TravelSource, '_trip_url', staticmethod(lambda _: target_url))
     candidates = []
-    read = travel_source._read_trip_candidate_results
+    read = travel_source.browser.read_attempt
 
     def capture(*args, **kwargs):
         result = read(*args, **kwargs)
         candidates.extend(result)
         return result
 
-    monkeypatch.setattr(travel_orders.TravelSource, '_read_trip_candidate_results', staticmethod(capture))
+    monkeypatch.setattr(travel_browser.BrowserAdapter, 'read_attempt', staticmethod(capture))
     evidence = collect_travel(count='6')
     wrong, target = candidates
-    assert len(wrong['attachment_inventory']) == 6
-    assert target['attachment_inventory'] == []
-    assert target['resources'] == target['hotel_order_details'] == target['diagnostics'] == []
-    assert evidence['resources'] == []
-    assert 'inventory' not in evidence.get('attachment_scan', {})
+    assert len(wrong.inventory) == 6
+    assert wrong.hotel_details[0]['order_detail'] == expense_result()
+    assert target.inventory == ()
+    assert target.download_targets == target.hotel_details == target.diagnostics == ()
+    assert evidence.download_targets == ()
+    assert not any(field['name'] == '商旅住宿订单详情' for field in evidence.facts)
+    assert 'inventory' not in (evidence.attachment_scan_record() or {})
     assert all(page.closed for browser in browser_transport.browsers for page in browser.pages)
 
     from apps.oa.approvals.collection import case as case_bundle
@@ -129,17 +139,67 @@ def hotel_transport(payload, status=200):
     return SimpleNamespace(request=SimpleNamespace(post=post)), calls
 
 
+def test_hotel_batch_keeps_each_protocol_request_and_semantics():
+    online = {'ddbh': 'online-1', 'jddz': '合成线上地址', 'extra': {'rows': [1, 2]}}
+    offline = expense_result(fkFymxKzbBean={'jddz': '合成申报地址'})
+    payloads = iter([{'result': online}, {'success': True, 'result': offline}])
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        payload = next(payloads)
+        return SimpleNamespace(status=200, json=lambda: payload)
+
+    details = travel_hotel.read_details(
+        SimpleNamespace(post=post),
+        [{'order_no': 'online-1', 'expense_description': '线上住宿', 'sjly': '2'}, expense_order()],
+        origin=POLICY.travel_origin, timeout_sec=1,
+    )
+
+    assert calls[0][0] == POLICY.travel_origin + '/hotel/fcc/hotel/order/b2ghotelzcd/getOrderDetail?ddbh=online-1'
+    assert 'data' not in calls[0][1]
+    assert calls[1][0] == POLICY.travel_origin + '/fcecf/fcc/pcapi/COMM_B2G_bldDetail'
+    assert calls[1][1]['data'] == {'id': 'expense-1', 'ywdh': 'BL-SYNTHETIC', 'bxpch': 'batch-1'}
+    assert all(options['max_redirects'] == 0 for _, options in calls)
+    assert [detail['date_semantics'] for detail in details] == ['reserved', 'declared']
+    assert 'location_semantics' not in details[0]
+    assert details[1]['location_semantics'] == 'declared'
+    assert [detail['order_detail'] for detail in details] == [online, offline]
+
+
+def test_hotel_batch_budget_precedes_later_missing_identity(monkeypatch):
+    ticks = iter([0.0, 0.1, 2.0])
+    monkeypatch.setattr(travel_hotel.time, 'monotonic', lambda: next(ticks, 2.0))
+    context, calls = hotel_transport({'result': {'ddbh': 'online-1'}})
+    missing_identity = expense_order()
+    del missing_identity['id']
+
+    details = travel_hotel.read_details(
+        context.request,
+        [{'order_no': 'online-1', 'sjly': '2'}, missing_identity],
+        origin=POLICY.travel_origin, timeout_sec=1,
+    )
+
+    assert len(calls) == 1
+    assert calls[0][1]['timeout'] == 900
+    assert details[0]['read_status'] == 'read'
+    assert details[1] == {
+        **missing_identity, 'read_status': 'failed',
+        'reason': 'hotel_order_detail_timeout', 'diagnostics': {'stage': 'hotel_detail'},
+    }
+
+
 def test_hotel_discovery_keeps_native_expense_source_and_identity():
     row = {'cpbh': '0300', 'ddlx': '03001', 'ywdh': 'BL-SYNTHETIC',
            'fysm': '合成住宿', 'sjly': '3', 'id': 'expense-1', 'bxpch': 'batch-1'}
-    assert travel_orders._hotel_orders_from_api_payload({'result': [row, row]}) == [expense_order()]
+    assert travel_hotel.orders_from_expenses({'result': [row, row]}) == [expense_order()]
 
 
 @pytest.mark.parametrize('source', ['1', '3', '4', '5'])
 def test_offline_hotel_uses_native_expense_read_and_keeps_declared_semantics(source):
     result = expense_result(sjly=source)
     context, calls = hotel_transport({'success': True, 'result': result})
-    detail, = travel_source._read_hotel_order_details(context, [expense_order(source)], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [expense_order(source)], origin=POLICY.travel_origin, timeout_sec=1)
 
     assert calls[0][0].endswith('/fcecf/fcc/pcapi/COMM_B2G_bldDetail')
     assert calls[0][1]['data'] == {'id': 'expense-1', 'ywdh': 'BL-SYNTHETIC', 'bxpch': 'batch-1'}
@@ -155,15 +215,15 @@ def test_offline_hotel_uses_native_expense_read_and_keeps_declared_semantics(sou
 
 def test_order_number_prefix_does_not_choose_hotel_interface():
     context, calls = hotel_transport({'success': True, 'result': {'ddbh': 'BL-SYNTHETIC'}})
-    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
-    assert travel_orders.HOTEL_ORDER_DETAIL_PATH in calls[0][0]
+    detail, = travel_hotel.read_details(context.request, [expense_order('2')], origin=POLICY.travel_origin, timeout_sec=1)
+    assert travel_hotel.HOTEL_ORDER_DETAIL_PATH in calls[0][0]
     assert detail['detail_source'] == 'online_order'
 
 
 @pytest.mark.parametrize('key', ['id', 'ywdh', 'bxpch', 'sjly', 'cpbh', 'ddlx'])
 def test_offline_hotel_rejects_wrong_expense_identity(key):
     context, _ = hotel_transport({'success': True, 'result': expense_result(**{key: 'other'})})
-    detail, = travel_source._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [expense_order()], origin=POLICY.travel_origin, timeout_sec=1)
     assert detail['reason'] == 'hotel_order_identity_mismatch'
     assert 'order_detail' not in detail
 
@@ -172,7 +232,7 @@ def test_offline_hotel_without_expense_identity_does_not_guess_or_request():
     context, calls = hotel_transport({'success': True, 'result': expense_result()})
     order = expense_order()
     del order['id']
-    detail, = travel_source._read_hotel_order_details(context, [order], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [order], origin=POLICY.travel_origin, timeout_sec=1)
     assert detail['reason'] == 'hotel_expense_identity_missing'
     assert calls == []
 
@@ -190,7 +250,7 @@ def test_offline_hotel_without_expense_identity_does_not_guess_or_request():
 def test_hotel_failures_preserve_distinct_safe_diagnostics(status, payload, reason):
     payload['message'] = 'synthetic-secret-message'
     context, _ = hotel_transport(payload, status)
-    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [expense_order('2')], origin=POLICY.travel_origin, timeout_sec=1)
     assert detail['reason'] == reason
     assert detail['diagnostics']['http_status'] == status
     assert 'synthetic-secret-message' not in json.dumps(detail)
@@ -202,7 +262,7 @@ def test_hotel_transport_exception_keeps_type_without_request_secrets():
         raise TimeoutError('https://example.test/?token=synthetic-secret')
 
     context = SimpleNamespace(request=SimpleNamespace(post=post))
-    detail, = travel_source._read_hotel_order_details(context, [expense_order('2')], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [expense_order('2')], origin=POLICY.travel_origin, timeout_sec=1)
     assert detail['reason'] == 'hotel_order_detail_timeout'
     assert detail['diagnostics']['exception_type'] == 'TimeoutError'
     assert 'synthetic-secret' not in json.dumps(detail)
@@ -214,7 +274,7 @@ def test_offline_hotel_requires_native_success_flag(success):
     if success is not None:
         payload['success'] = success
     context, _ = hotel_transport(payload)
-    detail, = travel_source._read_hotel_order_details(context, [expense_order()], timeout_sec=1)
+    detail, = travel_hotel.read_details(context.request, [expense_order()], origin=POLICY.travel_origin, timeout_sec=1)
     assert detail['reason'] == 'hotel_order_response_invalid'
     assert 'order_detail' not in detail
 
@@ -225,8 +285,8 @@ def test_hotel_details_preserve_complete_result_and_identity(address, identity):
               'xzqmc': '西湖区', 'ydrzrq': '2026-10-20', 'ydldrq': '2026-10-21', 'ddztmc': '已完成'}
     context = SimpleNamespace(request=SimpleNamespace(post=lambda *_a, **_k: SimpleNamespace(
         json=lambda: {'result': result})))
-    details = travel_source._read_hotel_order_details(
-        context, [{'order_no': 'hotel-1', 'expense_description': '合成住宿'}], timeout_sec=1)
+    details = travel_hotel.read_details(
+        context.request, [{'order_no': 'hotel-1', 'expense_description': '合成住宿'}], origin=POLICY.travel_origin, timeout_sec=1)
     assert len(details) == 1
     if identity == 'hotel-1':
         assert details[0]['order_detail'] == result
@@ -265,7 +325,7 @@ def browser_transport(monkeypatch):
             if failure == 'read':
                 raise RuntimeError('synthetic navigation failure')
             if self.outcome.get('expense_rows'):
-                response = SimpleNamespace(url=POLICY.travel_origin + travel_orders.TRIP_EXPENSE_API_PATH,
+                response = SimpleNamespace(url=POLICY.travel_origin + travel_browser.TRIP_EXPENSE_API_PATH,
                     status=200, json=lambda: {'success': True, 'result': self.outcome['expense_rows']})
                 for handler in self.handlers:
                     handler(response)
@@ -299,6 +359,8 @@ def browser_transport(monkeypatch):
 
         def close(self):
             self.closed = True
+            if self.outcome.get('close_failure'):
+                raise RuntimeError('synthetic page cleanup failure')
 
     class Browser:
         def __init__(self, headless):
@@ -317,7 +379,7 @@ def browser_transport(monkeypatch):
                 transport.requests.append((url, kwargs))
                 return SimpleNamespace(status=200, json=lambda: self.page.outcome['hotel_payload'])
 
-            return SimpleNamespace(new_page=new_page, cookies=lambda *_a: [],
+            return SimpleNamespace(new_page=new_page, cookies=lambda *_a: getattr(transport, 'cookies', []),
                                    request=SimpleNamespace(post=post))
 
         def close(self):
@@ -340,7 +402,7 @@ def browser_transport(monkeypatch):
                 browser.disposed = True
 
     monkeypatch.setattr(playwright.sync_api, 'sync_playwright', Playwright)
-    monkeypatch.setattr(travel_orders.TravelSource, '_ensure_cdp_available', staticmethod(lambda: True))
+    monkeypatch.setattr(travel_browser.BrowserAdapter, 'ensure_available', staticmethod(lambda: True))
     monkeypatch.setattr(remote.DownloadTransfer, 'rpa_storage_state', staticmethod(lambda **_k: {'cookies': [], 'origins': []}))
     monkeypatch.setattr(remote, 'browser_visible_fallback_enabled', lambda: True)
     return transport
@@ -360,14 +422,14 @@ def collect_travel(count='0'):
 def test_complete_empty_travel_scan_does_not_open_visible_browser(browser_transport):
     evidence = collect_travel()
 
-    assert evidence['attachment_scan']['status'] == 'empty'
+    assert evidence.attachment_scan_record()['status'] == 'empty'
     assert browser_transport.launches == [True]
 
 
 def test_complete_empty_travel_scan_without_count_does_not_open_visible_browser(browser_transport):
     evidence = collect_travel(count='')
 
-    assert evidence['attachment_scan']['status'] == 'empty'
+    assert evidence.attachment_scan_record()['status'] == 'empty'
     assert browser_transport.launches == [True]
 
 
@@ -378,10 +440,10 @@ def test_travel_browser_disposes_owned_resources_after_read_timer_is_removed(bro
     evidence = collect_travel()
 
     if failure:
-        assert evidence['errors'][0]['code'] == 'travel_attachment_discovery_failed'
+        assert evidence.errors[0].code == 'travel_attachment_discovery_failed'
         assert browser_transport.launches == [True, False]
     else:
-        assert evidence['attachment_scan']['status'] == 'empty'
+        assert evidence.attachment_scan_record()['status'] == 'empty'
     assert all(browser.disposed for browser in browser_transport.browsers)
     assert browser_transport.exits == [0.0] * len(browser_transport.launches)
     assert all(not browser.close_timers for browser in browser_transport.browsers)
@@ -399,7 +461,7 @@ def test_incomplete_headless_travel_scan_can_still_use_visible_fallback(browser_
 
     evidence = collect_travel()
 
-    assert evidence['errors'] == []
+    assert evidence.errors == ()
     assert browser_transport.launches == [True, False]
 
 
@@ -410,7 +472,7 @@ def test_complete_nonempty_travel_scan_does_not_open_visible_browser(browser_tra
 
     evidence = collect_travel(count='')
 
-    assert [resource['id'] for resource in evidence['resources']] == ['travel_platform:123']
+    assert [resource['id'] for resource in evidence.download_targets] == ['travel_platform:123']
     assert browser_transport.launches == [True]
 
 
@@ -423,13 +485,13 @@ def test_native_offline_source_flows_from_browser_response_to_bound_evidence(bro
         'hotel_payload': {'success': True, 'result': result},
     }
     evidence = collect_travel()
-    fact, = [item for item in evidence['fields'] if item['name'] == '商旅住宿订单详情']
+    fact, = [item for item in evidence.facts if item['name'] == '商旅住宿订单详情']
     detail = json.loads(fact['value'])
     assert detail['read_status'] == 'read' and detail['date_semantics'] == 'declared'
     assert detail['order_detail'] == result
     assert detail['hotel_address'] == address and detail['location_semantics'] == 'declared'
     assert fact['subject_ref'] == 'travel_order:BL-SYNTHETIC'
-    assert not any(item['name'] == '酒店地址' for item in evidence['fields'])
+    assert not any(item['name'] == '酒店地址' for item in evidence.facts)
     assert browser_transport.requests[0][0].endswith('/fcecf/fcc/pcapi/COMM_B2G_bldDetail')
     assert browser_transport.launches == [True]
 
@@ -445,8 +507,32 @@ def test_native_offline_source_flows_from_browser_response_to_bound_evidence(bro
 def test_travel_failure_diagnostics_survive_browser_fallback(browser_transport, outcome, reason):
     browser_transport.outcomes = {mode: outcome for mode in (True, False)}
     evidence = collect_travel()
-    error, = evidence['errors']
-    assert error['code'] == 'travel_attachment_discovery_failed'
-    assert reason in {item['reason'] for item in error['diagnostics']}
-    assert {item['browser'] for item in error['diagnostics']} == {'headless', 'visible'}
-    assert 'source_url' not in json.dumps(error)
+    error, = evidence.errors
+    assert error.code == 'travel_attachment_discovery_failed'
+    assert reason in {item['reason'] for item in error.diagnostics}
+    assert {item['browser'] for item in error.diagnostics} == {'headless', 'visible'}
+    assert 'source_url' not in json.dumps(error.diagnostics)
+
+
+def test_completed_candidate_survives_page_cleanup_failure(browser_transport):
+    browser_transport.outcomes[True] = {'close_failure': True}
+    evidence = collect_travel()
+    assert evidence.errors == ()
+    assert evidence.attachment_scan_record()['status'] == 'empty'
+    assert browser_transport.launches == [True]
+    assert browser_transport.exits == [0.0]
+    assert browser_transport.browsers[0].pages[0].closed
+
+
+def test_download_cookie_stays_out_of_scan_and_facts(browser_transport):
+    browser_transport.outcomes[True] = {'expense_rows': native_attachment_rows()}
+    browser_transport.cookies = [{'domain': 'trip.example.test', 'name': 'session',
+                                  'value': 'synthetic-cookie-secret'}]
+    evidence = collect_travel(count='6')
+    assert all(target['_ephemeral_cookie_header'] == 'session=synthetic-cookie-secret'
+               for target in evidence.download_targets)
+    assert 'synthetic-cookie-secret' not in json.dumps(evidence.attachment_scan_record())
+    assert 'synthetic-cookie-secret' not in json.dumps(evidence.facts)
+    evidence.require_request_binding('12')
+    with pytest.raises(RuntimeError, match='resource_ownership_untrusted'):
+        evidence.require_request_binding('other')

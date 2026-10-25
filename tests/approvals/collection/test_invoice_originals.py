@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from apps.oa.approvals.sources.travel_evidence import TravelEvidence
+
 from tests.approvals.source_fakes import POLICY
 
 from io import BytesIO
@@ -320,7 +322,7 @@ def test_original_body_uses_shared_finance_collection(workflow_key, original_tra
     state.client.config = config
     monkeypatch.setattr(flow, 'load_all_configs', lambda: [config])
     monkeypatch.setattr(official_sql, 'travel_extra_fields', lambda _workflow: [])
-    monkeypatch.setattr(case_bundle, '_travel_resources', lambda **_kwargs: ([], []))
+    monkeypatch.setattr(case_bundle, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
     material = collect_original(state, tmp_path)
     assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'content_read'
     assert material['prepared']['images']

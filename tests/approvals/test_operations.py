@@ -65,18 +65,19 @@ def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_
     from apps.oa.approvals.sources import travel as travel_orders
     from apps.oa.approvals.collection.case import CollectionFailure
     from apps.oa.approvals.collection.case import _travel_resources
+    from apps.oa.approvals.sources.travel_evidence import TravelEvidence, TravelReadError
 
     def fail_collect(request_id, **_kwargs):
         return _travel_resources(config={'flow_key': 'travel_expense'}, workflow={},
             request_id=request_id, allow_browser_download=True, attachment_timeout_sec=1, travel_source=travel_orders.TravelSource(POLICY))
 
-    monkeypatch.setattr(travel_orders.TravelSource, 'collect_evidence', staticmethod(lambda *_a, **_k: {'errors': [{
-        'code': 'travel_attachment_discovery_failed', 'message': 'synthetic-secret-message',
-        'counts': {'declared_attachment_count': 1},
-        'diagnostics': [{'stage': 'navigation', 'reason': 'navigation_failed', 'browser': 'headless',
+    monkeypatch.setattr(travel_orders.TravelSource, 'collect_evidence', staticmethod(lambda *_a, **_k: TravelEvidence(errors=(TravelReadError(
+        'travel_attachment_discovery_failed', 'synthetic-secret-message',
+        {'declared_attachment_count': 1},
+        ({'stage': 'navigation', 'reason': 'navigation_failed', 'browser': 'headless',
                          'exception_type': 'TimeoutError', 'http_status': 503,
                          'source_url': 'https://example.test/?token=synthetic-secret',
-                         'message': 'synthetic-secret-message'}]}]}))
+                         'message': 'synthetic-secret-message'},)),))))
     app, api = service(tmp_path)
     app.collector = fail_collect
     run = app.pending()['run_id']
