@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals.sources.writer import POSTCHECK_TIMEOUT, SUBMIT_REJECTED, verification_result, submission_status
+from apps.oa.approvals import receipts
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
@@ -73,13 +73,13 @@ def submit_overseas(api, writer, request_id, material, plan, *, origins):
     response = writer.submit_invoice(request_id,plan["remark"],details,fields_by_row=fields_by_row)
     code = str(response.get("code") or "").upper()
     if code != "SUCCESS":
-        return {**verification_result(False,False,submit_ok=False),
-            "failure_code":SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
+        return {**receipts.verification_result(False,False,submit_ok=False),
+            "failure_code":receipts.SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
     pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
     done = handled_since(api.handled_rows(),request_id,started_at)
     fields_match = check_overseas_fields(api,request_id,material,plan,origins=origins)
-    result = verification_result(done,pending,submit_ok=True,fields_match=fields_match)
-    return {**result,"failure_code":None if result["postcheck_done_hit"] else POSTCHECK_TIMEOUT}
+    result = receipts.verification_result(done,pending,submit_ok=True,fields_match=fields_match)
+    return {**result,"failure_code":None if result["postcheck_done_hit"] else receipts.POSTCHECK_TIMEOUT}
 
 
 class Approval:
@@ -241,8 +241,8 @@ class Approval:
                         writer = build_writer_api(source_policy=self.source_policy)
                     result = writer.submit_and_verify(task["request_id"],opinion)
             except Exception:
-                result = {**verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
-            status = submission_status(result)
+                result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            status = receipts.submission_status(result)
             self.store.finish_submission(submission,status,result)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
@@ -263,8 +263,8 @@ class Approval:
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
                 fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),origins=self.source_policy.attachments)
-            result = verification_result(handled,pending,fields_match=fields_match)
-            status = submission_status(result)
+            result = receipts.verification_result(handled,pending,fields_match=fields_match)
+            status = receipts.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
             return {"task_id":task_id,"status":status,**result}
 

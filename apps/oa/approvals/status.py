@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 import json
 
+from apps.oa.approvals.receipts import assess_submission
 from apps.oa.approvals.store import AGENT_CLAIM_LIMIT, INFLIGHT_STATUSES, MAX_INFLIGHT
 
 
@@ -48,15 +49,12 @@ def submission_acceptance(store, run_id, tasks):
         for submission in submissions:
             if submission['task_id'] != task['id']:
                 continue
-            receipt = json.loads(submission['result_json'])
-            verified = (submission['status'] == 'submitted' and submission['completed_at'] is not None
-                        and all(receipt.get(key) is True for key in ('submit_ok', 'done_hit', 'postcheck_done_hit'))
-                        and (receipt.get('fields_match') is True if task['workflow_key'] == 'overseas_invoice'
-                             else receipt.get('fields_match') is not False))
+            evidence = assess_submission(submission, workflow_key=task['workflow_key'])
+            receipt = evidence.receipt
             attempts.append({key: submission[key] for key in
                 ('id', 'review_id', 'status', 'started_at', 'completed_at')} | {
                 key: receipt.get(key) for key in
-                ('submit_ok', 'done_hit', 'postcheck_done_hit', 'fields_match', 'failure_code')} | {'verified': verified})
+                ('submit_ok', 'done_hit', 'postcheck_done_hit', 'fields_match', 'failure_code')} | {'verified': evidence.verified})
         facts.append({
             'task_id': task['id'], 'request_id': task['request_id'], 'status': task['status'],
             'attempt_count': len(attempts), 'duplicate_attempt_count': max(0, len(attempts) - 1),

@@ -22,6 +22,7 @@ from PIL import Image, JpegImagePlugin
 from apps.oa.materials import formats as attachment_extractors
 from apps.oa.materials import resources as attachment_locations
 from apps.oa.materials.prepared import PreparedMaterial, read_prepared
+from apps.oa.materials import reports
 from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
 
@@ -453,7 +454,7 @@ class _RecognitionSession:
         self._on_progress = on_progress
         options.output_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
         self.report_file = options.output_dir / 'recognition.json'
-        self.report = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,
+        self.report: reports.RecognitionRecord = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'model': MODEL,
                        'transport': 'direct_http', 'prompt': options.prompt, 'status': 'running',
                        'created_at': datetime.now(timezone.utc).isoformat(), 'completed_at': None,
                        'report_file': str(self.report_file), 'parts': [], 'sources': [],
@@ -468,9 +469,7 @@ class _RecognitionSession:
         runtime_control.write_control_bytes_atomic(
             self.report_file, (json.dumps(self.report, ensure_ascii=False) + '\n').encode())
         if self._on_progress is not None:
-            from apps.oa.materials.progress import summarize
-
-            self._on_progress(summarize(self.report, self.report_file))
+            self._on_progress(reports.summarize(self.report, self.report_file))
 
     def _check_budget(self) -> None:
         if self._monotonic() >= self.deadline:
@@ -598,18 +597,8 @@ class _RecognitionSession:
         return answer, usage
 
     def _write_observations(self) -> None:
-        observations = []
-        if self.report['status'] == 'complete':
-            for part in self.report['parts']:
-                locator = part['evidence_ref'] + '#supplemental'
-                if part['kind'] == 'image':
-                    locator += f'&rotate={part["rotate"]}'
-                    if 'region' in part:
-                        locator += '&region=' + ','.join(str(value) for value in part['region'])
-                observations.append({**part, 'locator': locator, 'content': part['answer'], 'status': 'read',
-                                     'coverage': self.report['coverage'], 'selection': self.report['selection'],
-                                     'report_file': str(self.report_file), 'prompt': self.options.prompt,
-                                     'material_binding': self.report['material_binding']})
+        observations = reports.supplemental_observations(
+            self.report, report_file=self.report_file, prompt=self.options.prompt)
         observations_file = self.options.output_dir / 'observations.json'
         runtime_control.write_control_bytes_atomic(
             observations_file, (json.dumps(observations, ensure_ascii=False) + '\n').encode())
