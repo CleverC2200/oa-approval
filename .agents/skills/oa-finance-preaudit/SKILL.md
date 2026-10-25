@@ -19,6 +19,8 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 总在途上限为 3。同一实际原生 Agent 同时只拥有一单。`preparing`、`reviewing`、`reviewed`、`submitting` 均占名额；审核完成但等待提交的单据也占名额。`submitted`、明确结束的 `failed` 或默认预览的 `preview` 释放名额。
 
+命令行核对范围、下一任务或交付身份后再执行 `collect` / `submit` 时，将核对与后续操作放在同一失败即停的 shell 中，使用 `set -e` 或 `&&`；含管道时同时启用 `pipefail`。任一 `jq -e`、`test` 或 CLI 返回失败，均停止该串后续操作。此约定约束主 Agent 的临时工具命令，入口自身的身份、冻结材料与写入检查仍须通过。
+
 ### 准备、审核与补位
 
 主 Agent 通过本机 socket 调用 `collect`。服务只启动一个采集工作进程，由它自行建立 Approval、SQLite 和 OA 读取对象，浏览器采集保持串行。原 `collect` 客户端持续等待本次最终结果；保留该工具会话，主 Agent 在等待期间接收其他审核结果，并通过同一运行服务提交、回查。第二个 `collect` 返回 `waiting` / `collection_in_progress`，不排入后台采集队列。标准输入 JSON 仍按原顺序执行，标准输入的 `collect` 为同步调用。
