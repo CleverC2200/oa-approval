@@ -14,7 +14,7 @@
 
 ## 准备、审核与补位
 
-主 Agent 通过本机 socket 调用 `collect`。服务只启动一个采集工作进程，由它自行建立 Approval、SQLite 和 OA 读取对象，浏览器采集保持串行。原 `collect` 客户端持续等待本次最终结果；保留该工具会话，主 Agent 在等待期间接收其他审核结果，并通过同一运行服务提交、回查。第二个 `collect` 返回 `waiting` / `collection_in_progress`，不排入后台采集队列。标准输入 JSON 仍按原顺序执行，标准输入的 `collect` 为同步调用。
+主 Agent 通过本机 socket 调用 `collect`。浏览器采集保持串行。原 `collect` 客户端持续等待本次最终结果；保留该工具会话，主 Agent 在等待期间接收其他审核结果，并通过同一运行服务提交、回查。第二个 `collect` 返回 `waiting` / `collection_in_progress`，不排入后台采集队列。标准输入 JSON 仍按原顺序执行，标准输入的 `collect` 为同步调用。
 
 材料准备完成后，通过 exec 执行 parser 和整份 DeepSeek 附件读取。直接接管 `recognize` 的最终 stdout 摘要，将其中的报告路径交给审核 Agent；具体输出及长任务进度见[附件识别入口](../../../../docs/agents/attachment-recognition.md)。识别运行期间，可先向审核 Agent 交付本单完整冻结材料及规则引用，完整读取规则、表单、明细和页面业务资料；识别结束后补交本单识别文件引用或具体读取失败。全部适用识别结束、审核 Agent 完整读取全部适用材料及规则并完成核对后，才能形成最终意见。高影响读数的定向复读使用识别报告 `parts[].resource_id` 和 `parts[].page_number`。
 
@@ -36,7 +36,19 @@
 
 优先复用同类、空闲且上下文仍短的 Agent；有多个时选本代已处理数最少者。每代最多处理 5 单，预览和技术失败也计入。达到上限、换类型，或本单材料特别大、读取质量受上下文影响时，当前单收尾后轮换。
 
-新建时使用 `fork_turns=none`，继承默认模型设置，只发送匹配规则入口和本单材料/识别文件引用，不继承主线程、上一代或此前单据的业务历史。同类复用时，由主 Agent 使用原生后续任务入口启动下一单，只补本单定位，不重复粘贴旧意见。每代使用新的实际原生 Agent 身份，数据库的 `agent_id` 随之更新。
+新建时使用 `fork_turns=none`，继承默认模型设置；每代使用新的实际原生 Agent 身份，数据库的 `agent_id` 随之更新。材料准备后按下列模板派发本单。首次派发带齐全部信息，复用同类空闲 Agent 时用原生后续任务入口替换本单身份与文件引用；识别尚在运行时先交付当前引用，结束后补交最终报告或具体失败。
+
+```text
+角色：指定单据的审核 Agent，只交回审核结果，不领取或写 OA。
+执行入口：<本项目 oa-finance-preaudit/SKILL.md 的绝对路径>，从“流程路由”开始执行；业务规则以本次冻结版本为准。
+任务：<task_id>；流程：<workflow_key>；本代身份：<当前代次>。实际原生 Agent ID 沿用本次派发身份。
+材料：<collect 返回的 material_file 绝对路径>。
+冻结规则：<rule_file>；完整规则根目录：<rules_root>。
+识别：<运行中，稍后补交 / 最终报告路径及状态 / 不适用及原因 / 具体失败>。
+交付：按执行入口“形成并交回意见”的完成条件及字段交回，仅引用本单文件。
+```
+
+模板只携带当前单据定位。审核完成条件和最终交付字段由 Skill 维护，不复制主线程、上一代或此前单据的业务历史。
 
 轮换在当前意见和观察完整交回、主 Agent 接管且本单处理结束后进行；保留已有意见、材料和 SQLite 事实。旧代停止接单，不中断当前单或重复提交。进程或主会话中断后，下一轮重新拉取待办，不恢复旧审核对话。
 
@@ -52,11 +64,16 @@
 
 使用本轮保存的 `batch.task_ids` 逐单验收，未设置 `--batch-size` 时以本轮完整队列为范围。确认每单已经提交并有成功验证事实、完成预览或明确登记失败；本批没有未领取或在途任务。范围外的 `queued` 不计入本批完成条件。停止排空只核对已领取单，未领取单保留待办；未知提交单独报告阻断及回查结果。
 
-沿用本轮固定的绝对 `OA_RUNTIME_ROOT` 和实际 `run_id`，通过项目解释器执行公开命令；`OA_RUN_ID` 取本轮启动结果：
+沿用本轮固定的绝对 `OA_RUNTIME_ROOT` 和实际 `run_id`，`OA_RUN_ID` 取本轮启动结果。先用公开 status 核对逐单验收，再选择下表中的一个关闭分支，只发送一次 finish。
+
+| 当前分支 | 关闭命令 |
+| --- | --- |
+| 小时任务或其接续对话，当前任务已明确授权通过独立对话接续，计划仍为 ACTIVE，且没有停止指令或未知提交 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --handoff`，随后按[接续结果](hourly-dispatch.md#排空后立即接续)处理 |
+| 人工单批、任务暂停、用户停止、未知提交或当前没有独立对话接续授权 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"`，关闭后结束本轮 |
+
+关闭前后均使用同一查询入口，分别核对验收事实及关闭结果：
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --run-id "${OA_RUN_ID:?}"
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --run-id "${OA_RUN_ID:?}"
 ```
 
