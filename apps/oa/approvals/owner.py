@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import fcntl
 import json
 import multiprocessing
@@ -20,10 +20,12 @@ _STDIN_EOF = object()
 
 
 @contextmanager
-def round_lock(root):
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    with (root / 'approval.lock').open('a') as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+def round_lock(root, *, shared_root=None):
+    with ExitStack() as locks:
+        for directory in dict.fromkeys(path.resolve() for path in (shared_root, root) if path is not None):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            lock = locks.enter_context((directory / 'approval.lock').open('a'))
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
 
 def dispatch(approval, run_id, request):
@@ -125,6 +127,7 @@ class _RoundSession:
         self._closed_result = None
         self._close_attempted = False
         self._close_error = None
+        self._handoff = False
 
     @property
     def collection_pipe(self):
@@ -142,11 +145,13 @@ class _RoundSession:
         try:
             request = receive_request()
             if source == 'stdin' and (request is _STDIN_EOF or request.get('operation') == 'finish'):
+                self._handoff = request is not _STDIN_EOF and request.get('handoff', False)
                 self._finishing = True
             elif request.get('operation') == 'finish':
                 if request.get('run_id') != self._run_id:
                     raise ValueError('run_mismatch')
                 self._finishing = True
+                self._handoff = request.get('handoff', False)
                 self._finish_responders.append(respond)
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
@@ -192,7 +197,7 @@ class _RoundSession:
             self._close_attempted = True
             try:
                 self._close_transport()
-                self._closed_result = self._approval.close(self._run_id)
+                self._closed_result = self._approval.close(self._run_id, handoff=self._handoff)
             except Exception as error:
                 self._close_error = error
                 raise
@@ -234,11 +239,12 @@ def require_production_main(project=None):
     if git('rev-parse', 'HEAD') != git('rev-parse', 'origin/main'):
         raise ValueError('production_main_not_synced')
 
-def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None):
+def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None,
+          continue_from=None):
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
-    with round_lock(root):
+    with round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
         source_policy = None
         if not demo:
             require_production_main()
@@ -248,7 +254,8 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
             approval = create_demo(root)
         else:
             approval = Approval(root, source_policy=source_policy)
-        started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids)
+        started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
+                                   continue_from=continue_from)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
         server = None

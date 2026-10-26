@@ -39,7 +39,7 @@
 | --- | --- |
 | 批次、Agent 计数与回执事实 | SQLite 及 `approvals status --view batch`；`tests/approvals/test_capability_cli.py` |
 | 识别摘要与完整正文分离 | `materials recognize` stdout 与报告文件；`tests/materials/test_recognition_progress.py` |
-| 工具等待与状态接管 | 财务预审 Skill 的主 Agent 执行规则；原生工具调用发生在仓库 CI 之外 |
+| 工具等待与状态接管 | [批次执行规则](.agents/skills/oa-finance-preaudit/references/batch-execution.md)；原生工具调用发生在仓库 CI 之外 |
 | 临时命令的前置核对失败即停 | shell 的 `set -e` / `&&`，管道配合 `pipefail`；仓库 CI 不检查主 Agent 的临时 shell 文本 |
 
 ## Agent skills
