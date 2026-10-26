@@ -282,11 +282,11 @@ def _packaging_review_role(resource: dict[str, Any]) -> str:
 
 
 def _prepare_packaging_resources(
-    resources: list[dict[str, Any]],
+    attachment_resources: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
 
     normalized = []
-    for resource in resources:
+    for resource in attachment_resources:
         item = dict(resource)
         item["_trusted_review_role"] = _packaging_review_role(item)
         normalized.append(item)
