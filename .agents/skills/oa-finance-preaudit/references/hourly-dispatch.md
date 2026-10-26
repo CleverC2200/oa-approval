@@ -7,7 +7,7 @@
 每小时检查用于空闲时发现待办。有积压时按下文立即接续独立对话，不等待下个整点。自动任务保持用户设定的启停状态；暂停后不创建新接续对话。
 
 1. 从 `/Users/synear/Documents/OA` 读取当前 AGENTS.md。小时任务及接续固定使用 `/Users/synear/Documents/OA/runtime/hourly-preaudit`，保留同一 SQLite 账本与材料。首次使用共享锁版本前确认旧版本 owner 已结束，正在审批的 checkout 保持原样，空闲后再同步主线。
-2. 用公开 `approvals --root <固定目录> status` 检查已有轮次及 owner。owner 可达时跳过本轮；失联的 running/blocked、未知提交或尚未处置的接续事实先报告核对，不自动恢复或清除。
+2. 用公开 `approvals --root <固定目录> status` 检查已有轮次及 owner。owner 可达时跳过本轮；失联的 running/blocked 或未知提交先报告核对。小时初始检查遇到待消费接续时不重复创建对话，保留事实并报告。已获派发的接续对话携带精确 `previous_run_id`，核对它是当前最新轮次、状态 closed、handoff 为 ready 且 owner 不可达后，继续执行 `--continue-from`，不把该合法接续当作阻断。
 3. 空闲后 fetch `origin/main`，确认分支为 main、工作区干净且 HEAD 与 `origin/main` 一致。失败即停止，不自动切换、重置或拉取合入。
 4. 初始轮使用 `start --batch-size 40 --limit 0`，显式限定当前授权的流程。非 demo 的审批入口先取得项目共享 `runtime/approval.lock`，再取得本轮目录锁；任一 runtime 有 owner 时，第二个启动返回 `already_running`，尚未读取 OA 或建立队列。收到该状态直接跳过，不等待或换目录绕过。
 
