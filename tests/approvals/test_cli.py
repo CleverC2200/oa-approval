@@ -105,6 +105,24 @@ def test_pending_empty_queue_reports_zero_without_truncation(pending_output):
     assert started['truncated'] is False
 
 
+def test_production_round_lock_is_shared_across_runtime_roots_before_api_reads(
+        tmp_path, monkeypatch, capsys, pending_output):
+    from apps.oa.approvals import cli, owner
+    from apps.oa.approvals.sources import oa as api
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    shared = owner.PROJECT_ROOT / 'runtime'
+    second = tmp_path / 'different-runtime'
+    with owner.round_lock(shared):
+        with monkeypatch.context() as blocked:
+            blocked.setattr(api, 'build_api', lambda *args, **kwargs: pytest.fail('OA must not be read'))
+            assert cli.main(['--root',str(second),'start']) == 0
+            assert json.loads(capsys.readouterr().out) == {'status':'already_running'}
+            assert not second.exists()
+    assert pending_output()['total'] == 23
+    assert pending_output()['total'] == 23
+
+
 def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_output):
     started = pending_output('--request-id', '103', '--request-id', '101', '--request-id', '999')
     assert started['total'] == 2
@@ -201,6 +219,52 @@ def test_demo_pending_is_exclusive_and_can_close(tmp_path):
         if process.poll() is None:
             process.kill()
             process.wait()
+
+
+def test_public_cli_handoff_starts_fresh_owners_until_preview_backlog_is_drained(tmp_path):
+    arguments = ['start','--demo','--batch-size','1','--limit','0']
+    opinion = tmp_path / 'opinion.txt'
+    opinion.write_text('Synthetic preview')
+    seen = []
+    for _ in range(3):
+        process = subprocess.Popen(command(tmp_path,*arguments),cwd=PROJECT,stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
+        try:
+            started = json.loads(process.stdout.readline())
+            assert started['status'] == 'ready'
+
+            def invoke(*options):
+                result = subprocess.run(command(tmp_path,*options),cwd=PROJECT,capture_output=True,
+                                        text=True,timeout=20)
+                assert result.returncode == 0, result.stdout + result.stderr
+                return json.loads(result.stdout)
+
+            status = invoke('status','--run-id',started['run_id'],'--view','batch')
+            task = status['next_candidate']
+            seen.append(task['id'])
+            assert invoke('collect','--agent-id',f"reviewer-{started['run_id']}",
+                          '--expected-task-id',str(task['id']),
+                          '--agent-workflow-key',task['workflow_key'])['status'] == 'reviewing'
+            assert invoke('preview','--task-id',str(task['id']),
+                          '--opinion-file',str(opinion))['status'] == 'preview'
+            closed = invoke('finish','--run-id',started['run_id'],'--handoff')
+            process.wait(timeout=10)
+            status = invoke('status','--run-id',started['run_id'],'--view','batch')
+            assert status['run']['status'] == 'closed'
+            assert status['owner']['reachable'] is False
+            if closed['handoff']['status'] == 'done':
+                break
+            assert closed['handoff']['status'] == 'ready'
+            arguments = [*closed['handoff']['start_arguments'],'--demo']
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            process.stdin.close()
+            process.stdout.close()
+            process.stderr.close()
+    assert len(set(seen)) == 3
+    assert closed['handoff'] == {'status':'done','remaining':0}
 
 
 def test_demo_runs_collect_preview_submit_and_postcheck(tmp_path, monkeypatch):

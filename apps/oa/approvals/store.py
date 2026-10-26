@@ -94,11 +94,34 @@ class Store:
     def requests(self):
         return [dict(row) for row in self.connection.execute("SELECT * FROM requests ORDER BY request_id")]
 
-    def start_run(self, rows, batch_size=None):
+    def continuation_options(self, previous_id=None):
+        latest = self.latest_run()
+        if previous_id is None:
+            if latest and json.loads(latest['summary_json']).get('handoff', {}).get('status') == 'ready':
+                raise ValueError('continuation_pending')
+            return None
+        if latest is None or latest['id'] != previous_id or latest['status'] != 'closed':
+            raise ValueError('continuation_not_available')
+        stored = json.loads(latest['summary_json'])
+        if stored.get('handoff', {}).get('status') != 'ready':
+            raise ValueError('continuation_not_available')
+        return stored['selection']
+
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
         with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            self.continuation_options(continue_from)
+            stored = {'selection':selection} if selection is not None else {}
+            processed = set()
+            if continue_from is not None:
+                previous = json.loads(self.run(continue_from)['summary_json'])
+                processed.update(previous['handoff']['processed_occurrences'])
+                stored['continuation'] = {'previous_run_id':continue_from, 'processed_occurrences':sorted(processed)}
+                previous['handoff'].update(status='started', next_run_id=run_id)
+                self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(previous),continue_from))
             self.connection.execute("UPDATE runs SET status='interrupted', ended_at=? WHERE status='running'", (timestamp,))
             self.connection.execute("UPDATE tasks SET status='unknown', error='submission_interrupted' WHERE status='submitting'")
             self.connection.execute("UPDATE submissions SET status='unknown' WHERE status='started'")
@@ -111,6 +134,8 @@ class Store:
                 if not request_id or not received or not workflow:
                     raise ValueError("pending_identity_missing")
                 occurrence = occurrence_key(row)
+                if occurrence in processed:
+                    continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",
                     (request_id,workflow,str(row.get("request_name") or ""),timestamp))
@@ -123,8 +148,8 @@ class Store:
                     (request_id,occurrence,operator,received,workflow,run_id,timestamp,timestamp))
             if batch_size is not None:
                 task_ids = [task["id"] for task in self.tasks(run_id) if task["status"] == "queued"][:batch_size]
-                self.connection.execute("UPDATE runs SET summary_json=? WHERE id=?",
-                    (encoded({"batch":{"size":batch_size,"task_ids":task_ids}}),run_id))
+                stored['batch'] = {'size':batch_size, 'task_ids':task_ids}
+            self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored),run_id))
         return run_id
 
     def tasks(self, run_id):
@@ -296,11 +321,39 @@ class Store:
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM submissions WHERE run_id=? ORDER BY id", (run_id,))]
 
-    def close(self, run_id):
-        summary = {}
-        for task in self.tasks(run_id):
-            summary[task["status"]] = summary.get(task["status"], 0) + 1
-        stored = json.loads(self.run(run_id)["summary_json"])
+    def _handoff(self, run, tasks, stored):
+        if run['status'] != 'running' or any(task['status'] in (*INFLIGHT_STATUSES, 'unknown') for task in tasks):
+            return {'status':'blocked', 'reason':'continuation_unresolved_tasks'}
+        from apps.oa.approvals.status import submission_acceptance
+
+        submitted = [task for task in tasks if task['status'] == 'submitted']
+        if submitted and not submission_acceptance(self,run['id'],submitted)['all_verified']:
+            return {'status':'blocked', 'reason':'continuation_unverified_submission'}
+        remaining = sum(task['status'] == 'queued' for task in tasks)
+        if not remaining:
+            return {'status':'done', 'remaining':0}
+        if not any(task['status'] in {'preview','failed','submitted'} for task in tasks):
+            return {'status':'blocked', 'reason':'continuation_no_progress'}
+        processed = set(stored.get('continuation', {}).get('processed_occurrences', []))
+        processed.update(task['occurrence'] for task in tasks if task['status'] in {'preview','failed','submitted'})
+        return {'status':'ready', 'remaining':remaining, 'processed_occurrences':sorted(processed)}
+
+    def close(self, run_id, *, handoff=False):
         with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            run = self.run(run_id)
+            tasks = self.tasks(run_id)
+            summary = dict(Counter(task['status'] for task in tasks))
+            stored = json.loads(run['summary_json'])
+            if handoff:
+                stored.setdefault('selection', {'workflows':None, 'request_ids':None,
+                                                'batch_size':stored.get('batch', {}).get('size')})
+                stored['handoff'] = self._handoff(run,tasks,stored)
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
-        return {"run_id":run_id,"status":"closed","summary":summary}
+        result = {'run_id':run_id, 'status':'closed', 'summary':summary}
+        if handoff:
+            result['handoff'] = {key:value for key,value in stored['handoff'].items() if key != 'processed_occurrences'}
+            if result['handoff']['status'] == 'ready':
+                result['handoff'].update(runtime_root=str(self.path.parent.resolve()), previous_run_id=run_id,
+                                         start_arguments=['start','--continue-from',run_id,'--limit','0'])
+        return result

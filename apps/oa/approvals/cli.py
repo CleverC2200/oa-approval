@@ -23,6 +23,7 @@ def main(argv=None):
     pending.add_argument('--batch-size', type=int, help='冻结本轮可领取的全局 FIFO 排队前缀数量，独立于展示数')
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
+    pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
@@ -32,6 +33,7 @@ def main(argv=None):
     show.add_argument('--full', action='store_true')
     finish = commands.add_parser('finish', help='结束指定轮次；等待当前采集落盘，不代表业务全部完成')
     finish.add_argument('--run-id', required=True)
+    finish.add_argument('--handoff', action='store_true', help='排空后关闭并预留下一轮；返回原生独立对话接续信息')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
     collect.add_argument('--workflow-key')
     collect.add_argument('--agent-id', required=True)
@@ -59,6 +61,9 @@ def main(argv=None):
         parser.error('--limit must be non-negative')
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
         parser.error('--batch-size must be non-negative')
+    if args.operation in {'pending', 'start'} and args.continue_from and (
+            args.workflow is not None or args.request_id is not None or args.batch_size is not None):
+        parser.error('--continue-from preserves the original selection; omit --workflow, --request-id and --batch-size')
     if args.operation in {'submit', 'preview'} and not (args.opinion_file or args.recognition_file):
         parser.error('submit requires --opinion-file or --recognition-file')
     root = args.root.expanduser().resolve()
@@ -68,7 +73,7 @@ def main(argv=None):
 
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
-                             batch_size=args.batch_size, request_ids=args.request_id)
+                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from)
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0
@@ -83,6 +88,7 @@ def main(argv=None):
                            expected_task_id=args.expected_task_id, agent_workflow_key=args.agent_workflow_key)
         elif args.operation == 'finish':
             request['run_id'] = args.run_id
+            request['handoff'] = args.handoff
         else:
             request['task_id'] = args.task_id
         if args.operation in {'submit', 'preview'}:
