@@ -149,7 +149,8 @@ def test_collect_reports_compact_waiting_for_explicit_filter_and_done_when_empty
 
 
 @pytest.mark.parametrize("source, expected_source", [("parser", "parser"), ("deepseek", "deepseek"), (None, "deepseek")])
-def test_preview_preserves_recognition_source_and_original_report(tmp_path, source, expected_source):
+@pytest.mark.parametrize('report_status', [None, 'failed'])
+def test_preview_preserves_recognition_source_and_original_report(tmp_path, source, expected_source, report_status):
     app, api = service(tmp_path)
     task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     part = {"resource_id":"file-1", "evidence_ref":"material:prepared.structured_contents[0]",
@@ -157,6 +158,8 @@ def test_preview_preserves_recognition_source_and_original_report(tmp_path, sour
     if source is not None:
         part["source"] = source
     report = {"kind":"deepseek_attachment_recognition", "parts":[part]}
+    if report_status is not None:
+        report['status'] = report_status
     for _ in range(2):
         assert app.submit(task["task_id"], opinion="请核对金额。", recognition=report)["status"] == "preview"
     details = app.inspect(task["task_id"])

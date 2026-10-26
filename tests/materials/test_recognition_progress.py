@@ -9,6 +9,31 @@ import pytest
 from apps.oa.materials import recognize as recognition
 
 
+def test_report_projections_keep_partial_contents_without_supplemental_coverage(tmp_path):
+    from apps.oa.materials import reports
+
+    report_file = tmp_path / 'recognition.json'
+    part = {'part_id': 'image-1', 'kind': 'image', 'resource_id': 'file-1',
+            'evidence_ref': 'material:prepared.images.file-1.1', 'answer': 'private answer',
+            'rotate': 90, 'region': [0, 0, 2, 1], 'extra': {'original': 'metadata'}}
+    record = {'schema_version': 1, 'kind': 'deepseek_attachment_recognition', 'status': 'failed',
+              'completed_at': '2026-10-25T00:00:00+00:00', 'parts': [part],
+              'read_plan': ['image-1', 'image-2'], 'coverage': 'image_region',
+              'selection': {'resource_id': 'file-1'}, 'error_code': 'attachment_source_changed',
+              'extra': {'original': 'report metadata'}}
+
+    report = reports.parse_report(json.dumps(record).encode())
+
+    assert report == record
+    assert reports.summarize(report, report_file) == {
+        'status': 'failed', 'report_file': str(report_file), 'completed_parts': 1, 'planned_parts': 2,
+        'coverage': 'image_region', 'selection': {'resource_id': 'file-1'},
+        'error_code': 'attachment_source_changed'}
+    assert reports.review_contents(report) == ({**part, 'locator': part['evidence_ref'],
+        'source': 'deepseek', 'content': 'private answer', 'status': 'read'},)
+    assert reports.supplemental_observations(report, report_file=report_file, prompt='question') == ()
+
+
 def test_progress_exposes_early_report_and_saved_partial_failure(tmp_path, monkeypatch):
     from apps.oa.materials.progress import progress
 
