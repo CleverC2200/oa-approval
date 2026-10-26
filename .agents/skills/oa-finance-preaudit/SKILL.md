@@ -19,7 +19,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 总在途上限为 3。同一实际原生 Agent 同时只拥有一单。`preparing`、`reviewing`、`reviewed`、`submitting` 均占名额；审核完成但等待提交的单据也占名额。`submitted`、明确结束的 `failed` 或默认预览的 `preview` 释放名额。
 
-命令行核对范围、下一任务或交付身份后再执行 `collect` / `submit` 时，将核对与后续操作放在同一失败即停的 shell 中，使用 `set -e` 或 `&&`；含管道时同时启用 `pipefail`。任一 `jq -e`、`test` 或 CLI 返回失败，均停止该串后续操作。此约定约束主 Agent 的临时工具命令，入口自身的身份、冻结材料与写入检查仍须通过。
+命令行核对范围、下一任务或交付身份后再执行 `collect` / `submit` 时，将核对与后续操作放在同一失败即停的 shell 中，使用 `set -e` 或 `&&`；含管道时同时启用 `pipefail`。任一 `jq -e`、`test` 或 CLI 返回失败，均停止该串后续操作。退出码不替代下文对 JSON 状态、身份及回执事实的核对。此约定约束主 Agent 的临时工具命令，入口自身的身份、冻结材料与写入检查仍须通过。
 
 ### 准备、审核与补位
 
