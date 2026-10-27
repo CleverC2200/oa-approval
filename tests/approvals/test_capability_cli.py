@@ -328,3 +328,109 @@ def test_receipt_assessment_preserves_legacy_facts_and_separates_task_status(
     assert evidence.verified is verified
     assert submission_status(evidence.receipt) == expected_status
     assert submission == original
+
+def test_orphaned_finish_closes_killed_owner_without_changing_task_facts(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo'],
+                               cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    started = json.loads(process.stdout.readline())
+    process.kill()
+    process.wait(timeout=5)
+    def invoke(*args):
+        code = cli.main(['--root', str(tmp_path), *args])
+        return code, json.loads(capsys.readouterr().out)
+    before = invoke('status')[1]
+    assert before['run']['status'] == 'running'
+    assert before['owner']['reachable'] is False
+    wrong, _ = invoke('finish', '--run-id', 'wrong', '--orphaned')
+    assert wrong == 1
+    finished, result = invoke('finish', '--run-id', started['run_id'], '--orphaned')
+    assert finished == 0, result
+    assert result['status'] == 'closed'
+    after = invoke('status')[1]
+    assert after['run']['status'] == 'closed'
+    assert after['tasks'] == before['tasks']
+    assert after['owner']['reachable'] is False
+
+
+@pytest.mark.parametrize('locked', ['round', 'shared'])
+def test_orphaned_finish_refuses_held_locks(tmp_path, monkeypatch, capsys, locked):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    root = tmp_path / 'round'
+    app = create_demo(root)
+    run_id = app.pending()['run_id']
+    directory = root if locked == 'round' else owner.PROJECT_ROOT / 'runtime'
+    with owner.round_lock(directory):
+        assert cli.main(['--root', str(root), 'finish', '--run-id', run_id, '--orphaned']) == 1
+    assert json.loads(capsys.readouterr().out)['status'] == 'failed'
+    assert app.store.run(run_id)['status'] == 'running'
+    app.store.connection.close()
+
+
+@pytest.mark.parametrize('state', ['preparing', 'started', 'unknown', 'unverified'])
+def test_orphaned_finish_preserves_unresolved_work(tmp_path, monkeypatch, capsys, state):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    app = create_demo(tmp_path)
+    started = app.pending()
+    run_id, task_id = started['run_id'], started['tasks'][0]['id']
+    if state == 'preparing':
+        app.store.claim(run_id, agent_id='reviewer', expected_task_id=task_id, agent_workflow_key='travel_expense')
+    else:
+        record_submission(app.store, task_id, status=None if state == 'started' else 'unknown' if state == 'unknown' else 'submitted')
+    before = app.store.details(task_id)
+    before_run = app.store.run(run_id)
+    assert cli.main(['--root', str(tmp_path), 'finish', '--run-id', run_id, '--orphaned']) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result['error'] == ('collection_unresolved' if state == 'preparing' else 'submission_unresolved')
+    assert app.store.run(run_id) == before_run
+    assert app.store.details(task_id) == before
+    app.store.connection.close()
+
+
+def test_sigterm_closes_owner_and_releases_transport(tmp_path):
+    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo'],
+                               cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    started = json.loads(process.stdout.readline())
+    process.terminate()
+    process.wait(timeout=5)
+    result = subprocess.run([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'status'],
+                            cwd=PROJECT, capture_output=True, text=True, timeout=5)
+    assert json.loads(result.stdout)['run']['status'] == 'closed'
+    assert not Path(started['socket']).exists()
+
+
+@pytest.mark.parametrize('signum', ['SIGTERM', 'SIGHUP'])
+def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkeypatch, capsys, signum):
+    import io
+    import os
+    import signal
+    from apps.oa.approvals import demo
+    original = demo.DemoApi.submit_and_verify
+    submitted = []
+
+    def submit(api, request_id, opinion):
+        submitted.append(request_id)
+        result = original(api, request_id, opinion)
+        os.kill(os.getpid(), getattr(signal, signum))
+        return result
+
+    monkeypatch.setattr(demo.DemoApi, 'submit_and_verify', submit)
+    requests = [
+        {'operation': 'collect', 'agent_id': 'reviewer', 'expected_task_id': 1, 'agent_workflow_key': 'travel_expense'},
+        {'operation': 'submit', 'task_id': 1, 'opinion': '合成意见', 'confirm_write': True},
+        {'operation': 'collect', 'agent_id': 'second', 'expected_task_id': 2, 'agent_workflow_key': 'business_entertainment'},
+    ]
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(''.join(json.dumps(item) + '\n' for item in requests)))
+    assert cli.main(['--root', str(tmp_path), 'start', '--demo']) == 130
+    messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert messages[-1]['status'] == 'submitted'
+    assert submitted == ['90001']
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['run']['status'] == 'closed'
+    assert status['acceptance']['verified_attempt_count'] == 1
+    assert status['acceptance']['unfinished_attempt_count'] == 0
+    assert status['summary'] == {'submitted': 1, 'queued': 2}
