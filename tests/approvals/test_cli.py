@@ -571,19 +571,21 @@ def test_unknown_blocks_refill_and_other_write_without_discarding_collection(blo
     assert process.returncode == 0, process.stderr.read()
 
 
-@pytest.mark.parametrize('stop', ['eof', 'finish'])
+@pytest.mark.parametrize('stop', ['eof', 'finish', 'sigterm'])
 def test_exit_waits_for_disconnected_collection_and_keeps_lock(blocked_collection, tmp_path, stop):
     process, started, first, invoke, client, channel = blocked_collection
     client.close()
     if stop == 'finish':
         process.stdin.write('{"operation":"finish"}\n')
         process.stdin.flush()
+    elif stop == 'sigterm':
+        process.terminate()
     else:
         process.stdin.close()
     assert invoke('pending', '--demo')['status'] == 'already_running'
     channel.sendall(b'r')
     process.wait(timeout=15)
-    assert process.returncode == 0, process.stderr.read()
+    assert process.returncode == (130 if stop == 'sigterm' else 0), process.stderr.read()
     from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']

@@ -34,7 +34,7 @@ export OA_RUNTIME_ROOT="$PWD/runtime/demo"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" start --demo
 ```
 
-start 是持有锁和 socket 的前台 owner。保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`；另一个终端使用同一绝对 root 调用其他操作。正常收尾通过 finish，等待采集落盘和 owner 退出。
+start 是持有锁和 socket 的前台 owner。保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`；另一个终端使用同一绝对 root 调用其他操作。正常收尾通过 finish，等待采集落盘和 owner 退出。失联轮次的显式核对和关闭见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md#失联轮次核对)。
 
 ```bash
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status

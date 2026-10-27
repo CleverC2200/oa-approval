@@ -7,6 +7,7 @@ import json
 import multiprocessing
 import os
 import selectors
+import signal
 import socket
 import subprocess
 import sys
@@ -20,6 +21,21 @@ _STDIN_EOF = object()
 
 
 @contextmanager
+def termination_cleanup():
+    def interrupt(signum, frame):
+        for stopping in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(stopping, signal.SIG_IGN)
+        raise KeyboardInterrupt
+
+    previous = {signum: signal.signal(signum, interrupt) for signum in (signal.SIGTERM, signal.SIGHUP)}
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+@contextmanager
 def round_lock(root, *, shared_root=None):
     with ExitStack() as locks:
         for directory in dict.fromkeys(path.resolve() for path in (shared_root, root) if path is not None):
@@ -27,6 +43,45 @@ def round_lock(root, *, shared_root=None):
             lock = locks.enter_context((directory / 'approval.lock').open('a'))
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
+
+
+def finish_orphaned(root, run_id):
+    from apps.oa.approvals.status import submission_acceptance
+    from apps.oa.approvals.store import Store
+
+    database = root / 'approval.sqlite3'
+    if not database.is_file():
+        raise ValueError('run_not_found')
+    with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
+        server_path = socket_path(root)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            client.settimeout(0.5)
+            try:
+                client.connect(str(server_path))
+            except (FileNotFoundError, ConnectionRefusedError):
+                pass
+            else:
+                raise ValueError('owner_still_reachable')
+        store = Store(database)
+        try:
+            latest = store.latest_run()
+            if latest is None or latest['id'] != run_id:
+                raise ValueError('run_mismatch')
+            if latest['status'] not in {'running', 'blocked'}:
+                raise ValueError('run_not_active')
+            tasks = store.tasks(run_id)
+            if any(task['status'] == 'preparing' for task in tasks):
+                raise ValueError('collection_unresolved')
+            acceptance = submission_acceptance(store, run_id, tasks)
+            if any(task['status'] in {'submitting', 'unknown'} for task in tasks) or any(
+                    acceptance[key] for key in ('unknown_attempt_count', 'unfinished_attempt_count', 'unverified_attempt_count')):
+                raise ValueError('submission_unresolved')
+            result = store.close(run_id)
+            server_path.unlink(missing_ok=True)
+            return {**result, 'reason': 'owner_missing'}
+        finally:
+            store.connection.close()
+
 
 def dispatch(approval, run_id, request):
     operation = request['operation']
@@ -244,7 +299,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
-    with round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
+    with termination_cleanup(), round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
         source_policy = None
         if not demo:
             require_production_main()

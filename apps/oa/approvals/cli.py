@@ -34,6 +34,7 @@ def main(argv=None):
     finish = commands.add_parser('finish', help='结束指定轮次；等待当前采集落盘，不代表业务全部完成')
     finish.add_argument('--run-id', required=True)
     finish.add_argument('--handoff', action='store_true', help='排空后关闭并预留下一轮；返回原生独立对话接续信息')
+    finish.add_argument('--orphaned', action='store_true', help='显式核对后关闭失联轮次；仅写本地事实，不恢复审核或创建接续')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
     collect.add_argument('--workflow-key')
     collect.add_argument('--agent-id', required=True)
@@ -57,6 +58,8 @@ def main(argv=None):
     failed.add_argument('--task-id', type=int, required=True)
     failed.add_argument('--reason', required=True)
     args = parser.parse_args(argv)
+    if args.operation == 'finish' and args.orphaned and args.handoff:
+        parser.error('--orphaned cannot create a handoff')
     if args.operation in {'pending', 'start'} and args.limit < 0:
         parser.error('--limit must be non-negative')
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
@@ -81,6 +84,11 @@ def main(argv=None):
             result = query(root, args.operation, run_id=getattr(args, 'run_id', None),
                            task_id=getattr(args, 'task_id', None), full=args.full, view=getattr(args, 'view', None))
             emit(result)
+            return 0
+        if args.operation == 'finish' and args.orphaned:
+            from apps.oa.approvals.owner import finish_orphaned
+
+            emit(finish_orphaned(root, args.run_id))
             return 0
         request = {'operation': args.operation}
         if args.operation == 'collect':
