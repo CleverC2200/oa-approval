@@ -11,6 +11,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
@@ -22,14 +23,14 @@ _STDIN_EOF = object()
 
 @contextmanager
 def termination_cleanup():
+    stopping = threading.Event()
+
     def interrupt(signum, frame):
-        for stopping in (signal.SIGTERM, signal.SIGHUP):
-            signal.signal(stopping, signal.SIG_IGN)
-        raise KeyboardInterrupt
+        stopping.set()
 
     previous = {signum: signal.signal(signum, interrupt) for signum in (signal.SIGTERM, signal.SIGHUP)}
     try:
-        yield
+        yield stopping
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
@@ -299,7 +300,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
-    with termination_cleanup(), round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
+    with termination_cleanup() as stopping, round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
         source_policy = None
         if not demo:
             require_production_main()
@@ -342,6 +343,8 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                       'demo': demo, 'socket': str(server_path)})
                 if sys.stdin.seekable():
                     while not session.closed:
+                        if stopping.is_set():
+                            return 130
                         session.handle(_read_stdin, source='stdin', respond=emit)
                     return 0
                 with selectors.DefaultSelector() as selector:
@@ -349,7 +352,11 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                     selector.register(sys.stdin, selectors.EVENT_READ, 'stdin')
                     watched_pipe = None
                     while not session.closed:
-                        for selected, _events in selector.select():
+                        if stopping.is_set():
+                            return 130
+                        for selected, _events in selector.select(timeout=0.5):
+                            if stopping.is_set():
+                                return 130
                             if selected.data == 'stdin':
                                 session.handle(_read_stdin, source='stdin', respond=emit)
                             elif selected.data == 'collection':

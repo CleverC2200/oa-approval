@@ -329,23 +329,24 @@ def test_receipt_assessment_preserves_legacy_facts_and_separates_task_status(
     assert submission_status(evidence.receipt) == expected_status
     assert submission == original
 
-def test_orphaned_finish_closes_killed_owner_without_changing_task_facts(tmp_path):
+def test_orphaned_finish_closes_killed_owner_without_changing_task_facts(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
     process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     started = json.loads(process.stdout.readline())
     process.kill()
     process.wait(timeout=5)
-    base = [sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path)]
     def invoke(*args):
-        result = subprocess.run([*base, *args], cwd=PROJECT, capture_output=True, text=True, timeout=5)
-        return result, json.loads(result.stdout) if result.stdout else None
+        code = cli.main(['--root', str(tmp_path), *args])
+        return code, json.loads(capsys.readouterr().out)
     before = invoke('status')[1]
     assert before['run']['status'] == 'running'
     assert before['owner']['reachable'] is False
     wrong, _ = invoke('finish', '--run-id', 'wrong', '--orphaned')
-    assert wrong.returncode == 1
+    assert wrong == 1
     finished, result = invoke('finish', '--run-id', started['run_id'], '--orphaned')
-    assert finished.returncode == 0, finished.stdout + finished.stderr
+    assert finished == 0, result
     assert result['status'] == 'closed'
     after = invoke('status')[1]
     assert after['run']['status'] == 'closed'
@@ -369,7 +370,9 @@ def test_orphaned_finish_refuses_held_locks(tmp_path, monkeypatch, capsys, locke
 
 
 @pytest.mark.parametrize('state', ['preparing', 'started', 'unknown', 'unverified'])
-def test_orphaned_finish_preserves_unresolved_work(tmp_path, capsys, state):
+def test_orphaned_finish_preserves_unresolved_work(tmp_path, monkeypatch, capsys, state):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
     app = create_demo(tmp_path)
     started = app.pending()
     run_id, task_id = started['run_id'], started['tasks'][0]['id']
@@ -397,3 +400,37 @@ def test_sigterm_closes_owner_and_releases_transport(tmp_path):
                             cwd=PROJECT, capture_output=True, text=True, timeout=5)
     assert json.loads(result.stdout)['run']['status'] == 'closed'
     assert not Path(started['socket']).exists()
+
+
+@pytest.mark.parametrize('signum', ['SIGTERM', 'SIGHUP'])
+def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkeypatch, capsys, signum):
+    import io
+    import os
+    import signal
+    from apps.oa.approvals import demo
+    original = demo.DemoApi.submit_and_verify
+    submitted = []
+
+    def submit(api, request_id, opinion):
+        submitted.append(request_id)
+        result = original(api, request_id, opinion)
+        os.kill(os.getpid(), getattr(signal, signum))
+        return result
+
+    monkeypatch.setattr(demo.DemoApi, 'submit_and_verify', submit)
+    requests = [
+        {'operation': 'collect', 'agent_id': 'reviewer', 'expected_task_id': 1, 'agent_workflow_key': 'travel_expense'},
+        {'operation': 'submit', 'task_id': 1, 'opinion': '合成意见', 'confirm_write': True},
+        {'operation': 'collect', 'agent_id': 'second', 'expected_task_id': 2, 'agent_workflow_key': 'business_entertainment'},
+    ]
+    monkeypatch.setattr(sys, 'stdin', io.StringIO(''.join(json.dumps(item) + '\n' for item in requests)))
+    assert cli.main(['--root', str(tmp_path), 'start', '--demo']) == 130
+    messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert messages[-1]['status'] == 'submitted'
+    assert submitted == ['90001']
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['run']['status'] == 'closed'
+    assert status['acceptance']['verified_attempt_count'] == 1
+    assert status['acceptance']['unfinished_attempt_count'] == 0
+    assert status['summary'] == {'submitted': 1, 'queued': 2}
