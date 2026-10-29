@@ -357,3 +357,34 @@ class Store:
                 result['handoff'].update(runtime_root=str(self.path.parent.resolve()), previous_run_id=run_id,
                                          start_arguments=['start','--continue-from',run_id,'--limit','0'])
         return result
+
+    def expire_history(self, cutoff):
+        from apps.oa.approvals.retention import verified_tasks
+
+        timestamp = cutoff.isoformat()
+        expired = []
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            for task in verified_tasks(self):
+                last_submission = self.connection.execute(
+                    'SELECT MAX(completed_at) FROM submissions WHERE task_id=?', (task['id'],)).fetchone()[0]
+                run = self.run(task['last_run_id'])
+                if (task['last_seen_at'] < timestamp and last_submission < timestamp
+                        and run['status'] in {'closed', 'interrupted'}):
+                    expired.append(task['id'])
+            for task_id in expired:
+                self.connection.execute('DELETE FROM submissions WHERE task_id=?', (task_id,))
+                self.connection.execute('DELETE FROM reviews WHERE task_id=?', (task_id,))
+                self.connection.execute('DELETE FROM attachment_contents WHERE attachment_id IN (SELECT id FROM attachments WHERE task_id=?)', (task_id,))
+                self.connection.execute('DELETE FROM attachments WHERE task_id=?', (task_id,))
+                self.connection.execute('DELETE FROM tasks WHERE id=?', (task_id,))
+            self.connection.execute('DELETE FROM requests WHERE last_seen_at < ? AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.request_id=requests.request_id)', (timestamp,))
+            latest = self.latest_run()
+            if latest:
+                self.connection.execute("""DELETE FROM runs WHERE id != ? AND ended_at < ?
+                    AND status IN ('closed','interrupted')
+                    AND COALESCE(json_extract(summary_json,'$.handoff.status'),'') != 'ready'
+                    AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.last_run_id=runs.id)
+                    AND NOT EXISTS (SELECT 1 FROM reviews WHERE reviews.run_id=runs.id)
+                    AND NOT EXISTS (SELECT 1 FROM submissions WHERE submissions.run_id=runs.id)""", (latest['id'],timestamp))
+        return len(expired)

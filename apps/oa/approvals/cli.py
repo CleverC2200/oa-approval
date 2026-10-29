@@ -16,6 +16,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='单轮 SQLite 审批；默认预览，不写 OA。')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
+    cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
+    cleanup.add_argument('--execute', action='store_true')
     pending = commands.add_parser('start', aliases=['pending'], help='重新拉取待办并保持前台owner；EOF或finish安全结束')
     pending.add_argument('--workflow', action='append')
     pending.add_argument('--request-id', action='append', help='仅纳入重新拉取待办中匹配的申请，可重复指定')
@@ -71,6 +73,23 @@ def main(argv=None):
         parser.error('submit requires --opinion-file or --recognition-file')
     root = args.root.expanduser().resolve()
     try:
+        if args.operation == 'cleanup':
+            from apps.oa.approvals import retention
+            from apps.oa.approvals.owner import round_lock
+            from apps.oa.approvals.store import Store
+            from apps.oa.runtime.paths import PROJECT_ROOT
+
+            if not (root / 'approval.sqlite3').is_file():
+                emit({'status': 'not_initialized'})
+                return 0
+            with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
+                store = Store(root / 'approval.sqlite3', read_only=not args.execute)
+                try:
+                    result = retention.cleanup(store, execute=args.execute)
+                    emit(result)
+                finally:
+                    store.connection.close()
+            return 1 if result['status'] in {'failed', 'partial'} else 0
         if args.operation in {'pending', 'start'}:
             from apps.oa.approvals import owner
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals import receipts
+from apps.oa.approvals import receipts, retention
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
@@ -128,7 +128,10 @@ class Approval:
             rows.append(item)
         run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from,
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids})
+        cleanup = retention.cleanup(self.store, execute=True)
         result = {"run_id":run,"tasks":self.store.tasks(run)}
+        if cleanup["status"] != "completed":
+            result["cleanup"] = cleanup
         if batch_size is not None:
             result["batch"] = json.loads(self.store.run(run)["summary_json"])["batch"]
         return result
@@ -250,6 +253,8 @@ class Approval:
                 result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
             status = receipts.submission_status(result)
             self.store.finish_submission(submission,status,result)
+            if status == "submitted":
+                result["cleanup"] = retention.cleanup(self.store, execute=True, task_id=task_id)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
     def postcheck(self, task_id):
@@ -272,10 +277,16 @@ class Approval:
             result = receipts.verification_result(handled,pending,fields_match=fields_match)
             status = receipts.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
+            if status == "submitted":
+                result["cleanup"] = retention.cleanup(self.store, execute=True, task_id=task_id)
             return {"task_id":task_id,"status":status,**result}
 
     def inspect(self, task_id):
         return self.store.details(task_id)
 
     def close(self, run_id, *, handoff=False):
-        return self.store.close(run_id, handoff=handoff)
+        result = self.store.close(run_id, handoff=handoff)
+        cleanup = retention.cleanup(self.store, execute=True)
+        if cleanup["status"] != "completed":
+            result["cleanup"] = cleanup
+        return result
