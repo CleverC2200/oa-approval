@@ -66,7 +66,9 @@ bash .codex/python.sh -m apps.oa.references import-tpm --help
 
 本地 prepare 保留原件、资源和父级归属，使用新输出目录；本地来源不构成已核实的 OA 来源。识别可能调用模型，调用前按当前授权选择材料与范围。阅读副本不能代替原件。
 
-运行数据与审批账本继续使用所选 root 下的原有布局。原件、历史冻结材料、意见和回执保留。附件缓存默认同 root，显式 `OA_FINANCE_PREAUDIT_CACHE_DB` 可共享或禁用；资源槽沿用现有协调目录约定。凭据保存在进程环境或工作树外的私有配置中。
+运行数据与审批账本继续使用所选 root 下的原有布局。当前节点提交并回查成功后，清理本地附件原件、冻结材料及关联解析文件；预览、失败、结果不明和未完成任务引用的材料保留。后续新一轮重新采集、分析，不凭旧材料跳过审核。SQLite 内的材料正文、意见和提交回执保留 365 天，超过期限且已核实完成、未重新出现在待办中的历史在启动或关闭轮次时淘汰；未完成及结果不明的记录继续保留。清理失败不改变已核实提交结果，可在后续轮次重试。附件缓存默认同 root，显式 `OA_FINANCE_PREAUDIT_CACHE_DB` 可共享或禁用；资源槽沿用现有协调目录约定。凭据保存在进程环境或工作树外的私有配置中。
+
+已有数据可用 `bash .codex/python.sh -m apps.oa.approvals --root /absolute/runtime/root cleanup` 预览，追加 `--execute` 执行材料清理与历史淘汰。执行使用审批共享锁，须等当前 owner 退出；仅处理所选 root 下由已核实完成任务关联的材料，独立分析输出和范围外文件不自动删除。
 
 - [附件识别要求](docs/agents/attachment-recognition.md)
 - [图片压缩要求](docs/agents/image-compression.md)
