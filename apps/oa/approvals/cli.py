@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from apps.oa.approvals.client import emit, failure, send, socket_path, query
+from apps.oa.approvals import receipts
 from apps.oa.runtime.paths import RUNTIME_ROOT
 
 
@@ -56,10 +57,18 @@ def main(argv=None):
     preview.add_argument('--observations-file', type=Path)
     check = commands.add_parser('postcheck', help='仅核对未知提交，不重发')
     check.add_argument('--task-id', type=int, required=True)
+    check.add_argument('--confirm-not-written', choices=['YES'], help='仅记录本次用户明确确认未提交成功，不重发；仍核对同一待办及已办事实')
+    check.add_argument('--confirmation-note', help='保存本次人工确认的原文及依据；须与 --confirm-not-written YES 同时提供')
+    check.add_argument('--expected-submission-id', type=int, help='本次人工确认针对的精确提交尝试ID')
     failed = commands.add_parser('fail', help='登记当前轮活动审核的技术失败，不访问 OA')
     failed.add_argument('--task-id', type=int, required=True)
     failed.add_argument('--reason', required=True)
     args = parser.parse_args(argv)
+    if args.operation == 'postcheck' and (
+            bool(args.confirm_not_written) != bool(args.confirmation_note and args.confirmation_note.strip())
+            or bool(args.confirm_not_written) != (args.expected_submission_id is not None)
+            or (args.expected_submission_id is not None and args.expected_submission_id <= 0)):
+        parser.error('--confirm-not-written YES, a nonempty --confirmation-note and a positive --expected-submission-id must be supplied together')
     if args.operation == 'finish' and args.orphaned and args.handoff:
         parser.error('--orphaned cannot create a handoff')
     if args.operation in {'pending', 'start'} and args.limit < 0:
@@ -126,6 +135,9 @@ def main(argv=None):
                            allow_overseas=getattr(args, 'allow_overseas', None) == 'YES')
         if args.operation == 'fail':
             request['reason'] = args.reason
+        if args.operation == 'postcheck':
+            request['confirmation_note'] = args.confirmation_note if args.confirm_not_written == 'YES' else None
+            request['expected_submission_id'] = args.expected_submission_id
         try:
             result = send(root, request)
         except (FileNotFoundError, ConnectionRefusedError):
@@ -133,8 +145,11 @@ def main(argv=None):
                 raise
             from apps.oa.approvals.owner import postcheck_without_owner
 
-            result = postcheck_without_owner(root, args.task_id)
+            result = postcheck_without_owner(root, args.task_id, confirmation_note=request['confirmation_note'],
+                                             expected_submission_id=request['expected_submission_id'])
         emit(result)
+        if args.operation == 'postcheck' and args.confirm_not_written == 'YES' and result.get('failure_code') == receipts.USER_CONFIRMED_NOT_WRITTEN:
+            return 0
         return 1 if result.get('status') == 'refused' or (result.get('status') == 'failed' and (args.operation != 'fail' or 'error' in result)) else 0
     except KeyboardInterrupt:
         return 130

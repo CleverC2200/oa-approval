@@ -56,7 +56,7 @@ def _require_owner_missing(root):
     raise ValueError('owner_still_reachable')
 
 
-def postcheck_without_owner(root, task_id):
+def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_submission_id=None):
     from apps.oa.approvals.operations import Approval
 
     if not (root / 'approval.sqlite3').is_file():
@@ -66,7 +66,7 @@ def postcheck_without_owner(root, task_id):
         require_production_main()
         approval = Approval(root, source_policy=load_source_policy())
         try:
-            return approval.postcheck(task_id)
+            return approval.postcheck(task_id, confirmation_note=confirmation_note, expected_submission_id=expected_submission_id)
         finally:
             approval.store.connection.close()
 
@@ -93,7 +93,7 @@ def finish_orphaned(root, run_id):
                 raise ValueError('collection_unresolved')
             acceptance = submission_acceptance(store, run_id, tasks)
             if any(task['status'] in {'submitting', 'unknown'} for task in tasks) or any(
-                    acceptance[key] for key in ('unknown_attempt_count', 'unfinished_attempt_count', 'unverified_attempt_count')):
+                    not submission['resolved'] for task in acceptance['tasks'] for submission in task['submissions']):
                 raise ValueError('submission_unresolved')
             result = store.close(run_id)
             server_path.unlink(missing_ok=True)
@@ -116,7 +116,8 @@ def dispatch(approval, run_id, request):
                                confirm_write=operation == 'submit' and request.get('confirm_write', False),
                                allow_overseas=request.get('allow_overseas', False))
     if operation == 'postcheck':
-        return approval.postcheck(request['task_id'])
+        return approval.postcheck(request['task_id'], confirmation_note=request.get('confirmation_note'),
+                                  expected_submission_id=request.get('expected_submission_id'))
     if operation == 'fail':
         return approval.fail(run_id, request['task_id'], request['reason'])
     raise ValueError('unknown_operation')

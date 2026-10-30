@@ -21,9 +21,11 @@ class ReceiptRecord(TypedDict):
 class SubmissionEvidence:
     receipt: dict[str, object]
     verified: bool
+    resolved: bool
 
 
 SUBMIT_REJECTED = "writer_submit_rejected"
+USER_CONFIRMED_NOT_WRITTEN = "user_confirmed_not_written"
 TRANSPORT_UNKNOWN = "writer_transport_unknown"
 POSTCHECK_TIMEOUT = "writer_postcheck_timeout"
 PENDING_CONFLICT = "writer_pending_conflict"
@@ -33,6 +35,7 @@ TARGET_CHANGED = "submission_target_changed"
 CONFIRMED_NO_WRITE_CODES = frozenset(
     {
         SUBMIT_REJECTED,
+        USER_CONFIRMED_NOT_WRITTEN,
         PREFLIGHT_FAILED,
         TARGET_CHANGED,
     }
@@ -74,7 +77,7 @@ def verification_result(
 def submission_status(result: Mapping[str, object]) -> SubmissionStatus:
     if _has_completion_evidence(result):
         return "submitted"
-    return "failed" if result.get("failure_code") == SUBMIT_REJECTED else "unknown"
+    return "failed" if result.get("failure_code") in {SUBMIT_REJECTED, USER_CONFIRMED_NOT_WRITTEN} else "unknown"
 
 
 def assess_submission(submission: Mapping[str, object], *, workflow_key: str) -> SubmissionEvidence:
@@ -86,7 +89,15 @@ def assess_submission(submission: Mapping[str, object], *, workflow_key: str) ->
         and (receipt.get("fields_match") is True if workflow_key == "overseas_invoice"
              else receipt.get("fields_match") is not False)
     )
-    return SubmissionEvidence(receipt, verified)
+    confirmed_not_written = (
+        submission['status'] == 'failed'
+        and submission['completed_at'] is not None
+        and receipt.get('failure_code') == USER_CONFIRMED_NOT_WRITTEN
+        and isinstance(receipt.get('confirmation_note'), str)
+        and bool(receipt['confirmation_note'].strip())
+        and isinstance(receipt.get('previous_result'), dict)
+    )
+    return SubmissionEvidence(receipt, verified, verified or confirmed_not_written)
 
 
 def _has_completion_evidence(result: Mapping[str, object]) -> bool:

@@ -54,7 +54,8 @@ def submission_acceptance(store, run_id, tasks):
             attempts.append({key: submission[key] for key in
                 ('id', 'review_id', 'status', 'started_at', 'completed_at')} | {
                 key: receipt.get(key) for key in
-                ('submit_ok', 'done_hit', 'postcheck_done_hit', 'fields_match', 'failure_code')} | {'verified': evidence.verified})
+                    ('submit_ok', 'done_hit', 'postcheck_done_hit', 'fields_match', 'failure_code')} | {
+                    'verified': evidence.verified, 'resolved': evidence.resolved})
         facts.append({
             'task_id': task['id'], 'request_id': task['request_id'], 'status': task['status'],
             'attempt_count': len(attempts), 'duplicate_attempt_count': max(0, len(attempts) - 1),
