@@ -185,6 +185,125 @@ def record_submission(store, task_id, *, status=None, result=None, opinion='ÂêàÊ
     return submission_id
 
 
+@pytest.mark.parametrize('handled', [True, False])
+@pytest.mark.parametrize('stale_socket', [False, True])
+def test_postcheck_reconciles_closed_owner_without_resubmitting(tmp_path, monkeypatch, capsys, request, handled, stale_socket):
+    import socket
+
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.client import socket_path
+    from apps.oa.approvals.operations import Approval
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    app = create_demo(tmp_path / 'round')
+    started = app.pending()
+    task = started['tasks'][0]
+    record_submission(app.store, task['id'], status='unknown')
+    submission = app.store.details(task['id'])['submissions'][0]
+    app.close(started['run_id'])
+    if stale_socket:
+        path = socket_path(app.root)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.bind(str(path))
+        request.addfinalizer(lambda: path.unlink(missing_ok=True))
+    if handled:
+        app.api.rows = [row for row in app.api.rows if row['request_id'] != task['request_id']]
+        app.api.handled = [{'request_id': task['request_id'], 'handled_at': submission['started_at']}]
+    reads = []
+
+    def api(_self):
+        reads.append('read')
+        return app.api
+
+    def submit(*args, **kwargs):
+        pytest.fail('postcheck must not send a submission')
+
+    monkeypatch.setattr(Approval, '_api', api)
+    monkeypatch.setattr(app.api, 'submit_and_verify', submit)
+    assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task['id'])]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['status'] == ('submitted' if handled else 'unknown')
+    assert result['submit_ok'] is handled
+    assert result['done_hit'] is handled
+    assert result['postcheck_done_hit'] is handled
+    assert app.store.run(started['run_id'])['status'] == ('closed' if handled else 'blocked')
+    assert app.store.run(started['run_id'])['ended_at'] is not None
+    assert app.store.latest_run()['id'] == started['run_id']
+    assert len(app.store.details(task['id'])['submissions']) == 1
+    if handled:
+        reads.clear()
+        assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task['id'])]) == 0
+        assert json.loads(capsys.readouterr().out)['status'] == 'submitted'
+        assert not reads
+    app.store.connection.close()
+
+
+@pytest.mark.parametrize('locked', ['round', 'shared'])
+def test_postcheck_without_owner_respects_existing_locks(tmp_path, monkeypatch, capsys, locked):
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.operations import Approval
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    app = create_demo(tmp_path / 'round')
+    started = app.pending()
+    task_id = started['tasks'][0]['id']
+    record_submission(app.store, task_id, status='unknown')
+    app.close(started['run_id'])
+    before = app.store.details(task_id)
+    monkeypatch.setattr(Approval, '_api', lambda self: pytest.fail('locked postcheck must not read OA'))
+    directory = app.root if locked == 'round' else owner.PROJECT_ROOT / 'runtime'
+    with owner.round_lock(directory):
+        assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task_id)]) == 1
+    assert json.loads(capsys.readouterr().out)['error'] == 'BlockingIOError'
+    assert app.store.details(task_id) == before
+    app.store.connection.close()
+
+
+def test_postcheck_without_owner_preserves_unknown_when_read_fails(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.operations import Approval
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    app = create_demo(tmp_path / 'round')
+    started = app.pending()
+    task_id = started['tasks'][0]['id']
+    record_submission(app.store, task_id, status='unknown')
+    app.close(started['run_id'])
+    before = app.store.details(task_id)
+
+    def unavailable(_self):
+        raise RuntimeError('controlled_read_failure')
+
+    monkeypatch.setattr(Approval, '_api', unavailable)
+    assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task_id)]) == 1
+    assert json.loads(capsys.readouterr().out)['error'] == 'controlled_read_failure'
+    assert app.store.details(task_id) == before
+    app.store.connection.close()
+
+
+def test_postcheck_without_owner_requires_published_main_before_reading(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.operations import Approval
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    app = create_demo(tmp_path / 'round')
+    task_id = app.pending()['tasks'][0]['id']
+    record_submission(app.store, task_id, status='unknown')
+    before = app.store.details(task_id)
+
+    def refuse_main():
+        raise ValueError('production_main_not_synced')
+
+    monkeypatch.setattr(owner, 'require_production_main', refuse_main)
+    monkeypatch.setattr(Approval, '_api', lambda self: pytest.fail('unpublished code must not read OA'))
+    assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task_id)]) == 1
+    assert json.loads(capsys.readouterr().out)['error'] == 'production_main_not_synced'
+    assert app.store.details(task_id) == before
+    app.store.connection.close()
+
+
 def test_batch_status_acceptance_uses_scoped_receipts_and_exposes_unresolved_and_duplicate_attempts(tmp_path, capsys):
     app = create_demo(tmp_path)
     template = app.api.rows[0]

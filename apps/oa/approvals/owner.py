@@ -46,6 +46,31 @@ def round_lock(root, *, shared_root=None):
         yield
 
 
+def _require_owner_missing(root):
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.settimeout(0.5)
+        try:
+            client.connect(str(socket_path(root)))
+        except (FileNotFoundError, ConnectionRefusedError):
+            return
+    raise ValueError('owner_still_reachable')
+
+
+def postcheck_without_owner(root, task_id):
+    from apps.oa.approvals.operations import Approval
+
+    if not (root / 'approval.sqlite3').is_file():
+        raise ValueError('task_not_found')
+    with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
+        _require_owner_missing(root)
+        require_production_main()
+        approval = Approval(root, source_policy=load_source_policy())
+        try:
+            return approval.postcheck(task_id)
+        finally:
+            approval.store.connection.close()
+
+
 def finish_orphaned(root, run_id):
     from apps.oa.approvals.status import submission_acceptance
     from apps.oa.approvals.store import Store
@@ -55,14 +80,7 @@ def finish_orphaned(root, run_id):
         raise ValueError('run_not_found')
     with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
         server_path = socket_path(root)
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(0.5)
-            try:
-                client.connect(str(server_path))
-            except (FileNotFoundError, ConnectionRefusedError):
-                pass
-            else:
-                raise ValueError('owner_still_reachable')
+        _require_owner_missing(root)
         store = Store(database)
         try:
             latest = store.latest_run()
