@@ -15,6 +15,7 @@ import time
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
+import zlib
 
 import fitz
 from PIL import Image, JpegImagePlugin
@@ -210,6 +211,41 @@ def _open_image(raw: bytes):
         image.close()
         raise ValueError('attachment_image_decoded_memory_limit')
     return image
+
+
+def _png_reading_copy(raw: bytes) -> bytes:
+    if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+        return raw
+    offset, repaired = 8, None
+    while offset + 12 <= len(raw):
+        length = int.from_bytes(raw[offset:offset + 4], 'big')
+        end = offset + length + 12
+        if end > len(raw):
+            return raw
+        kind = raw[offset + 4:offset + 8]
+        checksum = int.from_bytes(raw[end - 4:end], 'big')
+        if zlib.crc32(raw[offset + 4:end - 4]) != checksum:
+            return raw
+        if kind == b'zTXt':
+            separator = raw.find(b'\0', offset + 8, end - 4)
+            if (offset + 8 < separator <= offset + 87
+                    and separator + 1 < end - 4 and raw[separator + 1] == ord('0')):
+                if repaired is None:
+                    repaired = bytearray(raw)
+                repaired[separator + 1] = 0
+                repaired[end - 4:end] = zlib.crc32(repaired[offset + 4:end - 4]).to_bytes(4, 'big')
+        if kind == b'IEND':
+            if repaired is None:
+                return raw
+            reading_copy = bytes(repaired)
+            try:
+                with _open_image(reading_copy) as image:
+                    image.load()
+            except OSError:
+                raise ValueError('attachment_image_invalid') from None
+            return reading_copy
+        offset = end
+    return raw
 
 
 def _png_crop(image, box) -> bytes:
@@ -519,6 +555,11 @@ class _RecognitionSession:
         digest = _digest(raw)
         if source.get('content_sha256') and digest != source['content_sha256']:
             raise ValueError('attachment_page_changed')
+        reading_copy = _png_reading_copy(raw)
+        if reading_copy != raw:
+            current['image_normalization'] = {'kind': 'png_ztxt_compression_method',
+                'source_sha256': digest, 'reading_copy_sha256': _digest(reading_copy)}
+        raw = reading_copy
         if selection.region is None:
             return digest, _image_tiles(raw, rotate=selection.rotate)
         region = selection.region

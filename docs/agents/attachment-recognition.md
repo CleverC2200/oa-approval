@@ -25,6 +25,8 @@ bash .codex/python.sh -m apps.oa.materials recognize \
 
 图片方向不正确时，使用 `--rotate 90`、`--rotate 180` 或 `--rotate 270` 顺时针旋转阅读副本，默认 `--rotate 0`。API 对应 `recognize(..., rotate=90)`。该选项适用于 `--file` 和 `--material-file` 的图片页，文本保持原样；原件和冻结材料均不覆盖。旋转副本只用于识别请求，报告中的 `rotate` 记录角度，`source_image_path` 指向旋转前的图片页，`resource_id`、`prepared_resource_id` 和 `page_number` 保留原附件及准备页定位。
 
+PNG 的 `zTXt` 压缩方式误写为字符 `"0"` 时，识别入口会在内存阅读副本中纠正该字节及对应 CRC。原件、冻结材料和像素分块保持原样；整图、局部、旋转及分块读取共用该处理。报告在对应 `parts[].image_normalization` 记录修正类型、原始图片与阅读副本的 SHA256，原有资源 ID、页码及 `content_sha256` 仍指向原件。分块校验不通过、文件截断、其他压缩方式、像素无法解码或文字解压超过既有限额时，不通过此兼容处理放行。
+
 多帧图片不支持非零旋转，包括动画 GIF、WebP。工具按图片实际帧数判断，返回 `status=failed` 和 `error_code=attachment_multiframe_rotation_unsupported`，表示“不支持多帧旋转”，不发送仅保留首帧的副本。该限制同样适用于 `--region`；默认 `--rotate 0` 保持现有读取行为，局部复读仍只支持单帧图片。
 
 同时提供 `--region` 与 `--rotate` 时，先按原图像素坐标裁剪，再旋转裁剪副本。报告中的 `region`、`source_image_size` 和 `image_tiles[].box` 仍对应原图，覆盖范围仍为 `image_region`。超大图也先按原图分块，再旋转各分区；旋转不扩大读取范围，不改变原有 coverage 含义。
