@@ -126,7 +126,14 @@ def main(argv=None):
                            allow_overseas=getattr(args, 'allow_overseas', None) == 'YES')
         if args.operation == 'fail':
             request['reason'] = args.reason
-        result = send(root, request)
+        try:
+            result = send(root, request)
+        except (FileNotFoundError, ConnectionRefusedError):
+            if args.operation != 'postcheck':
+                raise
+            from apps.oa.approvals.owner import postcheck_without_owner
+
+            result = postcheck_without_owner(root, args.task_id)
         emit(result)
         return 1 if result.get('status') == 'refused' or (result.get('status') == 'failed' and (args.operation != 'fail' or 'error' in result)) else 0
     except KeyboardInterrupt:
