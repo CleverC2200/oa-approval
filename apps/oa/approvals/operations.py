@@ -257,9 +257,17 @@ class Approval:
                 result["cleanup"] = retention.cleanup(self.store, execute=True, task_id=task_id)
             return {"task_id":task_id,"review_id":review["id"],"status":status,**result}
 
-    def postcheck(self, task_id):
+    def postcheck(self, task_id, *, confirmation_note=None, expected_submission_id=None):
+        if confirmation_note is not None and (not isinstance(confirmation_note, str) or not confirmation_note.strip()):
+            raise ValueError('confirmation_note_required')
+        if (confirmation_note is None) != (expected_submission_id is None):
+            raise ValueError('confirmation_submission_required')
+        if expected_submission_id is not None and (type(expected_submission_id) is not int or expected_submission_id <= 0):
+            raise ValueError('confirmation_submission_required')
         with self._writer_lock():
             task = self.store.get_task(task_id)
+            if confirmation_note is not None and task['workflow_key'] == 'overseas_invoice':
+                raise ValueError('overseas_confirmation_not_supported')
             if task["status"] == "submitted":
                 return {"task_id":task_id,"status":"submitted","submissions":self.store.details(task_id)["submissions"]}
             if task["status"] not in {"unknown","submitting","submitted"}:
@@ -267,7 +275,10 @@ class Approval:
             from apps.oa.approvals.sources.writer import handled_since
             details = self.store.details(task_id)
             submission = details["submissions"][-1]
-            pending = any(str(row.get("request_id")) == task["request_id"] for row in self._api().pending_rows())
+            if confirmation_note is not None and submission['id'] != expected_submission_id:
+                raise ValueError('confirmation_submission_changed')
+            pending_rows = self._api().pending_rows()
+            pending = any(str(row.get("request_id")) == task["request_id"] for row in pending_rows)
             handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
             fields_match = None
             if task["workflow_key"] == "overseas_invoice":
@@ -275,6 +286,11 @@ class Approval:
                 material = json.loads(task["material_json"])
                 fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),origins=self.source_policy.attachments)
             result = receipts.verification_result(handled,pending,fields_match=fields_match)
+            if confirmation_note is not None and receipts.submission_status(result) != 'submitted':
+                if handled or sum(occurrence_key(row) == task['occurrence'] for row in pending_rows) != 1:
+                    raise ValueError('confirmation_target_changed')
+                result.update(failure_code=receipts.USER_CONFIRMED_NOT_WRITTEN,
+                    confirmation_note=confirmation_note.strip(), previous_result=json.loads(submission['result_json']))
             status = receipts.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
             if status == "submitted":

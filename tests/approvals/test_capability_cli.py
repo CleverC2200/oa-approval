@@ -304,6 +304,76 @@ def test_postcheck_without_owner_requires_published_main_before_reading(tmp_path
     app.store.connection.close()
 
 
+@pytest.mark.parametrize('current_state', ['pending', 'changed', 'handled', 'conflicting', 'wrong_attempt', 'overseas'])
+def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(tmp_path, monkeypatch, capsys, current_state):
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.operations import Approval
+
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    app = create_demo(tmp_path / 'round')
+    if current_state == 'overseas':
+        app.api.rows[0]['workflow_key'] = 'overseas_invoice'
+    started = app.pending()
+    task = started['tasks'][0]
+    record_submission(app.store, task['id'], status='unknown', result={'failure_code': 'writer_result_unknown'})
+    before = app.store.details(task['id'])
+    if current_state == 'changed':
+        app.api.rows[0]['received_at'] = '2026-10-23 09:00:00'
+    if current_state in {'handled', 'conflicting'}:
+        app.api.handled = [{'request_id': task['request_id'], 'handled_at': before['submissions'][0]['started_at']}]
+        if current_state == 'handled':
+            app.api.rows = app.api.rows[1:]
+    monkeypatch.setattr(Approval, '_api', lambda self: app.api)
+    monkeypatch.setattr(app.api, 'submit_and_verify', lambda *a, **k: pytest.fail('confirmation must not submit'))
+    code = cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task['id']),
+                     '--confirm-not-written', 'YES', '--confirmation-note', '用户已明确确认未提交成功',
+                     '--expected-submission-id', str(before['submissions'][0]['id'] + (current_state == 'wrong_attempt'))])
+    result = json.loads(capsys.readouterr().out)
+    after = app.store.details(task['id'])
+    if current_state in {'changed', 'conflicting', 'wrong_attempt', 'overseas'}:
+        assert code == 1
+        assert result['error'] == {'wrong_attempt': 'confirmation_submission_changed',
+                                   'overseas': 'overseas_confirmation_not_supported'}.get(current_state, 'confirmation_target_changed')
+        assert after == before
+    else:
+        assert code == 0
+        assert result['status'] == ('failed' if current_state == 'pending' else 'submitted')
+        assert after['reviews'] == before['reviews']
+        assert len(after['submissions']) == 1
+        if current_state == 'pending':
+            receipt = json.loads(after['submissions'][0]['result_json'])
+            assert receipt['failure_code'] == 'user_confirmed_not_written'
+            assert receipt['confirmation_note'] == '用户已明确确认未提交成功'
+            assert receipt['previous_result'] == {'failure_code': 'writer_result_unknown'}
+            assert cli.main(['--root', str(app.root), 'status', '--view', 'batch']) == 0
+            acceptance = json.loads(capsys.readouterr().out)['acceptance']
+            assert acceptance['all_verified'] is False
+            assert acceptance['verified_attempt_count'] == 0
+            assert cli.main(['--root', str(app.root), 'finish', '--run-id', started['run_id'], '--orphaned']) == 0
+            assert json.loads(capsys.readouterr().out)['status'] == 'closed'
+            assert acceptance['tasks'][0]['submissions'][0]['resolved'] is True
+            fresh = app.pending()
+            assert fresh['run_id'] != started['run_id']
+            assert app.store.get_task(task['id'])['status'] == 'queued'
+    app.store.connection.close()
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--confirm-not-written', 'YES'],
+    ['--confirm-not-written', 'YES', '--confirmation-note', '本次确认'],
+    ['--confirm-not-written', 'YES', '--expected-submission-id', '1'],
+    ['--confirmation-note', '本次确认'],
+    ['--expected-submission-id', '-1'],
+])
+def test_no_write_confirmation_requires_complete_explicit_arguments(tmp_path, arguments):
+    root = tmp_path / 'missing'
+    with pytest.raises(SystemExit) as caught:
+        cli.main(['--root', str(root), 'postcheck', '--task-id', '1', *arguments])
+    assert caught.value.code == 2
+    assert not root.exists()
+
+
 def test_batch_status_acceptance_uses_scoped_receipts_and_exposes_unresolved_and_duplicate_attempts(tmp_path, capsys):
     app = create_demo(tmp_path)
     template = app.api.rows[0]
