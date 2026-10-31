@@ -85,12 +85,6 @@ class TravelReadSession:
 
         self._remaining(deadline)
         self.engine = engine
-        self.transport = ReadonlyProxy(
-            Policy(self.policy), patches=patches, deadline=deadline
-        )
-        proxy_url = self.transport.start()
-        self.engine_stack.callback(self.transport.close)
-        playwright = self.engine_stack.enter_context(sync_playwright())
         if engine == "moli":
             binary = self.policy.travel_read.moli_binary or shutil.which("moli")
             if not binary or not Path(binary).is_file():
@@ -100,6 +94,13 @@ class TravelReadSession:
                 not in ACCEPTED_MOLI_SHA256
             ):
                 raise ReadFailure("travel_moli_version_unverified", retryable=True)
+        self.transport = ReadonlyProxy(
+            Policy(self.policy), patches=patches, deadline=deadline
+        )
+        proxy_url = self.transport.start()
+        self.engine_stack.callback(self.transport.close)
+        playwright = self.engine_stack.enter_context(sync_playwright())
+        if engine == "moli":
             with socket.socket() as sock:
                 sock.bind(("127.0.0.1", 0))
                 port = sock.getsockname()[1]
@@ -125,18 +126,7 @@ class TravelReadSession:
             )
             self.engine_stack.callback(self._stop_process, process)
             endpoint = f"http://127.0.0.1:{port}"
-            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-            startup_deadline = min(deadline, time.monotonic() + 10)
-            while True:
-                if process.poll() is not None:
-                    raise ReadFailure("travel_moli_start_failed", retryable=True)
-                self._remaining(startup_deadline)
-                try:
-                    with opener.open(endpoint + "/json/version", timeout=0.2) as reply:
-                        reply.read()
-                    break
-                except OSError:
-                    time.sleep(0.05)
+            self._wait_for_moli(process, endpoint, deadline)
             browser = playwright.chromium.connect_over_cdp(
                 endpoint, timeout=max(1, self._remaining(deadline) * 1000)
             )
@@ -179,6 +169,22 @@ class TravelReadSession:
         self.engine = engine
         self.version = browser.version
         self._verify_oa(deadline)
+
+    def _wait_for_moli(self, process, endpoint, deadline):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        startup_deadline = min(deadline, time.monotonic() + 10)
+        while True:
+            if process.poll() is not None:
+                raise ReadFailure("travel_moli_start_failed", retryable=True)
+            self._remaining(deadline)
+            if time.monotonic() >= startup_deadline:
+                raise ReadFailure("travel_moli_start_timeout", retryable=True)
+            try:
+                with opener.open(endpoint + "/json/version", timeout=0.2) as reply:
+                    reply.read()
+                return
+            except OSError:
+                time.sleep(0.05)
 
     @staticmethod
     def _stop_process(process):
@@ -406,7 +412,12 @@ class TravelReadSession:
                         patches=True,
                     )
             except (_TravelReadDeadline, ReadFailure) as error:
-                if isinstance(error, _TravelReadDeadline):
+                if isinstance(error, _TravelReadDeadline) or (
+                    isinstance(error, ReadFailure)
+                    and error.code == "travel_read_deadline"
+                    and engine == "moli"
+                    and time.monotonic() < deadline
+                ):
                     self.check_transport()
                     error = ReadFailure("travel_engine_deadline", retryable=True)
                 self.attempts.append(

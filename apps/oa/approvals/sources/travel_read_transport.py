@@ -556,11 +556,25 @@ class ReadonlyProxy:
                 raise RuntimeError("transport_closed")
             self.connections.add(connection)
         response = None
+        upstream_socket = None
+
+        def cancel_read():
+            channel = upstream_socket or connection.sock
+            if channel is not None:
+                try:
+                    channel.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        timer = threading.Timer(max(0.1, deadline - time.monotonic()), cancel_read)
+        timer.daemon = True
+        timer.start()
         try:
             path = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
             connection.connect()
+            upstream_socket = connection.sock
             with self.lock:
-                self.upstream_sockets[connection] = connection.sock
+                self.upstream_sockets[connection] = upstream_socket
             if self.closing.is_set() or time.monotonic() >= deadline:
                 raise TimeoutError("upstream_deadline")
             connection.request(method, path, body=body, headers=headers)
@@ -571,8 +585,8 @@ class ReadonlyProxy:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0 or self.closing.is_set():
                     raise TimeoutError("upstream_deadline")
-                if connection.sock:
-                    connection.sock.settimeout(min(20, remaining))
+                if upstream_socket:
+                    upstream_socket.settimeout(min(20, remaining))
                 chunk = response.read1(min(65536, 30000001 - size))
                 if not chunk:
                     break
@@ -585,6 +599,8 @@ class ReadonlyProxy:
                 raise http.client.IncompleteRead(b"", max(0, int(expected) - size))
             return response.status, list(response.headers.raw_items()), b"".join(chunks)
         finally:
+            timer.cancel()
+            timer.join(1)
             if response is not None:
                 response.close()
             connection.close()

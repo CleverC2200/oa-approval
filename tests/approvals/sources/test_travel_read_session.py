@@ -435,6 +435,7 @@ def test_upstream_slow_trickle_has_a_whole_request_deadline(monkeypatch):
     clock = [1.0]
     monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])
     closed = []
+    timeouts = []
 
     class Response:
         status = 200
@@ -448,7 +449,7 @@ def test_upstream_slow_trickle_has_a_whole_request_deadline(monkeypatch):
             return b"x"
 
     class Connection:
-        sock = SimpleNamespace(settimeout=lambda timeout: None)
+        sock = SimpleNamespace(settimeout=lambda timeout: timeouts.append(timeout))
 
         def __init__(self, *args, **kwargs):
             pass
@@ -460,6 +461,7 @@ def test_upstream_slow_trickle_has_a_whole_request_deadline(monkeypatch):
             pass
 
         def getresponse(self):
+            self.sock = None
             return Response()
 
         def close(self):
@@ -481,6 +483,79 @@ def test_upstream_slow_trickle_has_a_whole_request_deadline(monkeypatch):
             "GET", "https://trip.example.test/static/core/fixture.js", {}, None
         )
     assert clock[0] == 22 and closed and not proxy.connections
+    assert timeouts == [20, 13, 6]
+
+
+def test_local_moli_startup_timeout_is_retryable_while_total_budget_remains(
+    monkeypatch,
+):
+    clock = [1.0]
+    monkeypatch.setattr(sessions.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        sessions.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    def unavailable(*args, **kwargs):
+        raise OSError("fixture_not_ready")
+
+    monkeypatch.setattr(
+        sessions.urllib.request,
+        "build_opener",
+        lambda *a: SimpleNamespace(open=unavailable),
+    )
+    session = sessions.TravelReadSession(policy())
+    with pytest.raises(ReadFailure) as error:
+        session._wait_for_moli(
+            SimpleNamespace(poll=lambda: None), "http://127.0.0.1:1234", 100
+        )
+    assert error.value.code == "travel_moli_start_timeout" and error.value.retryable
+    assert clock[0] < 12
+    session.close()
+
+
+def test_upstream_header_wait_is_cancelled_at_total_deadline(monkeypatch):
+    import threading
+    import time
+    from apps.oa.approvals.sources import travel_read_transport as transport
+
+    cancelled = threading.Event()
+
+    class Connection:
+        sock = SimpleNamespace(shutdown=lambda how: cancelled.set())
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            assert cancelled.wait(1)
+            raise OSError("fixture_read_cancelled")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(transport.http.client, "HTTPSConnection", Connection)
+    proxy = object.__new__(ReadonlyProxy)
+    proxy.lock, proxy.connections, proxy.upstream_sockets, proxy.closing = (
+        threading.Lock(),
+        set(),
+        {},
+        threading.Event(),
+    )
+    started = time.monotonic()
+    proxy.deadline = started + 0.1
+    with pytest.raises(OSError, match="fixture_read_cancelled"):
+        proxy.read_upstream(
+            "GET", "https://trip.example.test/static/core/fixture.js", {}, None
+        )
+    assert (
+        time.monotonic() - started < 1 and cancelled.is_set() and not proxy.connections
+    )
 
 
 def test_close_cancels_active_upstream_connections(monkeypatch):
