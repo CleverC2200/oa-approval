@@ -54,6 +54,12 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 ## 材料与参考资料
 
+商旅采集默认使用原 Chromium 与 RPA 会话。可在启动进程时设置 `OA_TRAVEL_BROWSER_ENGINE=moli`、`OA_TRAVEL_SESSION_SOURCE=api` 和 `OA_MOLI_BIN=/absolute/path/moli`，启用独立只读会话及 Moli。`chromium` 加 `api` 使用同一只读会话运行无头 Chromium；`moli` 加 `rpa` 仍需现有 RPA 登录态。浏览器读取授权仍由 `OA_ALLOW_BROWSER_DOWNLOAD` 控制。API 模式复用现有注册凭据，不注册新应用，必须通过账号核对才继续。
+
+可选路径仅用于商旅正文、酒店明细和关联附件，不进入审批提交、海外回填或其他流程的下载路径。Moli 兼容故障在共享读取期限内最多回退一次无头 Chromium；身份、权限、源数据或必需请求被拦截时失败。进入下载批次后固定已选引擎，下载失败不会切换引擎。Cookie 只在单据会话内存中使用，回环代理和临时证书随会话关闭，不修改系统信任、全局代理或个人浏览器。
+
+当前验收的 Moli 为 macOS ARM64 的 1.1.19，二进制 SHA-256 为 `ac6e4bf3acd4ccc2fb0fefa305b32a935e93ab1a5302ed1983b7020d6bf65b25`。其他构建在补充兼容验收前按引擎不可用处理并记录 Chromium 兜底。程序不会下载或升级 Moli。页面兼容补丁只匹配已验收脚本摘要；未知脚本版本只允许无补丁 Chromium 尝试，并须通过相同材料校验。
+
 ```bash
 bash .codex/python.sh -m apps.oa.materials prepare --help
 bash .codex/python.sh -m apps.oa.materials read --help

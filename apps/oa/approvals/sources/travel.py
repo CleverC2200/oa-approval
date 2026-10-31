@@ -31,8 +31,11 @@ def _flow_mark(fields: List[Dict[str, Any]]) -> str:
 
 
 class TravelSource:
-    def __init__(self, policy: SourcePolicy, *, transfer=None, browser=None):
+    def __init__(
+        self, policy: SourcePolicy, *, transfer=None, browser=None, read_session=None
+    ):
         self.policy = policy
+        self.read_session = read_session
         self.transfer = (
             transfer if transfer is not None else attachments.DownloadTransfer(policy)
         )
@@ -62,6 +65,13 @@ class TravelSource:
     def _read_candidates(
         self, urls, *, timeout_sec, flow_mark, expected_resource_count
     ):
+        if self.read_session is not None:
+            return self.read_session.read_attempt(
+                urls,
+                timeout_sec=timeout_sec,
+                expected_marker=flow_mark,
+                expected_resource_count=expected_resource_count,
+            )
         state = self.transfer.rpa_storage_state(timeout_sec=timeout_sec)
         if not state:
             return [CandidateObservation.failure("session", "session_unavailable")]
@@ -126,7 +136,7 @@ class TravelSource:
             return TravelEvidence.failure(
                 runtime_control.STOP_CODE, "运行已请求停止，商旅附件信息未继续读取"
             )
-        if not self.browser.ensure_available():
+        if not (self.read_session or self.browser).ensure_available():
             return TravelEvidence.failure(
                 DISCOVERY_FAILED,
                 "商旅附件读取浏览器不可用",

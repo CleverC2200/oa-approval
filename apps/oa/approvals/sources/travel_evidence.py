@@ -64,6 +64,7 @@ class CandidateObservation:
     hotel_details: tuple[dict, ...] = ()
     browser: str = ""
     diagnostics: tuple[dict, ...] = ()
+    source_facts: tuple[dict, ...] = ()
 
     @classmethod
     def failure(
@@ -177,6 +178,7 @@ class TravelEvidence:
                 continue
             valid.append(observation)
             merge_inventory(inventory, observation.inventory)
+            page_fields.extend(observation.source_facts)
             body = observation.text.strip()
             if body not in seen_bodies:
                 seen_bodies.add(body)
@@ -216,6 +218,7 @@ class TravelEvidence:
         )
         facts = tuple(
             {
+                **item,
                 "source": "travel_platform",
                 "name": str(item.get("name") or ""),
                 "value": str(item.get("value") or ""),
