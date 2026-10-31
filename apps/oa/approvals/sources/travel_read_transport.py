@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import http.server
+import http.client
+import socket
 import json
 import re
 import ssl
@@ -8,9 +10,7 @@ import subprocess
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from apps.oa.approvals.sources import http as safe_http
@@ -113,9 +113,7 @@ TRIP_TEMPLATES = frozenset(
         "/fcc/fcecf/defaultv2/bxdHome/modules/oasqInfo.html",
     }
 )
-STATIC = re.compile(
-    r"\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map|json)$", re.I
-)
+STATIC = re.compile(r"\.(js|css|png|jpg|jpeg|gif|svg|ico|woff2?|ttf|eot|map)$", re.I)
 HOP = {
     "connection",
     "proxy-connection",
@@ -166,17 +164,33 @@ class Policy:
                 STATIC.search(path)
                 and path.startswith(
                     (
-                        "/cloudstore/",
-                        "/spa/",
-                        "/wui/",
+                        "/cloudstore/resource/",
+                        "/cloudstore/release/",
+                        "/cloudstore/config/devStatic/",
+                        "/cloudstore/dev/",
+                        "/spa/coms/",
+                        "/spa/main/",
+                        "/spa/moduleConfig.js",
+                        "/spa/document/plugin/",
+                        "/spa/hrm/onlinePlugin/",
+                        "/spa/hrm/static",
+                        "/spa/workflow/static",
+                        "/spa/favourite/static/",
+                        "/spa/odoc/static/",
+                        "/spa/theme/static/",
+                        "/spa/portal/static/",
+                        "/spa/portal/public/",
+                        "/spa/portal/plugins/",
+                        "/spa/integration/static",
+                        "/wui/theme/",
                         "/js/",
-                        "/formmode/",
+                        "/formmode/js/",
                         "/font/",
                         "/security/js/",
                         "/mobile/languagelocal/",
                         "/integration/js/",
                         "/social/im/js/",
-                        "/page/resource/",
+                        "/page/resource/userfile/image/",
                     )
                 )
             )
@@ -197,14 +211,24 @@ class Policy:
                 return file_match[2] in self.files
             return bool(
                 STATIC.search(path)
-                and path.startswith(("/static/", "/fcc/", "/resource/", "/assets/"))
+                and path.startswith(
+                    (
+                        "/static/core/",
+                        "/static/components/",
+                        "/static/css/",
+                        "/static/fcc/",
+                        "/fcc/css/",
+                        "/fcc/fcecf/defaultv2/js/",
+                        "/fcc/splc/js/",
+                    )
+                )
                 and ("/pcapi/" not in path)
             )
         return False
 
 
 class ReadonlyProxy:
-    def __init__(self, policy, upstream=None, *, patches=True):
+    def __init__(self, policy, upstream=None, *, patches=True, deadline=None):
         self.directory = tempfile.TemporaryDirectory(prefix="oa_travel_read_")
         root = Path(self.directory.name)
         self.cert = root / "proxy.crt"
@@ -232,6 +256,11 @@ class ReadonlyProxy:
             capture_output=True,
         )
         self.key.chmod(0o600)
+        self.deadline = deadline or time.monotonic() + 30
+        self.closing = threading.Event()
+        self.connections = set()
+        self.upstream_sockets = {}
+        self.clients = set()
         self.patches = []
         self.policy = policy
         self.upstream = upstream
@@ -245,6 +274,20 @@ class ReadonlyProxy:
 
         class Handler(http.server.BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
+
+            def setup(self):
+                super().setup()
+                self.connection.settimeout(20)
+                with outer.lock:
+                    outer.clients.add(self.connection)
+
+            def finish(self):
+                try:
+                    super().finish()
+                finally:
+                    with outer.lock:
+                        outer.clients.discard(self.connection)
+                    self.connection.close()
 
             def log_message(self, *args):
                 pass
@@ -277,9 +320,13 @@ class ReadonlyProxy:
                 self.send_response_only(200)
                 self.end_headers()
                 try:
+                    previous = self.connection
                     self.connection = outer.tls.wrap_socket(
                         self.connection, server_side=True
                     )
+                    with outer.lock:
+                        outer.clients.discard(previous)
+                        outer.clients.add(self.connection)
                     self.rfile = self.connection.makefile("rb", self.rbufsize)
                     self.wfile = self.connection.makefile("wb", self.wbufsize)
                     self.close_connection = False
@@ -432,22 +479,9 @@ class ReadonlyProxy:
                             self.command, url, headers, body
                         )
                     else:
-                        request = urllib.request.Request(
-                            url, headers=headers, data=body, method=self.command
+                        status, response_headers, data = outer.read_upstream(
+                            self.command, url, headers, body
                         )
-                        opener = urllib.request.build_opener(
-                            urllib.request.ProxyHandler({}), NoRedirect()
-                        )
-                        try:
-                            response = opener.open(request, timeout=20)
-                        except urllib.error.HTTPError as error:
-                            response = error
-                        with response:
-                            status = response.status
-                            response_headers = list(response.headers.raw_items())
-                            data = response.read(30000001)
-                        if len(data) > 30000000:
-                            raise RuntimeError("response_limit")
                 except Exception as error:
                     outer.record(
                         {
@@ -511,6 +545,53 @@ class ReadonlyProxy:
         self.server.daemon_threads = True
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 
+    def read_upstream(self, method, url, headers, body):
+        parsed = urllib.parse.urlsplit(url)
+        deadline = min(self.deadline, time.monotonic() + 20)
+        connection = http.client.HTTPSConnection(
+            parsed.hostname, timeout=max(0.1, deadline - time.monotonic())
+        )
+        with self.lock:
+            if self.closing.is_set():
+                raise RuntimeError("transport_closed")
+            self.connections.add(connection)
+        response = None
+        try:
+            path = urllib.parse.urlunsplit(("", "", parsed.path, parsed.query, ""))
+            connection.connect()
+            with self.lock:
+                self.upstream_sockets[connection] = connection.sock
+            if self.closing.is_set() or time.monotonic() >= deadline:
+                raise TimeoutError("upstream_deadline")
+            connection.request(method, path, body=body, headers=headers)
+            response = connection.getresponse()
+            chunks = []
+            size = 0
+            while method != "HEAD":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self.closing.is_set():
+                    raise TimeoutError("upstream_deadline")
+                if connection.sock:
+                    connection.sock.settimeout(min(20, remaining))
+                chunk = response.read1(min(65536, 30000001 - size))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                size += len(chunk)
+                if size > 30000000:
+                    raise ValueError("response_limit")
+            expected = response.getheader("Content-Length")
+            if method != "HEAD" and expected is not None and int(expected) != size:
+                raise http.client.IncompleteRead(b"", max(0, int(expected) - size))
+            return response.status, list(response.headers.raw_items()), b"".join(chunks)
+        finally:
+            if response is not None:
+                response.close()
+            connection.close()
+            with self.lock:
+                self.connections.discard(connection)
+                self.upstream_sockets.pop(connection, None)
+
     def record(self, item):
         with self.lock:
             self.records.append(
@@ -522,11 +603,25 @@ class ReadonlyProxy:
         return "http://127.0.0.1:" + str(self.server.server_port)
 
     def close(self):
+        self.closing.set()
         self.server.shutdown()
-        self.close_drained = self.wait_for_idle(timeout=22, quiet=0)
+        with self.lock:
+            connections, clients = list(self.connections), list(self.clients)
+            upstream_sockets = list(self.upstream_sockets.values())
+        for channel in [*upstream_sockets, *connections, *clients]:
+            sock = getattr(channel, "sock", channel)
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            channel.close()
+        self.close_drained = self.wait_for_idle(timeout=2, quiet=0)
         self.server.server_close()
         self.thread.join(2)
         self.directory.cleanup()
+        if not self.close_drained:
+            raise RuntimeError("travel_read_transport_not_drained")
 
     def wait_for_idle(self, timeout=2, quiet=0.2):
         until = time.monotonic() + timeout
@@ -539,8 +634,3 @@ class ReadonlyProxy:
                 return True
             time.sleep(0.02)
         return False
-
-
-class NoRedirect(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, *args, **kwargs):
-        return None

@@ -166,16 +166,31 @@ def test_policy_blocks_writes_and_requires_bound_download_file():
     rules.files = frozenset({"123"})
     assert rules.allows("GET", rules.trip_host, path)
     assert not rules.allows("POST", rules.trip_host, path)
+    for host, path in [
+        (rules.trip_host, "/fcc/action/delete.json"),
+        (rules.trip_host, "/fcc/action/delete.js"),
+        (rules.oa_host, "/spa/action/delete.js"),
+    ]:
+        assert not rules.allows("GET", host, path)
 
 
-@pytest.mark.parametrize("locally_blocked", [True, False])
+@pytest.mark.parametrize(
+    "blocked_path",
+    [
+        None,
+        "/fcecf/fcc/pcapi/COMM_B2G_SaveBxd",
+        "/fcc/action/delete.json",
+        "/fcc/action/delete.js",
+    ],
+)
 def test_wire_proxy_blocks_before_upstream_and_labels_local_403(
-    monkeypatch, locally_blocked
+    monkeypatch, blocked_path
 ):
     import socket
     import ssl
     import threading
 
+    locally_blocked = blocked_path is not None
     monkeypatch.setattr(socket, "getfqdn", lambda *args: "localhost")
     forwarded = []
 
@@ -204,12 +219,16 @@ def test_wire_proxy_blocks_before_upstream_and_labels_local_403(
             tls = ssl.create_default_context(cafile=str(proxy.cert)).wrap_socket(
                 sock, server_hostname="trip.example.test"
             )
-            request_path = (
-                "/fcecf/fcc/pcapi/COMM_B2G_SaveBxd" if locally_blocked else BASE_PATH
+            request_path = blocked_path or BASE_PATH
+            method = (
+                "GET"
+                if blocked_path and blocked_path.endswith((".json", ".js"))
+                else "POST"
             )
             tls.sendall(
                 (
-                    "POST "
+                    method
+                    + " "
                     + request_path
                     + " HTTP/1.1\r\nHost: trip.example.test\r\nContent-Length: 0\r\n\r\n"
                 ).encode()
@@ -332,10 +351,164 @@ def test_download_stays_on_owner_thread_and_does_not_fallback(tmp_path, monkeypa
     assert isinstance(
         transfer.browser(resource, dest_dir=tmp_path, timeout_sec=5), Downloaded
     )
+    form_resource = {**resource, "id": "field_main_1_1"}
+    del form_resource["source"]
+    assert isinstance(
+        transfer.direct(form_resource, dest_dir=tmp_path, timeout_sec=5), Unavailable
+    )
+    assert isinstance(
+        transfer.browser(form_resource, dest_dir=tmp_path, timeout_sec=5), Downloaded
+    )
     wrong = {**resource, "id": "travel_platform:456"}
     assert isinstance(transfer.browser(wrong, dest_dir=tmp_path, timeout_sec=5), Failed)
     assert not session.attempts
     session.close()
+
+
+def test_successful_fallback_diagnostics_reach_material_scan():
+    diagnostics = (
+        {"stage": "engine", "browser": "moli", "reason": "travel_engine_start_failed"},
+        {
+            "stage": "engine",
+            "browser": "chromium",
+            "requested_engine": "moli",
+            "effective_engine": "chromium",
+            "version": "fixture-version",
+        },
+    )
+    evidence = TravelEvidence.assemble(
+        [
+            CandidateObservation(
+                text="CASE-A", scan_status="empty", diagnostics=diagnostics
+            )
+        ],
+        fields=[],
+        request_id="7",
+        flow_mark="CASE-A",
+        expected_resource_count=0,
+    )
+    assert evidence.attachment_scan_record()["diagnostics"] == list(diagnostics)
+
+
+@pytest.mark.parametrize(
+    "new_decision,idle",
+    [
+        ("client_write_error", True),
+        ("request_started", False),
+        ("client_response_complete", True),
+    ],
+)
+def test_unobserved_new_material_request_is_not_hidden_by_old_success(
+    new_decision, idle
+):
+    session = sessions.TravelReadSession(policy())
+    session.payloads = [
+        {"path": BASE_PATH, "payload": {"success": True}, "request_id": "r1"}
+    ]
+    records = [
+        {
+            "path": BASE_PATH,
+            "decision": "client_response_complete",
+            "request_id": "r1",
+            "status": 200,
+        },
+        {"path": BASE_PATH, "decision": "request_started", "request_id": "r2"},
+        {
+            "path": BASE_PATH,
+            "decision": new_decision,
+            "request_id": "r2",
+            "status": 200,
+        },
+    ]
+    session.transport = SimpleNamespace(
+        records=records, wait_for_idle=lambda **kw: idle
+    )
+    with pytest.raises(ReadFailure, match="travel_delivery_"):
+        session._verify_delivery(["r1"])
+    session.close()
+
+
+def test_upstream_slow_trickle_has_a_whole_request_deadline(monkeypatch):
+    from email.message import Message
+    from apps.oa.approvals.sources import travel_read_transport as transport
+
+    clock = [1.0]
+    monkeypatch.setattr(transport.time, "monotonic", lambda: clock[0])
+    closed = []
+
+    class Response:
+        status = 200
+        headers = Message()
+
+        def close(self):
+            pass
+
+        def read1(self, _size):
+            clock[0] += 7
+            return b"x"
+
+    class Connection:
+        sock = SimpleNamespace(settimeout=lambda timeout: None)
+
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def connect(self):
+            pass
+
+        def request(self, *args, **kwargs):
+            pass
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(transport.http.client, "HTTPSConnection", Connection)
+    proxy = object.__new__(ReadonlyProxy)
+    import threading
+
+    proxy.upstream_sockets = {}
+    proxy.lock, proxy.connections, proxy.closing, proxy.deadline = (
+        threading.Lock(),
+        set(),
+        threading.Event(),
+        100,
+    )
+    with pytest.raises(TimeoutError, match="upstream_deadline"):
+        proxy.read_upstream(
+            "GET", "https://trip.example.test/static/core/fixture.js", {}, None
+        )
+    assert clock[0] == 22 and closed and not proxy.connections
+
+
+def test_close_cancels_active_upstream_connections(monkeypatch):
+    import socket
+    import threading
+
+    monkeypatch.setattr(socket, "getfqdn", lambda *args: "localhost")
+    proxy = ReadonlyProxy(Policy(policy()), patches=False)
+    cancelled = threading.Event()
+    connection = SimpleNamespace(
+        sock=SimpleNamespace(shutdown=lambda how: cancelled.set()),
+        close=lambda: cancelled.set(),
+    )
+    proxy.connections = [connection]
+    proxy.active = 1
+    proxy.start()
+
+    def worker():
+        assert cancelled.wait(2)
+        with proxy.lock:
+            proxy.active = 0
+            proxy.connections = []
+
+    thread = threading.Thread(target=worker)
+    thread.start()
+    proxy.close()
+    thread.join(2)
+    assert proxy.close_drained and cancelled.is_set() and not thread.is_alive()
 
 
 def test_shared_deadline_is_not_reset_for_fallback(monkeypatch):

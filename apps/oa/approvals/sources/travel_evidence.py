@@ -254,6 +254,7 @@ class TravelEvidence:
                 "source_request_id": str(request_id),
                 "discovery_ref": f"travel_platform:{flow_mark}",
                 **({"inventory": inventory} if inventory else {}),
+                **({"diagnostics": diagnostics} if diagnostics else {}),
             }
         if targets or any(item.scan_status == "empty" for item in valid):
             return cls(tuple(targets), facts, _scan=scan)
@@ -295,7 +296,11 @@ class TravelEvidence:
         if self._scan is None:
             return None
         return {
-            key: ([dict(item) for item in value] if key == "inventory" else value)
+            key: (
+                [dict(item) for item in value]
+                if key in {"inventory", "diagnostics"}
+                else value
+            )
             for key, value in self._scan.items()
         }
 

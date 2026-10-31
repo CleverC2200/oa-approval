@@ -61,6 +61,9 @@ class CollectionFailure(RuntimeError):
                 if key in {"stage", "reason", "browser", "exception_type", "result_type"}:
                     if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
                         kept[key] = value
+                elif key == "request_id":
+                    if isinstance(value, str) and re.fullmatch(r"r[0-9]{1,12}", value):
+                        kept[key] = value
                 elif key in {"http_status", "api_code"}:
                     if isinstance(value, int) and not isinstance(value, bool):
                         kept[key] = value
