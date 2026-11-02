@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from PIL import Image
+
 from apps.oa.approvals.sources import browser_session, native_documents
 from apps.oa.approvals.sources.download_errors import (
     Downloaded,
@@ -27,6 +29,19 @@ _CLOUD_DOWNLOAD_URL = "https://api.mypiaojia.com/invoiceApi/file/download"
 class OriginalContext:
     client: object
     sources: dict
+
+
+def valid_original_file(resource: dict, path: Path) -> bool:
+    if resource.get('_invoice_original', {}).get('file_type') != 'jpg':
+        return True
+    try:
+        with Image.open(path) as image:
+            if image.format != 'JPEG':
+                return False
+            image.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+    return True
 
 
 class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
@@ -195,9 +210,10 @@ class OriginalSources:
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
+                signature = b'\xff\xd8\xff' if source.get('file_type') == 'jpg' else b'%PDF-'
                 if (
                     len(body) > _MAX_ORIGINAL_BYTES
-                    or not body.startswith(b"%PDF-")
+                    or not body.startswith(signature)
                     or length is not None
                     and len(body) != int(length)
                 ):

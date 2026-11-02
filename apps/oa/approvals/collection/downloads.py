@@ -22,7 +22,7 @@ from apps.oa.approvals.sources.download_errors import (
     Unavailable,
     TransferOutcome,
 )
-from apps.oa.approvals.sources.originals import OriginalContext
+from apps.oa.approvals.sources.originals import OriginalContext, valid_original_file
 from apps.oa.materials import archives
 from apps.oa.materials.resources import (
     attachment_resources,
@@ -543,6 +543,8 @@ class _DownloadBatch:
                     )
 
     def _expanded(self, resource, item, *, cached):
+        if not valid_original_file(resource, Path(item['path'])):
+            return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
         item, error = archives._attach_archive_children(self.dest_dir, resource, item)
         if error:
             code = (
