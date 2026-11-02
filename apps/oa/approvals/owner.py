@@ -107,7 +107,9 @@ def dispatch(approval, run_id, request):
     if operation == 'collect':
         return approval.collect(run_id, workflow_key=request.get('workflow_key'), agent_id=request.get('agent_id'),
                                 expected_task_id=request.get('expected_task_id'),
-                                agent_workflow_key=request.get('agent_workflow_key'))
+                                agent_workflow_key=request.get('agent_workflow_key'),
+                                **({'travel_read_exception': request['travel_read_exception']}
+                                   if request.get('travel_read_exception') is not None else {}))
     if operation == 'status':
         return {'run_id': run_id, 'status': approval.store.run(run_id)['status']}
     if operation in {'submit', 'preview'}:

@@ -456,6 +456,7 @@ def collect_case(
     attachment_root: Path | None = None,
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
+    travel_read_exception: dict | None = None,
 ) -> dict[str, Any]:
     read_session = None
     if source_policy.travel_read.enabled:
@@ -465,7 +466,8 @@ def collect_case(
         return _collect_case(request_id, oa_api=oa_api, source_policy=source_policy,
             configs=configs, allow_browser_download=allow_browser_download,
             attachment_root=attachment_root, prepared_root=prepared_root,
-            attachment_timeout_sec=attachment_timeout_sec, read_session=read_session)
+            attachment_timeout_sec=attachment_timeout_sec, read_session=read_session,
+            travel_read_exception=travel_read_exception)
     finally:
         if read_session is not None:
             read_session.close()
@@ -482,7 +484,14 @@ def _collect_case(
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
     read_session=None,
+    travel_read_exception: dict | None = None,
 ) -> dict[str, Any]:
+    if travel_read_exception is not None and (
+            not isinstance(travel_read_exception, dict)
+            or travel_read_exception.get("request_id") != str(request_id)
+            or not isinstance(travel_read_exception.get("authorization_note"), str)
+            or not travel_read_exception["authorization_note"].strip()):
+        raise ValueError("travel_read_exception_invalid")
     download_sources = attachments.build_download_sources(source_policy)
     transfer = download_sources.transfer
     if read_session is not None:
@@ -511,14 +520,28 @@ def _collect_case(
         workflow,
         raw_resources, origins=source_policy.attachments,
     )
-    travel_evidence = _travel_resources(
-        config=config,
-        workflow=workflow,
-        request_id=str(request_id),
-        allow_browser_download=allow_browser_download,
-        attachment_timeout_sec=attachment_timeout_sec,
-        travel_source=travel_source,
-    )
+    read_exception = None
+    try:
+        travel_evidence = _travel_resources(
+            config=config,
+            workflow=workflow,
+            request_id=str(request_id),
+            allow_browser_download=allow_browser_download,
+            attachment_timeout_sec=attachment_timeout_sec,
+            travel_source=travel_source,
+        )
+    except CollectionFailure as error:
+        if (not travel_read_exception or config.get("flow_key") != "travel_expense"
+                or str(error) != "travel_attachment_discovery_failed"
+                or not error.diagnostics
+                or any(item.get("reason") != "login_required" for item in error.diagnostics)):
+            raise
+        read_exception = {"request_id": str(request_id),
+                          "authorization_note": travel_read_exception["authorization_note"],
+                          "error": str(error), "diagnostics": error.diagnostics,
+                          "declared_attachment_count": _declared_attachment_count(workflow),
+                          "unread_scope": "商旅页面及附件发现未完成；表单中已知附件仍按正常流程读取。"}
+        travel_evidence = TravelEvidence.empty()
     discovered_resources = list(travel_evidence.download_targets)
     travel_scan = travel_evidence.attachment_scan_record() or {}
     authority_facts.extend(travel_evidence.facts)
@@ -545,7 +568,7 @@ def _collect_case(
             source_file_ids={_trip_content_id(item) for item in source_resources},
             source_resource_count=len(source_resources), declared_count=declared_attachment_count,
         )
-        if not coverage.complete:
+        if not coverage.complete and read_exception is None:
             raise CollectionFailure(
                 "travel_attachment_resources_incomplete",
                 {**coverage.counts,
@@ -647,6 +670,9 @@ def _collect_case(
         "source_resource_id": source["resource_id"],
         "message": "视频附件已跳过，画面及音频未读取；不得据此确认视频中的事实，需要视频证明的事项保留具体缺口并交人工核对。",
     } for source in attachment_extractors.skipped_video_sources(prepared["manifest"]))
+    if read_exception is not None:
+        warnings.append({"code": "travel_read_user_exception",
+                         "message": "本单按用户明确授权受限审核，商旅页面及未取得附件仍未读取，不代表核验通过。"})
     empty_fields = {}
     if (config.get("flow_key") in {"general_expense", "tpm_small_marketing_fee"} and not logical_resources
             and not authority_facts and not invoice_evidence.get("invoices")):
@@ -692,6 +718,7 @@ def _collect_case(
     ]
 
     return {
+        **({"travel_read_exception": read_exception} if read_exception is not None else {}),
         "schema_version": 1,
         "kind": "preaudit_material",
         "request_id": str(request_id),

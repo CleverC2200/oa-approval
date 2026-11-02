@@ -43,6 +43,7 @@ def main(argv=None):
     collect.add_argument('--agent-id', required=True)
     collect.add_argument('--expected-task-id', type=int, required=True)
     collect.add_argument('--agent-workflow-key', required=True)
+    collect.add_argument('--travel-read-exception-file', type=Path, help='本单明确授权的商旅登录失败受限审核记录，含request_id及authorization_note；不继承到其他单据')
     submit = commands.add_parser('submit', help='保存意见，显式确认时提交并回查')
     submit.add_argument('--task-id', type=int, required=True)
     submit.add_argument('--opinion-file', type=Path)
@@ -122,6 +123,8 @@ def main(argv=None):
         if args.operation == 'collect':
             request.update(workflow_key=args.workflow_key, agent_id=args.agent_id,
                            expected_task_id=args.expected_task_id, agent_workflow_key=args.agent_workflow_key)
+            if args.travel_read_exception_file:
+                request['travel_read_exception'] = json.loads(args.travel_read_exception_file.read_text())
         elif args.operation == 'finish':
             request['run_id'] = args.run_id
             request['handoff'] = args.handoff

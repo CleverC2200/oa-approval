@@ -136,7 +136,15 @@ class Approval:
             result["batch"] = json.loads(self.store.run(run)["summary_json"])["batch"]
         return result
 
-    def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
+    def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None, travel_read_exception=None):
+        if travel_read_exception is not None:
+            task = self.store.get_task(expected_task_id)
+            if (not isinstance(travel_read_exception, dict)
+                    or task["workflow_key"] != "travel_expense"
+                    or travel_read_exception.get("request_id") != task["request_id"]
+                    or not isinstance(travel_read_exception.get("authorization_note"), str)
+                    or not travel_read_exception["authorization_note"].strip()):
+                raise ValueError("travel_read_exception_invalid")
         decision = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
             agent_workflow_key=agent_workflow_key)
         if decision["status"] != "claimed":
@@ -154,7 +162,8 @@ class Approval:
                         from apps.oa.approvals.collection.case import collect_case
                         self.collector = partial(collect_case, source_policy=self.source_policy)
                     material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
-                        allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared")
+                        allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared",
+                        **({"travel_read_exception": travel_read_exception} if travel_read_exception is not None else {}))
                     if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
                         raise ValueError("material_identity_changed")
                     if task["workflow_key"] == "tpm_small_marketing_fee":
