@@ -536,16 +536,11 @@ def _collect_case(
                 or not error.diagnostics
                 or any(item.get("reason") != "login_required" for item in error.diagnostics)):
             raise
-        excluded = [item for item in form_resources if urllib.parse.urlsplit(
-            str(item.get("downloadUrl") or item.get("url") or "")).hostname
-            == urllib.parse.urlsplit(source_policy.travel_origin).hostname]
-        form_resources = [item for item in form_resources if item not in excluded]
         read_exception = {"request_id": str(request_id),
                           "authorization_note": travel_read_exception["authorization_note"],
                           "error": str(error), "diagnostics": error.diagnostics,
                           "declared_attachment_count": _declared_attachment_count(workflow),
-                          "unread_resources": [{"id": item.get("id"), "name": item.get("name")}
-                                               for item in excluded]}
+                          "unread_scope": "商旅页面及附件发现未完成；表单中已知附件仍按正常流程读取。"}
         travel_evidence = TravelEvidence.empty()
     discovered_resources = list(travel_evidence.download_targets)
     travel_scan = travel_evidence.attachment_scan_record() or {}
