@@ -59,4 +59,6 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit 
 
 超大图按原像素分块识别，记录各分区坐标。原件不缩放覆盖，全部分区完成才表示该页识别完成；局部失败和视频未读取明确保留。高影响金额、主体、日期、里程等读数不稳定时定向复读，仍不能确定则在业务意见中说明缺口。
 
+模型因输出长度上限截断时，入口在原预算内对该页或分区进行有界细分，丢弃截断正文，保留 `truncated_responses` 诊断及原图坐标。全部子分区读取完成才记为该页完成；达到细分边界、预算耗尽或任一子分区失败时仍报告失败，已完成分区保留在失败报告中。其他 API 错误不触发此细分。定向区域继续只代表该区域覆盖。
+
 财务图片按[证据规则](../../.agents/skills/oa-finance-preaudit/references/observation-contract.md)读取，其他流程按当前匹配规则决定是否直接观察原图。压缩阅读副本见[图片压缩](image-compression.md)。
