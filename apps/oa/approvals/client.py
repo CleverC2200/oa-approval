@@ -70,6 +70,16 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
     try:
         response = send(root, {'operation': 'status'}, timeout=0.5)
         owner = {'reachable': True, 'run_id': response['run_id']}
+    except TimeoutError:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+            probe.settimeout(0.5)
+            try:
+                probe.connect(str(socket_path(root)))
+                owner = {'reachable': True, 'busy': True}
+            except TimeoutError:
+                owner = {'reachable': None, 'reason': 'probe_timeout'}
+            except OSError:
+                owner = {'reachable': False}
     except (OSError, ValueError, KeyError):
         owner = {'reachable': False}
     return {**result, 'owner': owner}

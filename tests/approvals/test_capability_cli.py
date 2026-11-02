@@ -623,3 +623,21 @@ def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkey
     assert status['acceptance']['verified_attempt_count'] == 1
     assert status['acceptance']['unfinished_attempt_count'] == 0
     assert status['summary'] == {'submitted': 1, 'queued': 2}
+
+
+def test_status_does_not_report_a_busy_owner_as_missing(tmp_path):
+    import socket
+
+    from apps.oa.approvals.client import query, socket_path
+
+    app = create_demo(tmp_path)
+    app.pending()
+    app.store.connection.close()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+        server.bind(str(socket_path(tmp_path)))
+        server.listen()
+        try:
+            status = query(tmp_path, 'status')
+            assert status['owner'] == {'reachable': True, 'busy': True}
+        finally:
+            socket_path(tmp_path).unlink(missing_ok=True)
