@@ -287,8 +287,9 @@ _BROWSER_CACHE = _BrowserCache()
 
 
 class DownloadTransfer:
-    def __init__(self, policy: SourcePolicy, *, initialize_context=None):
+    def __init__(self, policy: SourcePolicy, *, initialize_context=None, travel_session=None):
         self.policy = policy
+        self.travel_session = travel_session
         self._initialize_context = initialize_context
         self._browser_cache = _BROWSER_CACHE
 
@@ -747,6 +748,8 @@ class DownloadTransfer:
     def direct(
         self, resource: dict, *, dest_dir: Path, timeout_sec: int
     ) -> TransferOutcome:
+        if self.travel_session is not None and self.travel_session.owns(resource):
+            return Unavailable()
         return direct_download(
             resource,
             timeout_sec=timeout_sec,
@@ -758,6 +761,8 @@ class DownloadTransfer:
     def browser(
         self, resource: dict, *, dest_dir: Path, timeout_sec: int
     ) -> TransferOutcome:
+        if self.travel_session is not None and self.travel_session.owns(resource):
+            return self.travel_session.download(resource, dest_dir=dest_dir, timeout_sec=timeout_sec)
         name = resource_name(resource) or "attachment.bin"
         try:
             with resource_slots.acquire(

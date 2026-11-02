@@ -52,10 +52,28 @@ class BrowserLocation:
 
 
 @dataclass(frozen=True, slots=True)
+class TravelReadPolicy:
+    engine: str = "chromium"
+    session_source: str = "rpa"
+    moli_binary: str = ""
+
+    def __post_init__(self):
+        if self.engine not in {"chromium", "moli"}:
+            raise ValueError("travel_browser_engine_invalid")
+        if self.session_source not in {"rpa", "api"}:
+            raise ValueError("travel_session_source_invalid")
+
+    @property
+    def enabled(self):
+        return self.engine != "chromium" or self.session_source != "rpa"
+
+
+@dataclass(frozen=True, slots=True)
 class SourcePolicy:
     attachments: AttachmentOrigins
     travel_origin: str
     browser: BrowserLocation
+    travel_read: TravelReadPolicy = TravelReadPolicy()
 
 
 def load_source_policy() -> SourcePolicy:
@@ -83,5 +101,10 @@ def load_source_policy() -> SourcePolicy:
             + os.environ.get("OA_CHROME_REMOTE_DEBUGGING_ADDRESS", "127.0.0.1")
             + ":"
             + os.environ.get("OA_CHROME_REMOTE_DEBUGGING_PORT", "9223"),
+        ),
+        TravelReadPolicy(
+            os.environ.get("OA_TRAVEL_BROWSER_ENGINE", "chromium").strip(),
+            os.environ.get("OA_TRAVEL_SESSION_SOURCE", "rpa").strip(),
+            os.environ.get("OA_MOLI_BIN", "").strip(),
         ),
     )

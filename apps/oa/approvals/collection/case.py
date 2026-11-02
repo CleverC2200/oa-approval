@@ -61,6 +61,9 @@ class CollectionFailure(RuntimeError):
                 if key in {"stage", "reason", "browser", "exception_type", "result_type"}:
                     if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
                         kept[key] = value
+                elif key == "request_id":
+                    if isinstance(value, str) and re.fullmatch(r"r[0-9]{1,12}", value):
+                        kept[key] = value
                 elif key in {"http_status", "api_code"}:
                     if isinstance(value, int) and not isinstance(value, bool):
                         kept[key] = value
@@ -454,9 +457,37 @@ def collect_case(
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
 ) -> dict[str, Any]:
+    read_session = None
+    if source_policy.travel_read.enabled:
+        from apps.oa.approvals.sources.travel_read_session import TravelReadSession
+        read_session = TravelReadSession(source_policy)
+    try:
+        return _collect_case(request_id, oa_api=oa_api, source_policy=source_policy,
+            configs=configs, allow_browser_download=allow_browser_download,
+            attachment_root=attachment_root, prepared_root=prepared_root,
+            attachment_timeout_sec=attachment_timeout_sec, read_session=read_session)
+    finally:
+        if read_session is not None:
+            read_session.close()
+
+
+def _collect_case(
+    request_id: str,
+    *,
+    oa_api: object,
+    source_policy,
+    configs: Sequence[dict[str, Any]],
+    allow_browser_download: bool,
+    attachment_root: Path | None = None,
+    prepared_root: Path | None = None,
+    attachment_timeout_sec: int = 180,
+    read_session=None,
+) -> dict[str, Any]:
     download_sources = attachments.build_download_sources(source_policy)
     transfer = download_sources.transfer
-    travel_source = travel_orders.TravelSource(source_policy, transfer=transfer)
+    if read_session is not None:
+        transfer.travel_session = read_session
+    travel_source = travel_orders.TravelSource(source_policy, transfer=transfer, read_session=read_session)
     workflow, raw_resources = oa_api.request_context(str(request_id))
     try:
         config = flow.select_config_for_workflow(
