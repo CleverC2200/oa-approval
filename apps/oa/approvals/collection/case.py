@@ -587,7 +587,9 @@ def _collect_case(
                 if download_errors
                 else "attachment_download_incomplete"
             )
-            raise RuntimeError(code)
+            raise CollectionFailure(code, diagnostics=[
+                diagnostic for error in download_errors for diagnostic in error.diagnostics
+            ])
         descriptors_by_raw_id = {
             str(item["raw_resource_id"]): item for item in descriptors
         }
