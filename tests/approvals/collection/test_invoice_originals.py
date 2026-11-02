@@ -737,3 +737,30 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     assert all(item['reused'] is False for item in files)
     assert files[0]['path'] == files[1]['path']
     assert b'session=fixed' not in b''.join(path.read_bytes() for path in destination.rglob('*') if path.is_file())
+
+@pytest.mark.parametrize('failure,reason', [
+    ('json', 'cloud_signature_mismatch'),
+    ('truncated', 'cloud_length_mismatch'),
+    ('oversized', 'cloud_content_too_large'),
+    ('invalid_length', 'cloud_content_length_invalid'),
+])
+def test_cloud_incomplete_original_preserves_safe_failure_diagnostics(
+        original_transport, tmp_path, monkeypatch, failure, reason):
+    from apps.oa.approvals.collection.case import CollectionFailure
+
+    state = original_transport
+    state.still_denied = True
+    state.cloud_pdf = b'{}' if failure == 'json' else state.pdf
+    if failure == 'truncated':
+        state.cloud_headers['Content-Length'] = str(len(state.pdf) + 1)
+    elif failure == 'oversized':
+        monkeypatch.setattr(original_source, '_MAX_ORIGINAL_BYTES', 16)
+    elif failure == 'invalid_length':
+        state.cloud_headers['Content-Length'] = 'invalid'
+    with pytest.raises(CollectionFailure, match='^attachment_content_incomplete$') as caught:
+        collect_original(state, tmp_path)
+    assert caught.value.diagnostics == [{
+        'stage': 'invoice_original_download', 'reason': reason, 'file_ref': '202',
+    }]
+    assert 'synthetic-token' not in json.dumps(caught.value.diagnostics)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))

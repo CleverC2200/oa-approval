@@ -149,6 +149,7 @@ class OriginalSources:
                     DownloadError(
                         outcome.error.code,
                         f"{outcome.error.code}: 关联发票原件读取失败",
+                        outcome.error.diagnostics,
                     )
                 )
             return outcome
@@ -203,24 +204,34 @@ class OriginalSources:
                 if length is not None and (
                     not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES
                 ):
+                    reason = ('cloud_content_length_invalid' if not length.isdecimal()
+                              else 'cloud_content_too_large')
                     return Failed(
                         DownloadError(
                             "attachment_content_incomplete",
                             "attachment_content_incomplete",
+                            ({'stage': 'invoice_original_download',
+                              'reason': reason,
+                              'file_ref': native_file_id},),
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
                 signature = b'\xff\xd8\xff' if source.get('file_type') == 'jpg' else b'%PDF-'
-                if (
-                    len(body) > _MAX_ORIGINAL_BYTES
-                    or not body.startswith(signature)
-                    or length is not None
-                    and len(body) != int(length)
-                ):
+                reason = ''
+                if len(body) > _MAX_ORIGINAL_BYTES:
+                    reason = 'cloud_content_too_large'
+                elif not body.startswith(signature):
+                    reason = 'cloud_signature_mismatch'
+                elif length is not None and len(body) != int(length):
+                    reason = 'cloud_length_mismatch'
+                if reason:
                     return Failed(
                         DownloadError(
                             "attachment_content_incomplete",
                             "attachment_content_incomplete",
+                            ({'stage': 'invoice_original_download',
+                              'reason': reason,
+                              'file_ref': native_file_id},),
                         )
                     )
             if not self._verify(context, resource, timeout_sec=timeout_sec):
