@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = {
     'tests/fixtures/legacy-workbook.xls': '8ba6fb64229087701d5f27b5e0ce6301f72386f0f0c14f12f06c2756ee4549af',
 }
-PRIVATE_DIRECTORIES = {'runtime', '.scratch', 'attachments', 'prepared', 'reports', 'exports', 'downloads', 'screenshots', 'recordings'}
+PRIVATE_DIRECTORIES = {'runtime', '.scratch', '.playwright-mcp', 'attachments', 'prepared', 'reports', 'exports', 'downloads', 'screenshots', 'recordings'}
 PRIVATE_SUFFIXES = {'.pem', '.key', '.p12', '.pfx', '.jks', '.keystore', '.db', '.sqlite', '.sqlite3',
                     '.har', '.pdf', '.png', '.jpg', '.jpeg', '.heic', '.doc', '.docx', '.xls', '.xlsx', '.zip', '.rar', '.7z'}
 TOKENS = {

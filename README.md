@@ -37,13 +37,13 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" start -
 start 是持有锁和 socket 的前台 owner。保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`；另一个终端使用同一绝对 root 调用其他操作。正常收尾通过 finish，等待采集落盘和 owner 退出。失联轮次的显式核对和关闭见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md#失联轮次核对)。
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --view batch
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" show --task-id "$OA_TASK_ID"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" collect \
   --agent-id "$OA_REVIEW_AGENT_ID" \
   --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" preview --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "$OA_RUN_ID"
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "$OA_RUN_ID" --require-drained
 ```
 
 变量取本次工具返回的实际 Agent、任务、流程和轮次身份。真实 start 仅允许干净、已发布且与 origin/main 一致的 main，启动前 fetch 核对；运行中的 checkout 不自动更新。真实运行将 root 设为本项目 runtime 的绝对路径。默认目录不受启动 cwd 影响，锁与账本按所选 root 协调。

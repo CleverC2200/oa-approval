@@ -62,14 +62,14 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
         result = {'status': 'ok', 'run': run, 'summary': dict(Counter(task['status'] for task in tasks)),
                   'tasks': tasks if full else [{key: task[key] for key in
                     ('id', 'request_id', 'workflow_key', 'received_at', 'status')} for task in tasks]}
+        try:
+            response = send(root, {'operation': 'status'}, timeout=0.5)
+            owner = {'reachable': True, 'run_id': response['run_id']}
+        except (OSError, ValueError, KeyError):
+            owner = {'reachable': False}
         if view == 'batch':
             result.pop('tasks')
-            result.update(batch_status(store, run, tasks))
+            result.update(batch_status(store, run, tasks, owner))
+        return {**result, 'owner': owner}
     finally:
         store.connection.close()
-    try:
-        response = send(root, {'operation': 'status'}, timeout=0.5)
-        owner = {'reachable': True, 'run_id': response['run_id']}
-    except (OSError, ValueError, KeyError):
-        owner = {'reachable': False}
-    return {**result, 'owner': owner}

@@ -7,7 +7,7 @@ from apps.oa.approvals.receipts import assess_submission
 from apps.oa.approvals.store import AGENT_CLAIM_LIMIT, INFLIGHT_STATUSES, MAX_INFLIGHT
 
 
-def batch_status(store, run, tasks):
+def batch_status(store, run, tasks, owner):
     frozen = json.loads(run['summary_json']).get('batch')
     scoped = tasks if frozen is None else [store.get_task(task_id) for task_id in frozen['task_ids']]
     task_ids = {task['id'] for task in scoped}
@@ -23,8 +23,16 @@ def batch_status(store, run, tasks):
                        'claimed_count': len(claimed), 'inflight_task_ids': busy, 'busy': bool(busy),
                        'claim_limit_reached': len(claimed) >= AGENT_CLAIM_LIMIT})
     occupied = sum(task['status'] in INFLIGHT_STATUSES for task in tasks)
+    acceptance = submission_acceptance(store, run['id'], scoped)
+    all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
+    blockers = closeout_blockers(all_acceptance)
+    complete = run['status'] == 'closed' and (not owner['reachable'] or owner['run_id'] != run['id'])
     return {
-        'acceptance': submission_acceptance(store, run['id'], scoped),
+        'acceptance': acceptance,
+        'closeout': {'drained': not blockers, 'blockers': blockers,
+                     'batch_complete': not blockers and not queued,
+                     'complete': complete and not blockers and not queued},
+        'alerts': status_alerts(run, owner, all_acceptance, blockers, dict(Counter(task['status'] for task in tasks))),
         'agents': agents,
         'capacity': {'inflight': occupied, 'available': max(0, MAX_INFLIGHT - occupied), 'limit': MAX_INFLIGHT},
         'batch': {
@@ -39,6 +47,44 @@ def batch_status(store, run, tasks):
         'next_candidate': {key: candidate[key] for key in
             ('id', 'request_id', 'workflow_key', 'received_at', 'status')} if candidate is not None else None,
     }
+
+
+def closeout_blockers(acceptance):
+    facts = acceptance['tasks']
+    blockers = []
+    if any(task['status'] in INFLIGHT_STATUSES for task in facts):
+        blockers.append('tasks_inflight')
+    if any(task['status'] == 'unknown' or any(not attempt['resolved'] for attempt in task['submissions'])
+           for task in facts):
+        blockers.append('submission_unresolved')
+    if any(task['status'] == 'submitted' and not task['verified_attempt_count']
+           and all(attempt['resolved'] for attempt in task['submissions']) for task in facts):
+        blockers.append('submission_unverified')
+    return blockers
+
+
+def status_alerts(run, owner, acceptance, blockers, summary):
+    codes = [code for code in blockers if code not in {'tasks_inflight', 'submission_unresolved'}]
+    owner_running = run['status'] == 'running' and owner['reachable'] and owner['run_id'] == run['id']
+    if any(task['status'] == 'unknown' or any(not attempt['resolved'] and not (
+            owner_running and task['status'] == 'submitting' and attempt['status'] == 'started')
+            for attempt in task['submissions']) for task in acceptance['tasks']):
+        codes.append('submission_unresolved')
+    if run['status'] in {'running', 'blocked'}:
+        if not owner['reachable']:
+            codes.append('owner_unreachable')
+        elif owner['run_id'] != run['id']:
+            codes.append('owner_mismatch')
+        if run['status'] == 'blocked':
+            codes.append('run_blocked')
+    elif 'tasks_inflight' in blockers:
+        codes.append('run_closed_with_inflight')
+    alerts = [{'code': code, 'severity': 'blocked'} for code in codes]
+    if summary.get('failed'):
+        alerts.append({'code': 'technical_failures', 'severity': 'warning', 'count': summary['failed']})
+    if json.loads(run['summary_json']).get('handoff', {}).get('status') == 'ready':
+        alerts.append({'code': 'continuation_pending', 'severity': 'warning'})
+    return alerts
 
 
 def submission_acceptance(store, run_id, tasks):

@@ -16,6 +16,7 @@ import threading
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
 from apps.oa.approvals.source_policy import load_source_policy
+from apps.oa.approvals.status import closeout_blockers, submission_acceptance
 
 
 _STDIN_EOF = object()
@@ -219,15 +220,22 @@ class _RoundSession:
             return
         try:
             request = receive_request()
-            if source == 'stdin' and (request is _STDIN_EOF or request.get('operation') == 'finish'):
-                self._handoff = request is not _STDIN_EOF and request.get('handoff', False)
+            if request is _STDIN_EOF:
                 self._finishing = True
             elif request.get('operation') == 'finish':
-                if request.get('run_id') != self._run_id:
+                if source == 'socket' and request.get('run_id') != self._run_id:
                     raise ValueError('run_mismatch')
+                if request.get('require_drained'):
+                    store = self._approval.store
+                    blockers = closeout_blockers(submission_acceptance(store, self._run_id, store.tasks(self._run_id)))
+                    if blockers:
+                        respond({'run_id': self._run_id, 'status': 'refused',
+                                 'reason': 'run_not_drained', 'blockers': blockers})
+                        return
                 self._finishing = True
                 self._handoff = request.get('handoff', False)
-                self._finish_responders.append(respond)
+                if source == 'socket':
+                    self._finish_responders.append(respond)
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
             else:

@@ -42,7 +42,7 @@ def test_status_and_show_read_closed_facts_without_mutation(tmp_path, capsys):
 
 
 def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
-    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo'],
+    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo', '--batch-size', '1'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         line = process.stdout.readline()
@@ -55,11 +55,30 @@ def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
         assert process.poll() is None
         status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
         assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id']}
-        finished = subprocess.run([*base, 'finish', '--run-id', started['run_id']], cwd=PROJECT, capture_output=True, text=True, timeout=10)
+        collected = subprocess.run([*base, 'collect', '--agent-id', 'reviewer', '--expected-task-id', '1',
+                                    '--agent-workflow-key', 'travel_expense'],
+                                   cwd=PROJECT, capture_output=True, text=True, timeout=10)
+        assert json.loads(collected.stdout)['status'] == 'reviewing'
+        refused = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained', '--handoff'],
+                                 cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 1
+        assert json.loads(refused.stdout) == {'run_id': started['run_id'], 'status': 'refused',
+                                             'reason': 'run_not_drained', 'blockers': ['tasks_inflight']}
+        assert process.poll() is None
+        failed = subprocess.run([*base, 'fail', '--task-id', '1', '--reason', 'synthetic_read_failure'],
+                                cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert json.loads(failed.stdout)['status'] == 'failed'
+        finished = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained', '--handoff'],
+                                  cwd=PROJECT, capture_output=True, text=True, timeout=10)
         assert finished.returncode == 0, finished.stderr + finished.stdout
         assert json.loads(finished.stdout)['status'] == 'closed'
+        assert json.loads(finished.stdout)['handoff']['status'] == 'ready'
         process.wait(timeout=5)
         assert process.returncode == 0, process.stderr.read()
+        checked = subprocess.run([*base, 'status', '--view', 'batch'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        report = json.loads(checked.stdout)
+        assert report['closeout'] == {'drained': True, 'blockers': [], 'batch_complete': True, 'complete': True}
+        assert {alert['code'] for alert in report['alerts']} == {'technical_failures', 'continuation_pending'}
     finally:
         if process.poll() is None:
             process.kill()
@@ -183,6 +202,95 @@ def record_submission(store, task_id, *, status=None, result=None, opinion='ÂêàÊ
     if status is not None:
         store.finish_submission(submission_id, status, result or {})
     return submission_id
+
+
+def test_closeout_keeps_lost_owner_and_incomplete_closed_round_visible(tmp_path, capsys):
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    app.store.set_status(started['tasks'][0]['id'], 'reviewing')
+    arguments = ['--root', str(tmp_path), 'status', '--view', 'batch']
+    assert cli.main(arguments) == 0
+    lost = json.loads(capsys.readouterr().out)
+    assert lost['closeout'] == {'drained': False, 'blockers': ['tasks_inflight'],
+                               'batch_complete': False, 'complete': False}
+    assert lost['alerts'] == [{'code': 'owner_unreachable', 'severity': 'blocked'}]
+    app.close(started['run_id'])
+    assert cli.main(arguments) == 0
+    closed = json.loads(capsys.readouterr().out)
+    assert closed['closeout']['complete'] is False
+    assert closed['alerts'] == [{'code': 'run_closed_with_inflight', 'severity': 'blocked'}]
+
+
+def test_active_submission_prevents_closeout_without_raising_a_false_blocked_alert(tmp_path, capsys, monkeypatch):
+    from apps.oa.approvals import client
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    record_submission(app.store, started['tasks'][0]['id'])
+    monkeypatch.setattr(client, 'send', lambda *args, **kwargs: {'run_id': started['run_id'], 'status': 'running'})
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['closeout']['blockers'] == ['tasks_inflight', 'submission_unresolved']
+    assert status['closeout']['complete'] is False
+    assert status['alerts'] == []
+
+
+@pytest.mark.parametrize('state,result,expected', [
+    ('unknown', {'submit_ok': True}, 'submission_unresolved'),
+    ('submitted', {'submit_ok': True}, 'submission_unresolved'),
+    ('missing_receipt', {}, 'submission_unverified'),
+    ('confirmed_not_written', {'failure_code': 'user_confirmed_not_written', 'confirmation_note': 'Synthetic confirmation',
+                               'previous_result': {}}, None),
+])
+def test_closeout_requires_resolved_receipts_even_after_round_is_closed(tmp_path, capsys, state, result, expected):
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    task_id = started['tasks'][0]['id']
+    if state == 'missing_receipt':
+        app.store.set_status(task_id, 'submitted')
+    else:
+        record_submission(app.store, task_id, status='failed' if state == 'confirmed_not_written' else state, result=result)
+    app.close(started['run_id'])
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['closeout']['complete'] is (expected is None)
+    assert status['closeout']['blockers'] == ([] if expected is None else [expected])
+    assert {item['code'] for item in status['alerts']} == ({'technical_failures'} if expected is None else {expected})
+
+
+@pytest.mark.parametrize('state,blocker', [('unknown', 'submission_unresolved'), ('submitted', 'submission_unverified')])
+def test_guarded_finish_preserves_unresolved_submission_and_owner(tmp_path, state, blocker):
+    from apps.oa.approvals.store import Store
+
+    base = [sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path)]
+    process = subprocess.Popen([*base, 'start', '--demo', '--batch-size', '1'], cwd=PROJECT,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        started = json.loads(process.stdout.readline())
+        store = Store(tmp_path / 'approval.sqlite3')
+        try:
+            if state == 'unknown':
+                record_submission(store, 1, status='unknown', result={'submit_ok': True})
+            else:
+                store.set_status(1, 'submitted')
+            before = store.details(1)
+            result = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained'],
+                                    cwd=PROJECT, capture_output=True, text=True, timeout=5)
+            assert result.returncode == 1
+            assert json.loads(result.stdout)['blockers'] == [blocker]
+            assert store.details(1) == before
+            assert store.run(started['run_id'])['status'] in {'running', 'blocked'}
+            assert process.poll() is None
+        finally:
+            store.connection.close()
+        stopped = subprocess.run([*base, 'finish', '--run-id', started['run_id']],
+                                 cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert json.loads(stopped.stdout)['status'] == 'closed'
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
 
 
 @pytest.mark.parametrize('handled', [True, False])
