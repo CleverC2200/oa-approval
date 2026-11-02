@@ -31,6 +31,19 @@ class OriginalContext:
     sources: dict
 
 
+def valid_original_file(resource: dict, path: Path) -> bool:
+    if resource.get('_invoice_original', {}).get('file_type') != 'jpg':
+        return True
+    try:
+        with Image.open(path) as image:
+            if image.format != 'JPEG':
+                return False
+            image.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+    return True
+
+
 class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise ValueError("attachment_download_failed")
@@ -89,22 +102,13 @@ class OriginalSources:
         dest_dir: Path,
         timeout_sec: int,
     ) -> TransferOutcome:
-        outcome = direct_download(
+        return direct_download(
             resource,
             timeout_sec=timeout_sec,
             operation=lambda: self._read(
                 context, resource, dest_dir=dest_dir, timeout_sec=timeout_sec
             ),
         )
-        if isinstance(outcome, Downloaded) and resource.get('_invoice_original', {}).get('file_type') == 'jpg':
-            try:
-                with Image.open(outcome.path) as image:
-                    if image.format != 'JPEG':
-                        raise ValueError('invoice_original_format_mismatch')
-                    image.load()
-            except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
-                return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
-        return outcome
 
     def _read(self, context, resource, *, dest_dir, timeout_sec) -> TransferOutcome:
         checked = self._checked_resource(resource)

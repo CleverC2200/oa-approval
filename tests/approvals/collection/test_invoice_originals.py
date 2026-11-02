@@ -188,6 +188,31 @@ def test_jpg_original_requires_unambiguous_matching_reference(jpg_original, tmp_
     assert not any(r[0] in {'/weaver/weaver.file.FileDownload', '/invoiceApi/file/download'}
                    for r in state.requests)
 
+
+@pytest.mark.parametrize('body', ['valid', 'truncated', 'pdf'])
+def test_browser_fallback_validates_jpg_original(jpg_original, tmp_path, monkeypatch, body):
+    state = jpg_original
+    if body == 'truncated':
+        state.pdf = state.pdf[:100]
+    elif body == 'pdf':
+        with fitz.open() as document:
+            document.new_page()
+            state.pdf = document.tobytes()
+
+    def browser(_resource, *, dest_dir, **_kwargs):
+        path = dest_dir / 'browser-original.jpg'
+        path.write_bytes(state.pdf)
+        return original_source.Downloaded(path)
+
+    monkeypatch.setattr(remote.DownloadTransfer, 'native', lambda *_a, **_kw: original_source.Unavailable())
+    monkeypatch.setattr(remote.DownloadTransfer, 'browser', staticmethod(browser))
+    if body == 'valid':
+        material = collect_original(state, tmp_path)
+        assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'content_read'
+    else:
+        with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+            collect_original(state, tmp_path)
+
 def test_collect_reads_cloud_original_when_native_document_remains_denied(original_transport, tmp_path):
     state = original_transport
     state.still_denied = True
