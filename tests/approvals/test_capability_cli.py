@@ -641,3 +641,31 @@ def test_status_does_not_report_a_busy_owner_as_missing(tmp_path):
             assert status['owner'] == {'reachable': True, 'busy': True}
         finally:
             socket_path(tmp_path).unlink(missing_ok=True)
+
+
+def test_travel_exception_cli_sends_only_the_explicit_request(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import cli
+
+    note = {'request_id': '12', 'authorization_note': '仅本单允许受限审核'}
+    path = tmp_path / 'exception.json'
+    path.write_text(json.dumps(note))
+    requests = []
+    monkeypatch.setattr(cli, 'send', lambda root, request: requests.append(request) or {'status': 'reviewing'})
+    args = ['--root', str(tmp_path), 'collect', '--agent-id', 'agent',
+            '--expected-task-id', '1', '--agent-workflow-key', 'travel_expense']
+    assert cli.main([*args, '--travel-read-exception-file', str(path)]) == 0
+    assert requests[-1]['travel_read_exception'] == note
+    assert cli.main(args) == 0
+    assert 'travel_read_exception' not in requests[-1]
+
+
+def test_travel_exception_identity_rejected_before_claim(tmp_path):
+    app = create_demo(tmp_path)
+    started = app.pending()
+    task = next(task for task in started['tasks'] if task['workflow_key'] == 'travel_expense')
+    with pytest.raises(ValueError, match='travel_read_exception_invalid'):
+        app.collect(started['run_id'], agent_id='reviewer', expected_task_id=task['id'],
+                    agent_workflow_key='travel_expense',
+                    travel_read_exception={'request_id': 'different', 'authorization_note': '仅本单'})
+    assert app.store.get_task(task['id'])['status'] == 'queued'
+    app.store.connection.close()
