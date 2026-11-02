@@ -318,8 +318,11 @@ def original_source(data: dict, invoice_number: str) -> dict:
         return {}
     if data.get('fid') is not None and str(data['fid']) != record_id:
         return {}
-    active = [item for item in data.get('flist') or [] if isinstance(item, dict)
-              and item.get('del', 0) in (0, '0') and item.get('type') in {'pdf', 'jpg', 'jpeg'}]
+    files = [item for item in data.get('flist') or [] if isinstance(item, dict)
+             and item.get('del', 0) in (0, '0')]
+    active = [item for item in files if item.get('type') == 'pdf']
+    if not active:
+        active = [item for item in files if item.get('type') in {'jpg', 'jpeg'}]
     if len(active) != 1:
         return {}
     cloud_file = _positive_id(active[0].get('id'))

@@ -303,9 +303,10 @@ def test_forged_original_hint_cannot_initialize_unlinked_document(original_trans
     assert not state.initialized
     assert not any(r[0] == '/api/doc/detail/basicInfo' for r in state.requests)
 
-def test_multiple_file_records_keep_partial_body_coverage(original_transport, tmp_path):
+@pytest.mark.parametrize('other_type', ['ofd', 'jpg'])
+def test_multiple_file_records_keep_partial_body_coverage(original_transport, tmp_path, other_type):
     state = original_transport
-    state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
+    state.detail['flist'].append({'id': '8002', 'type': other_type, 'del': 0})
     material = collect_original(state, tmp_path)
     invoice = material['invoice_evidence']['invoices'][0]
     assert invoice['body_read_status'] == 'partial_read'
