@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from PIL import Image
+
 from apps.oa.approvals.sources import browser_session, native_documents
 from apps.oa.approvals.sources.download_errors import (
     Downloaded,
@@ -87,13 +89,22 @@ class OriginalSources:
         dest_dir: Path,
         timeout_sec: int,
     ) -> TransferOutcome:
-        return direct_download(
+        outcome = direct_download(
             resource,
             timeout_sec=timeout_sec,
             operation=lambda: self._read(
                 context, resource, dest_dir=dest_dir, timeout_sec=timeout_sec
             ),
         )
+        if isinstance(outcome, Downloaded) and resource.get('_invoice_original', {}).get('file_type') == 'jpg':
+            try:
+                with Image.open(outcome.path) as image:
+                    if image.format != 'JPEG':
+                        raise ValueError('invoice_original_format_mismatch')
+                    image.load()
+            except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+                return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
+        return outcome
 
     def _read(self, context, resource, *, dest_dir, timeout_sec) -> TransferOutcome:
         checked = self._checked_resource(resource)
@@ -195,9 +206,10 @@ class OriginalSources:
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
+                signature = b'\xff\xd8\xff' if source.get('file_type') == 'jpg' else b'%PDF-'
                 if (
                     len(body) > _MAX_ORIGINAL_BYTES
-                    or not body.startswith(b"%PDF-")
+                    or not body.startswith(signature)
                     or length is not None
                     and len(body) != int(length)
                 ):
