@@ -46,6 +46,7 @@
 
 | 告警 | 接管方式 |
 | --- | --- |
+| `owner_unresponsive` | socket 回复超时，可能正在同步采集或提交。间隔 30 秒复查并核对原 owner 进程和工具会话；不据此判定失联、未知提交或 owner 已退出 |
 | `owner_unreachable` / `owner_mismatch` | 按启动步骤复核身份、原对话和进程；确认异常后报告失联，保留轮次，不自动恢复 |
 | `submission_unresolved` / `submission_unverified` | 停止补位和其他写入，仅公开 `postcheck` 核对；owner 正在正常执行的 `submitting` 不产生这类阻断告警 |
 | `run_blocked` / `run_closed_with_inflight` | 报告停止原因或未收尾任务，不把 `closed` 当作完成，不恢复旧审核 |

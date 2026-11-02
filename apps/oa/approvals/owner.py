@@ -73,7 +73,6 @@ def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_s
 
 
 def finish_orphaned(root, run_id):
-    from apps.oa.approvals.status import submission_acceptance
     from apps.oa.approvals.store import Store
 
     database = root / 'approval.sqlite3'
@@ -228,6 +227,8 @@ class _RoundSession:
                 if request.get('require_drained'):
                     store = self._approval.store
                     blockers = closeout_blockers(submission_acceptance(store, self._run_id, store.tasks(self._run_id)))
+                    if self._collection is not None and 'tasks_inflight' not in blockers:
+                        blockers.insert(0, 'tasks_inflight')
                     if blockers:
                         respond({'run_id': self._run_id, 'status': 'refused',
                                  'reason': 'run_not_drained', 'blockers': blockers})

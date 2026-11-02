@@ -65,6 +65,8 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
         try:
             response = send(root, {'operation': 'status'}, timeout=0.5)
             owner = {'reachable': True, 'run_id': response['run_id']}
+        except TimeoutError:
+            owner = {'reachable': False, 'reason': 'response_timeout'}
         except (OSError, ValueError, KeyError):
             owner = {'reachable': False}
         if view == 'batch':

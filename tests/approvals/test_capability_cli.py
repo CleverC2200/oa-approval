@@ -235,6 +235,49 @@ def test_active_submission_prevents_closeout_without_raising_a_false_blocked_ale
     assert status['alerts'] == []
 
 
+def test_status_keeps_owner_response_timeout_distinct_from_a_lost_owner(tmp_path, capsys, monkeypatch):
+    from apps.oa.approvals import client
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    record_submission(app.store, started['tasks'][0]['id'])
+    def timeout(*args, **kwargs):
+        raise TimeoutError('synthetic busy owner')
+    monkeypatch.setattr(client, 'send', timeout)
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    busy = json.loads(capsys.readouterr().out)
+    assert busy['owner'] == {'reachable': False, 'reason': 'response_timeout'}
+    assert busy['alerts'] == [{'code': 'owner_unresponsive', 'severity': 'warning'}]
+    assert busy['closeout']['drained'] is False
+    app.store.finish_submission(app.store.submissions(started['run_id'])[0]['id'], 'submitted',
+                                {'submit_ok': True, 'done_hit': True, 'postcheck_done_hit': True})
+    app.close(started['run_id'])
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    assert json.loads(capsys.readouterr().out)['closeout']['complete'] is False
+
+
+def test_guarded_finish_refuses_collection_before_the_child_claims_a_task(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from apps.oa.approvals import owner
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    collection = SimpleNamespace(incoming=SimpleNamespace(poll=lambda: False))
+    monkeypatch.setattr(owner._Collection, 'start', lambda *args: collection)
+    session = owner._RoundSession(app, started['run_id'], root=tmp_path, demo=True,
+                                  close_transport=lambda: pytest.fail('owner must remain open'))
+    responses = []
+    session.handle(lambda: {'operation': 'collect', 'agent_id': 'reviewer', 'expected_task_id': 1,
+                            'agent_workflow_key': 'travel_expense'}, source='socket', respond=responses.append)
+    assert app.store.get_task(1)['status'] == 'queued'
+    session.handle(lambda: {'operation': 'finish', 'run_id': started['run_id'], 'require_drained': True},
+                   source='socket', respond=responses.append)
+    assert responses == [{'run_id': started['run_id'], 'status': 'refused',
+                          'reason': 'run_not_drained', 'blockers': ['tasks_inflight']}]
+    assert session._finishing is False
+    assert app.store.run(started['run_id'])['status'] == 'running'
+
+
 @pytest.mark.parametrize('state,result,expected', [
     ('unknown', {'submit_ok': True}, 'submission_unresolved'),
     ('submitted', {'submit_ok': True}, 'submission_unresolved'),

@@ -26,7 +26,9 @@ def batch_status(store, run, tasks, owner):
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
     blockers = closeout_blockers(all_acceptance)
-    complete = run['status'] == 'closed' and (not owner['reachable'] or owner['run_id'] != run['id'])
+    owner_released = (not owner['reachable'] and owner.get('reason') != 'response_timeout'
+                      or owner['reachable'] and owner['run_id'] != run['id'])
+    complete = run['status'] == 'closed' and owner_released
     return {
         'acceptance': acceptance,
         'closeout': {'drained': not blockers, 'blockers': blockers,
@@ -66,20 +68,23 @@ def closeout_blockers(acceptance):
 def status_alerts(run, owner, acceptance, blockers, summary):
     codes = [code for code in blockers if code not in {'tasks_inflight', 'submission_unresolved'}]
     owner_running = run['status'] == 'running' and owner['reachable'] and owner['run_id'] == run['id']
+    owner_busy = run['status'] == 'running' and owner.get('reason') == 'response_timeout'
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] and not (
-            owner_running and task['status'] == 'submitting' and attempt['status'] == 'started')
+            (owner_running or owner_busy) and task['status'] == 'submitting' and attempt['status'] == 'started')
             for attempt in task['submissions']) for task in acceptance['tasks']):
         codes.append('submission_unresolved')
     if run['status'] in {'running', 'blocked'}:
-        if not owner['reachable']:
+        if not owner['reachable'] and owner.get('reason') != 'response_timeout':
             codes.append('owner_unreachable')
-        elif owner['run_id'] != run['id']:
+        elif owner['reachable'] and owner['run_id'] != run['id']:
             codes.append('owner_mismatch')
         if run['status'] == 'blocked':
             codes.append('run_blocked')
     elif 'tasks_inflight' in blockers:
         codes.append('run_closed_with_inflight')
     alerts = [{'code': code, 'severity': 'blocked'} for code in codes]
+    if owner.get('reason') == 'response_timeout':
+        alerts.append({'code': 'owner_unresponsive', 'severity': 'warning'})
     if summary.get('failed'):
         alerts.append({'code': 'technical_failures', 'severity': 'warning', 'count': summary['failed']})
     if json.loads(run['summary_json']).get('handoff', {}).get('status') == 'ready':
