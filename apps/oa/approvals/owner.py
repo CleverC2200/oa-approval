@@ -71,7 +71,7 @@ def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_s
             approval.store.connection.close()
 
 
-def finish_orphaned(root, run_id):
+def finish_orphaned(root, run_id, *, collection_stopped_note=None):
     from apps.oa.approvals.status import submission_acceptance
     from apps.oa.approvals.store import Store
 
@@ -89,13 +89,13 @@ def finish_orphaned(root, run_id):
             if latest['status'] not in {'running', 'blocked'}:
                 raise ValueError('run_not_active')
             tasks = store.tasks(run_id)
-            if any(task['status'] == 'preparing' for task in tasks):
+            if any(task['status'] == 'preparing' for task in tasks) and not (collection_stopped_note and collection_stopped_note.strip()):
                 raise ValueError('collection_unresolved')
             acceptance = submission_acceptance(store, run_id, tasks)
             if any(task['status'] in {'submitting', 'unknown'} for task in tasks) or any(
                     not submission['resolved'] for task in acceptance['tasks'] for submission in task['submissions']):
                 raise ValueError('submission_unresolved')
-            result = store.close(run_id)
+            result = store.close(run_id, collection_stopped_note=collection_stopped_note)
             server_path.unlink(missing_ok=True)
             return {**result, 'reason': 'owner_missing'}
         finally:

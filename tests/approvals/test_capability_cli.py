@@ -544,7 +544,8 @@ def test_orphaned_finish_closes_killed_owner_without_changing_task_facts(tmp_pat
 
 
 @pytest.mark.parametrize('locked', ['round', 'shared'])
-def test_orphaned_finish_refuses_held_locks(tmp_path, monkeypatch, capsys, locked):
+@pytest.mark.parametrize('confirmation', [[], ['--collection-stopped-note', 'Processes verified stopped']])
+def test_orphaned_finish_refuses_held_locks(tmp_path, monkeypatch, capsys, locked, confirmation):
     from apps.oa.approvals import owner
     monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
     root = tmp_path / 'round'
@@ -552,7 +553,7 @@ def test_orphaned_finish_refuses_held_locks(tmp_path, monkeypatch, capsys, locke
     run_id = app.pending()['run_id']
     directory = root if locked == 'round' else owner.PROJECT_ROOT / 'runtime'
     with owner.round_lock(directory):
-        assert cli.main(['--root', str(root), 'finish', '--run-id', run_id, '--orphaned']) == 1
+        assert cli.main(['--root', str(root), 'finish', '--run-id', run_id, '--orphaned', *confirmation]) == 1
     assert json.loads(capsys.readouterr().out)['status'] == 'failed'
     assert app.store.run(run_id)['status'] == 'running'
     app.store.connection.close()
@@ -669,3 +670,44 @@ def test_travel_exception_identity_rejected_before_claim(tmp_path):
                     travel_read_exception={'request_id': 'different', 'authorization_note': '仅本单'})
     assert app.store.get_task(task['id'])['status'] == 'queued'
     app.store.connection.close()
+
+
+@pytest.mark.parametrize('unresolved_submission', [False, True])
+def test_orphaned_finish_accepts_explicit_stopped_collection_only_without_unresolved_submission(
+        tmp_path, monkeypatch, capsys, unresolved_submission):
+    from apps.oa.approvals import owner
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    app = create_demo(tmp_path)
+    started = app.pending()
+    run_id, task_id = started['run_id'], started['tasks'][0]['id']
+    app.store.claim(run_id, agent_id='reviewer', expected_task_id=task_id, agent_workflow_key='travel_expense')
+    if unresolved_submission:
+        record_submission(app.store, started['tasks'][1]['id'], status='unknown')
+    before = app.store.details(task_id)
+    note = 'User authorized this round closure; owner and collection processes verified stopped.'
+    code = cli.main(['--root', str(tmp_path), 'finish', '--run-id', run_id, '--orphaned',
+                     '--collection-stopped-note', note])
+    result = json.loads(capsys.readouterr().out)
+    assert app.store.details(task_id) == before
+    if unresolved_submission:
+        assert code == 1
+        assert result['error'] == 'submission_unresolved'
+        assert app.store.run(run_id)['status'] != 'closed'
+    else:
+        assert code == 0, result
+        assert result['status'] == 'closed'
+        stored = json.loads(app.store.run(run_id)['summary_json'])
+        assert stored['orphaned_collection'] == {'confirmation_note': note, 'task_ids': [task_id]}
+        assert cli.main(['--root', str(tmp_path), 'status']) == 0
+        assert json.loads(capsys.readouterr().out)['owner']['reachable'] is False
+    app.store.connection.close()
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--collection-stopped-note', 'Stopped'],
+    ['--orphaned', '--collection-stopped-note', '   '],
+])
+def test_collection_stopped_confirmation_requires_orphaned_and_nonempty_note(arguments):
+    with pytest.raises(SystemExit) as error:
+        cli.main(['finish', '--run-id', 'round', *arguments])
+    assert error.value.code == 2

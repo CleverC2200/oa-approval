@@ -338,13 +338,18 @@ class Store:
         processed.update(task['occurrence'] for task in tasks if task['status'] in {'preview','failed','submitted'})
         return {'status':'ready', 'remaining':remaining, 'processed_occurrences':sorted(processed)}
 
-    def close(self, run_id, *, handoff=False):
+    def close(self, run_id, *, handoff=False, collection_stopped_note=None):
         with self.connection:
             self.connection.execute('BEGIN IMMEDIATE')
             run = self.run(run_id)
             tasks = self.tasks(run_id)
             summary = dict(Counter(task['status'] for task in tasks))
             stored = json.loads(run['summary_json'])
+            if collection_stopped_note:
+                stored['orphaned_collection'] = {
+                    'confirmation_note': collection_stopped_note,
+                    'task_ids': [task['id'] for task in tasks if task['status'] == 'preparing'],
+                }
             if handoff:
                 stored.setdefault('selection', {'workflows':None, 'request_ids':None,
                                                 'batch_size':stored.get('batch', {}).get('size')})
