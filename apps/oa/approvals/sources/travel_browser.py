@@ -21,6 +21,7 @@ from apps.oa.approvals.sources.travel_evidence import (
     attachment_id as _attachment_id_from_url,
     merge_inventory as _merge_attachment_inventory,
     page_pending as _trip_page_pending,
+    sso_rejection,
 )
 from apps.oa.runtime import slots as resource_slots
 
@@ -455,6 +456,9 @@ class _CandidateSession:
                     http_status=status,
                 )
             self.page.wait_for_timeout(200)
+            rejection = sso_rejection(self.page.url, self.policy.travel_origin)
+            if rejection:
+                return CandidateObservation.failure("session", rejection, headless=self.headless)
             self.stage = "page"
             initial_text = _read_stable_body_text(
                 self.page, timeout_sec=max(1, int(self.deadline - time.monotonic()))
@@ -697,8 +701,12 @@ class _BrowserAttempt:
                         self.policy.browser.chrome_binary
                     )
                 browser = playwright.chromium.launch(**launch)
-                context = browser.new_context(storage_state=self.storage_state)
-                self._read_candidates(context)
+                try:
+                    context = browser.new_context(storage_state=self.storage_state)
+                    self._read_candidates(context)
+                finally:
+                    with collection_budget.phase("travel_browser_cleanup", 15):
+                        browser.close()
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
                 CandidateObservation.failure(
@@ -735,7 +743,8 @@ class _BrowserAttempt:
             ) as candidate:
                 observation = candidate.read()
                 self.results.append(observation)
-                if observation.assess(
+                if any(item.get("reason", "").startswith("travel_sso_")
+                       for item in observation.diagnostics) or observation.assess(
                     expected_marker=self.expected_marker,
                     expected_resource_count=self.expected_resource_count,
                 ).attempt_complete:

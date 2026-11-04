@@ -319,6 +319,7 @@ def browser_transport(monkeypatch):
         def goto(self, url, **_kwargs):
             self.url = url
             self.outcome = getattr(transport, 'candidate_outcomes', {}).get(url, self.outcome)
+            self.url = self.outcome.get('redirect', url)
             failure = self.outcome.get('failure')
             assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
             if failure == 'deadline':
@@ -447,7 +448,7 @@ def test_travel_browser_disposes_owned_resources_after_read_timer_is_removed(bro
         assert evidence.attachment_scan_record()['status'] == 'empty'
     assert all(browser.disposed for browser in browser_transport.browsers)
     assert browser_transport.exits == [0.0] * len(browser_transport.launches)
-    assert all(not browser.close_timers for browser in browser_transport.browsers)
+    assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)
     assert signal.getsignal(signal.SIGALRM) == previous_handler
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
@@ -537,3 +538,26 @@ def test_download_cookie_stays_out_of_scan_and_facts(browser_transport):
     evidence.require_request_binding('12')
     with pytest.raises(RuntimeError, match='resource_ownership_untrusted'):
         evidence.require_request_binding('other')
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('非单点登录场景，请联系管理员', 'travel_sso_account_missing'),
+    ('未绑定法人公司，请联系管理员', 'travel_sso_company_missing'),
+    ('synthetic-provider-error', 'travel_sso_rejected'),
+])
+def test_sso_error_is_reported_without_scanning_or_leaking_redirect(browser_transport, monkeypatch, message, reason):
+    from urllib.parse import urlencode
+
+    url = POLICY.travel_origin + '/fcc/default/login/ssoError.html?' + urlencode(
+        {'errorMsg': message, 'traceId': 'synthetic-private-trace'})
+    browser_transport.outcomes[True] = {'redirect': url}
+    browser_transport.outcomes[False] = {'redirect': url}
+    monkeypatch.setattr(travel_browser, '_read_stable_body_text',
+                        lambda *_a, **_k: pytest.fail('SSO rejection must stop before reading attachments'))
+    evidence = collect_travel()
+    error, = evidence.errors
+    assert reason in {item['reason'] for item in error.diagnostics}
+    assert not evidence.facts and not evidence.download_targets
+    assert 'synthetic-private-trace' not in json.dumps(error.diagnostics)
+    assert message not in json.dumps(error.diagnostics)
+    assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)

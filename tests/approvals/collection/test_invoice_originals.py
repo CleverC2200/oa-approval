@@ -78,7 +78,7 @@ def original_transport(monkeypatch, tmp_path):
             body = {'actionMsg': {'code': '0'}, 'data': state.detail}
         elif path == '/invoiceApi/file/download':
             assert urlsplit(request.full_url).hostname == 'api.mypiaojia.com'
-            assert params == {'id': [state.detail['modify_info']['furl']], 'fid': ['9001'], 'dataId': ['101'],
+            assert params == {'id': [state.detail['modify_info'].get('pdf') or state.detail['modify_info']['furl']], 'fid': ['9001'], 'dataId': ['101'],
                               'token': ['synthetic-token']}
             assert request.get_header('Cookie') is None
             if state.cloud_failure == 'http':
@@ -763,4 +763,54 @@ def test_cloud_incomplete_original_preserves_safe_failure_diagnostics(
         'stage': 'invoice_original_download', 'reason': reason, 'file_ref': '202',
     }]
     assert 'synthetic-token' not in json.dumps(caught.value.diagnostics)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_ofd_invoice_reads_its_explicit_official_pdf(original_transport, tmp_path, monkeypatch):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    monkeypatch.setattr(remote.DownloadTransfer, 'native',
+                        lambda *a, **kw: pytest.fail('native OFD must not be treated as PDF'))
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    pdf, = [file for file in invoice['files'] if file['media_type'] == 'pdf']
+    ofd, = [file for file in invoice['files'] if file['media_type'] == 'ofd']
+    assert pdf['body_read_status'] == 'content_read'
+    assert ofd['body_read_status'] == 'not_read'
+    assert pdf['original_source']['original_cloud_file_id'] == '8000'
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+
+
+@pytest.mark.parametrize('change', ['missing_ofd', 'wrong_pdf', 'multiple_ofd'])
+def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, change):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    if change == 'missing_ofd':
+        state.detail['modify_info']['furl'] = '7999'
+    elif change == 'wrong_pdf':
+        state.detail['modify_info']['pdf'] = '8999'
+    else:
+        state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
+    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
+
+
+@pytest.mark.parametrize('change,reason', [('pdf', 'resource_ownership_untrusted'),
+                                            ('ofd', 'resource_ownership_untrusted'),
+                                            ('actor', 'rpa_session_invalid')])
+def test_official_pdf_rechecks_ofd_pair_and_actor_after_download(original_transport, tmp_path, change, reason):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    if change == 'actor':
+        state.after_cloud_download = lambda: setattr(state, 'actor', '78')
+    else:
+        state.after_cloud_download = lambda: state.detail['modify_info'].update(
+            **{'pdf' if change == 'pdf' else 'furl': '8999'})
+    with pytest.raises(RuntimeError, match=reason):
+        collect_original(state, tmp_path)
     assert not list((tmp_path / 'prepared').rglob('*.png'))

@@ -9,6 +9,7 @@ from playwright.sync_api import Frame
 
 from apps.oa.approvals.sources.travel_browser import _CandidateSession, _browser_roots
 from apps.oa.approvals.sources import travel_hotel
+from apps.oa.approvals.sources.travel_evidence import sso_rejection
 
 BASE_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxdBaseInfoDetails"
 EXP_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
@@ -371,6 +372,9 @@ class CompatibleCandidate(_CandidateSession):
                 wait_until="domcontentloaded",
                 timeout=max(1000, int(self.budget * 1000)),
             )
+            rejection = sso_rejection(self.page.raw.url, self.policy.travel_origin)
+            if rejection:
+                raise ReadFailure(rejection)
             base, _, _ = source_data(self.context.payloads, self.context.marker)
             verify_trip_identity(self.page.raw, base["bxdzb"])
             initial = self.page.locator("body").inner_text()

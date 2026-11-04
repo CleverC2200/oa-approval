@@ -113,6 +113,15 @@ class OriginalSources:
     def _read(self, context, resource, *, dest_dir, timeout_sec) -> TransferOutcome:
         checked = self._checked_resource(resource)
         url = checked["downloadUrl"]
+        if checked.get('_invoice_original', {}).get('representation') == 'official_pdf':
+            try:
+                verified = self._verify(context, checked, timeout_sec=timeout_sec, initialize=True)
+            except browser_session.RpaSessionError as error:
+                return Failed(DownloadError(error.code, error.code))
+            if not verified:
+                return Failed(DownloadError('resource_ownership_untrusted', 'resource_ownership_untrusted'))
+            return self._cloud(context, checked, dest=dest_dir / deterministic_filename(resource),
+                               timeout_sec=timeout_sec)
         first = self._transfer.native(
             checked, url, dest_dir=dest_dir, timeout_sec=timeout_sec
         )
