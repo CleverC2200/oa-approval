@@ -2,6 +2,8 @@
 
 发票云原件按同一记录的文件与 OA 文档映射采集，保留明确返回的记录身份和票号。PDF 要求 `modify_info.pdf/furl` 均指向唯一有效 PDF；无有效 PDF 时，JPEG 要求唯一有效 `jpg/jpeg` 文件、`modify_info.pdf` 为空且 `furl` 指向该图片。两者均须有 `oa.doc_id/img_id`。云文件 ID 与 OA 主文件 ID 分属两个来源，不能互换。多个有效 PDF、无 PDF 时多个 JPEG、其他格式或缺少映射时保留未读，不推测下载接口。已绑定 PDF 同时带其他格式文件时，保留原有 PDF 读取与其他文件未读的分项覆盖状态。
 
+OFD 原件同时提供官方 PDF 阅读件时，仅在同一票记录、唯一有效 OFD/PDF、`fileType=4`、`furl` 精确指向 OFD、`pdf` 精确指向 PDF 且 OA 文档及主文件均明确时读取该 PDF。冻结来源保留 OFD 云文件身份与 `official_pdf` 关系；不能把 OA 的 OFD 主文件字节当成 PDF。PDF 沿现有发票云下载链读取，仍执行下载前后关联、账号、文档及主文件核验；OFD 分项保留未直接读取状态。
+
 下载前重新读取当前流程及关联票资料，核对请求身份、六类流程配置、关联票 ID/票号和完整原件映射，再以当前 Cookie 核验账号及原生文档的主文件。缓存命中也执行该核验。普通流程附件共享表没有这类原件时，被拒绝后的初始化沿同一可信关联重新解析文档；仍保留 `basicInfo` 初始化前后主文件核对、`isrequest=1`/当前 `requestid`、同 Cookie 同 URL 单次重试。原生访问可能触发 OA 正常共享初始化，不修改权限配置或发起审批。
 
 原件沿普通下载和冻结资源链进入材料。PDF 全页准备，JPEG 按图片原件保存并完整解码验证，成功准备后计为一页。正文覆盖状态以[观察合同](../../.agents/skills/oa-finance-preaudit/references/observation-contract.md)为准；明确绑定原件的下载或准备失败继续停止当前取材。历史冻结材料和意见不改写。

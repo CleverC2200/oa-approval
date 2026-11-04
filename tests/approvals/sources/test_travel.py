@@ -319,6 +319,7 @@ def browser_transport(monkeypatch):
         def goto(self, url, **_kwargs):
             self.url = url
             self.outcome = getattr(transport, 'candidate_outcomes', {}).get(url, self.outcome)
+            self.url = self.outcome.get('redirect', url)
             failure = self.outcome.get('failure')
             assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
             if failure == 'deadline':
@@ -394,6 +395,7 @@ def browser_transport(monkeypatch):
         def launch(self, *, headless, **_kwargs):
             transport.launches.append(headless)
             browser = Browser(headless)
+            getattr(transport, 'launched', lambda: None)()
             transport.browsers.append(browser)
             return browser
 
@@ -447,7 +449,7 @@ def test_travel_browser_disposes_owned_resources_after_read_timer_is_removed(bro
         assert evidence.attachment_scan_record()['status'] == 'empty'
     assert all(browser.disposed for browser in browser_transport.browsers)
     assert browser_transport.exits == [0.0] * len(browser_transport.launches)
-    assert all(not browser.close_timers for browser in browser_transport.browsers)
+    assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)
     assert signal.getsignal(signal.SIGALRM) == previous_handler
     assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
 
@@ -537,3 +539,65 @@ def test_download_cookie_stays_out_of_scan_and_facts(browser_transport):
     evidence.require_request_binding('12')
     with pytest.raises(RuntimeError, match='resource_ownership_untrusted'):
         evidence.require_request_binding('other')
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('非单点登录场景，请联系管理员', 'travel_sso_account_missing'),
+    ('未绑定法人公司，请联系管理员', 'travel_sso_company_missing'),
+    ('synthetic-provider-error', 'travel_sso_rejected'),
+])
+def test_sso_error_is_reported_without_scanning_or_leaking_redirect(browser_transport, monkeypatch, message, reason):
+    from urllib.parse import urlencode
+
+    url = POLICY.travel_origin + '/fcc/default/login/ssoError.html?' + urlencode(
+        {'errorMsg': message, 'traceId': 'synthetic-private-trace'})
+    browser_transport.outcomes[True] = {'redirect': url}
+    browser_transport.outcomes[False] = {'redirect': url}
+    monkeypatch.setattr(travel_browser, '_read_stable_body_text',
+                        lambda *_a, **_k: pytest.fail('SSO rejection must stop before reading attachments'))
+    evidence = collect_travel()
+    error, = evidence.errors
+    assert reason in {item['reason'] for item in error.diagnostics}
+    assert not evidence.facts and not evidence.download_targets
+    assert 'synthetic-private-trace' not in json.dumps(error.diagnostics)
+    assert message not in json.dumps(error.diagnostics)
+    assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)
+
+
+@pytest.mark.parametrize('launch_seconds', [0.0, 6.0])
+def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypatch, tmp_path, launch_seconds):
+    import time
+    from apps.oa.runtime import collection_budget
+
+    clock = [0.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    marker = tmp_path / 'phase.json'
+    seen = []
+
+    def launched():
+        clock[0] = launch_seconds
+
+    browser_transport.launched = launched
+
+    def read_candidates(_attempt, _context):
+        assert _attempt.deadline == 10.0
+        assert clock[0] == launch_seconds
+        clock[0] = 9.0
+        browser = browser_transport.browsers[0]
+        close = browser.close
+
+        def finish():
+            state = json.loads(marker.read_text())
+            assert state['phase'] == 'travel_browser_cleanup'
+            assert 10 < state['deadline'] - clock[0] <= 15
+            seen.append(True)
+            close()
+
+        browser.close = finish
+
+    monkeypatch.setattr(travel_browser._BrowserAttempt, '_read_candidates', read_candidates)
+    with collection_budget.tracking(marker):
+        travel_source.browser.read_attempt([], timeout_sec=10, storage_state={}, headless=True,
+                                          expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)
+    assert seen == [True]
+    assert json.loads(marker.read_text()) is None

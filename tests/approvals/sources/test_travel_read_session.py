@@ -115,6 +115,8 @@ def test_api_bootstrap_reuses_registration_keeps_cookie_private(
         ("travel_dom_not_ready", True, ["moli", "chromium"]),
         ("travel_session_identity_mismatch", False, ["moli"]),
         ("travel_upstream_access_denied", False, ["moli"]),
+        ("travel_sso_account_missing", False, ["moli"]),
+        ("travel_sso_company_missing", False, ["moli"]),
         ("travel_source_binding_mismatch", False, ["moli"]),
         ("travel_required_request_blocked", False, ["moli"]),
     ],
