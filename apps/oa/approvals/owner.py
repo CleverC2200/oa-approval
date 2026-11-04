@@ -174,11 +174,32 @@ class _Collection:
                 "deadline_exceeded": elapsed >= COLLECTION_TIMEOUT_SECONDS}
 
     def stop(self):
-        for signum in (signal.SIGTERM, signal.SIGKILL):
+        stopped = set()
+        pending = {self.process.pid}
+        try:
+            while pending:
+                for pid in pending:
+                    try:
+                        os.kill(pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        pass
+                stopped.update(pending)
+                snapshot = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid='], capture_output=True,
+                                          text=True, check=True, timeout=2)
+                parents = [tuple(map(int, row.split())) for row in snapshot.stdout.splitlines()]
+                pending = {pid for pid, parent, group in parents
+                           if (parent in stopped or group == self.process.pid) and pid not in stopped}
+        finally:
             try:
-                os.killpg(self.process.pid, signum)
+                if os.getpgid(self.process.pid) == self.process.pid:
+                    os.killpg(self.process.pid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
+            for pid in reversed(sorted(stopped)):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             self.process.join(COLLECTION_STOP_SECONDS)
 
     def expired(self):
@@ -200,18 +221,30 @@ class _Collection:
         return cls(process, receiver, respond, store, run_id)
 
     def complete(self):
+        received = []
+
+        def receive():
+            try:
+                received.append(self.incoming.recv())
+            except (EOFError, OSError):
+                pass
+
+        reader = threading.Thread(target=receive, daemon=True)
+        reader.start()
         try:
             remaining = max(0, COLLECTION_TIMEOUT_SECONDS - (time.monotonic() - self.started))
-            if not self.incoming.poll(remaining):
+            reader.join(remaining)
+            if reader.is_alive():
                 self.timed_out = True
                 self.stop()
-                raise EOFError
-            result = self.incoming.recv()
-        except EOFError:
-            for task in self._store.tasks(self._run_id):
-                if task['status'] == 'preparing':
-                    self._store.fail_collection(task['id'], 'collection_deadline' if self.timed_out else 'collection_process_failed')
-            result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
+                reader.join(COLLECTION_STOP_SECONDS)
+            if not received:
+                for task in self._store.tasks(self._run_id):
+                    if task['status'] == 'preparing':
+                        self._store.fail_collection(task['id'], 'collection_deadline' if self.timed_out else 'collection_process_failed')
+                result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
+            else:
+                result = received[0]
         finally:
             self.process.join(COLLECTION_STOP_SECONDS)
             self.stop()
