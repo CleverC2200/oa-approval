@@ -711,3 +711,27 @@ def test_browser_phase_deadlines_are_reported_outside_browser_process(tmp_path, 
         session.close()
         assert json.loads(marker.read_text()) is None
     assert seen == ['browser_cleanup']
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('非单点登录场景，请联系管理员', 'travel_sso_account_missing'),
+    ('未绑定法人公司，请联系管理员', 'travel_sso_company_missing'),
+])
+def test_readonly_navigation_rejects_sso_error_before_waiting_for_source(message, reason):
+    from urllib.parse import urlencode
+    from apps.oa.approvals.sources.travel_page_compat import ReadPage
+
+    selected = policy()
+    raw = SimpleNamespace(
+        url=selected.travel_origin + '/fcc/default/login/ssoError.html?' + urlencode(
+            {'errorMsg': message, 'traceId': 'synthetic-private-trace'}),
+        goto=lambda *_a, **_k: SimpleNamespace(status=200),
+    )
+    owner = SimpleNamespace(session=SimpleNamespace(policy=selected), deadline=0,
+                            payloads=[], marker="CASE-A")
+    page = ReadPage(raw, owner)
+    with pytest.raises(ReadFailure) as error:
+        page.goto(selected.attachments.oa_origin + '/sn_slv_bxbz.jsp')
+    assert error.value.code == reason
+    assert not error.value.retryable
+    assert 'synthetic-private-trace' not in str(error.value)
