@@ -401,16 +401,15 @@ class TravelReadSession:
                 0.6 if engine == "moli" else 1
             )
             try:
-                with _wall_clock_timeout(self._remaining(primary_deadline)):
-                    result = self._attempt(
-                        engine,
-                        state,
-                        urls,
-                        expected_marker,
-                        expected_resource_count,
-                        primary_deadline,
-                        patches=True,
-                    )
+                result = self._attempt(
+                    engine,
+                    state,
+                    urls,
+                    expected_marker,
+                    expected_resource_count,
+                    primary_deadline,
+                    patches=True,
+                )
             except (_TravelReadDeadline, ReadFailure) as error:
                 if isinstance(error, _TravelReadDeadline) or (
                     isinstance(error, ReadFailure)
@@ -438,17 +437,16 @@ class TravelReadSession:
                 self.payloads.clear()
                 fallback_budget = self._remaining(deadline)
                 try:
-                    with _wall_clock_timeout(fallback_budget):
-                        result = self._attempt(
-                            "chromium",
-                            state,
-                            urls,
-                            expected_marker,
-                            expected_resource_count,
-                            deadline,
-                            patches=error.code
-                            != "travel_compatibility_version_mismatch",
-                        )
+                    result = self._attempt(
+                        "chromium",
+                        state,
+                        urls,
+                        expected_marker,
+                        expected_resource_count,
+                        deadline,
+                        patches=error.code
+                        != "travel_compatibility_version_mismatch",
+                    )
                 except (_TravelReadDeadline, Exception) as fallback_error:
                     code = (
                         fallback_error.code
@@ -541,65 +539,64 @@ class TravelReadSession:
 
     def download(self, resource, *, dest_dir, timeout_sec):
         try:
-            with _wall_clock_timeout(max(0.1, timeout_sec)):
-                deadline = time.monotonic() + max(0.1, timeout_sec)
-                self._remaining(deadline)
-                url = self.policy.attachments.download_url(
-                    str(resource.get("downloadUrl") or resource.get("url") or ""),
-                    allow_extra=True,
-                )
+            deadline = time.monotonic() + max(0.1, timeout_sec)
+            self._remaining(deadline)
+            url = self.policy.attachments.download_url(
+                str(resource.get("downloadUrl") or resource.get("url") or ""),
+                allow_extra=True,
+            )
 
-                raw_id = attachment_id(url)
-                claimed_id = str(resource.get("id") or "")
-                if (
-                    claimed_id.startswith("travel_platform:")
-                    and claimed_id.removeprefix("travel_platform:") != raw_id
-                ):
-                    raise ReadFailure("travel_download_binding_mismatch")
-                self.transport.deadline = deadline
-                parsed = urllib.parse.urlsplit(url)
-                if (
-                    not self.page
-                    or raw_id not in self.files
-                    or attachment_id(url) != raw_id
-                    or parsed.hostname != self.transport.policy.trip_host
-                    or not self.transport.policy.allows(
-                        "GET", parsed.hostname, parsed.path
-                    )
-                ):
-                    raise ReadFailure("travel_download_binding_mismatch")
-                self._verify_oa(deadline)
-                self._verify_trip()
-                result = self.page.evaluate(
-                    """async p=>{
-                    const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
-                    try{const r=await fetch(p.url,{credentials:'include',redirect:'manual',signal:a.signal});
-                        const b=new Uint8Array(await r.arrayBuffer());if(b.length>25000000)throw Error('file_limit');
-                        let s='';for(let i=0;i<b.length;i+=16384)s+=String.fromCharCode(...b.subarray(i,i+16384));
-                        return {status:r.status,type:r.headers.get('content-type'),request_id:r.headers.get('X-OA-Readonly-Request-Id'),data:btoa(s)};
-                    }finally{clearTimeout(timer)}
-                }""",
-                    {"url": url, "timeout": max(1, self._remaining(deadline) * 1000)},
+            raw_id = attachment_id(url)
+            claimed_id = str(resource.get("id") or "")
+            if (
+                claimed_id.startswith("travel_platform:")
+                and claimed_id.removeprefix("travel_platform:") != raw_id
+            ):
+                raise ReadFailure("travel_download_binding_mismatch")
+            self.transport.deadline = deadline
+            parsed = urllib.parse.urlsplit(url)
+            if (
+                not self.page
+                or raw_id not in self.files
+                or attachment_id(url) != raw_id
+                or parsed.hostname != self.transport.policy.trip_host
+                or not self.transport.policy.allows(
+                    "GET", parsed.hostname, parsed.path
                 )
-                self._verify_delivery([result["request_id"]])
-                kind = str(result.get("type") or "").lower()
-                body = base64.b64decode(result["data"], validate=True)
-                if (
-                    result["status"] != 200
-                    or not body
-                    or any(
-                        t in kind
-                        for t in ("text/", "application/json", "application/xml")
-                    )
-                ):
-                    raise ReadFailure("travel_download_response_invalid")
-                self._verify_oa(deadline)
-                self._verify_trip()
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                path = dest_dir / downloads.deterministic_filename(resource)
-                path.write_bytes(body)
-                path.chmod(0o600)
-                return Downloaded(path)
+            ):
+                raise ReadFailure("travel_download_binding_mismatch")
+            self._verify_oa(deadline)
+            self._verify_trip()
+            result = self.page.evaluate(
+                """async p=>{
+                const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
+                try{const r=await fetch(p.url,{credentials:'include',redirect:'manual',signal:a.signal});
+                    const b=new Uint8Array(await r.arrayBuffer());if(b.length>25000000)throw Error('file_limit');
+                    let s='';for(let i=0;i<b.length;i+=16384)s+=String.fromCharCode(...b.subarray(i,i+16384));
+                    return {status:r.status,type:r.headers.get('content-type'),request_id:r.headers.get('X-OA-Readonly-Request-Id'),data:btoa(s)};
+                }finally{clearTimeout(timer)}
+            }""",
+                {"url": url, "timeout": max(1, self._remaining(deadline) * 1000)},
+            )
+            self._verify_delivery([result["request_id"]])
+            kind = str(result.get("type") or "").lower()
+            body = base64.b64decode(result["data"], validate=True)
+            if (
+                result["status"] != 200
+                or not body
+                or any(
+                    t in kind
+                    for t in ("text/", "application/json", "application/xml")
+                )
+            ):
+                raise ReadFailure("travel_download_response_invalid")
+            self._verify_oa(deadline)
+            self._verify_trip()
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            path = dest_dir / downloads.deterministic_filename(resource)
+            path.write_bytes(body)
+            path.chmod(0o600)
+            return Downloaded(path)
         except (_TravelReadDeadline, Exception) as error:
             code = (
                 error.code

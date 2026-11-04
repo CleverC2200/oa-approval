@@ -658,3 +658,26 @@ def test_collector_closes_read_session_even_on_pre_discovery_failure(monkeypatch
             allow_browser_download=True,
         )
     assert session.closed
+
+
+def test_browser_attempt_and_fallback_do_not_arm_process_signal(monkeypatch):
+    import signal
+
+    monkeypatch.setattr(sessions, "api_storage_state", lambda *a, **kw: {"cookies": []})
+    session = sessions.TravelReadSession(policy())
+    calls = []
+
+    def attempt(engine, state, urls, marker, count, deadline, **kwargs):
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        calls.append(engine)
+        if engine == "moli":
+            raise ReadFailure("travel_dom_not_ready", retryable=True)
+        return CandidateObservation(text="CASE-A", scan_status="empty")
+
+    monkeypatch.setattr(session, "_attempt", attempt)
+    try:
+        session.read_attempt(["https://oa.example.test/sn_slv_bxbz.jsp"], timeout_sec=10,
+                             expected_marker="CASE-A", expected_resource_count=0)
+        assert calls == ["moli", "chromium"]
+    finally:
+        session.close()

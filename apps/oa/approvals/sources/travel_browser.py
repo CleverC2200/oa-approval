@@ -469,8 +469,11 @@ class _CandidateSession:
             )
             return self._observation(initial_text, details, snapshot)
         except Exception as error:
+            from playwright.sync_api import TimeoutError as BrowserTimeout
+
             return CandidateObservation.failure(
-                self.stage, f"{self.stage}_failed", headless=self.headless, error=error
+                self.stage, "browser_deadline" if isinstance(error, BrowserTimeout) else f"{self.stage}_failed",
+                headless=self.headless, error=error
             )
 
     def _observation(self, initial_text, details, snapshot):
@@ -679,18 +682,17 @@ class _BrowserAttempt:
             ]
         try:
             with sync_playwright() as playwright:
-                with _wall_clock_timeout(max(1, self.timeout_sec) + 5):
-                    launch = {
-                        "headless": self.headless,
-                        "timeout": max(1000, self.timeout_sec * 1000),
-                    }
-                    if Path(str(self.policy.browser.chrome_binary)).exists():
-                        launch["executable_path"] = str(
-                            self.policy.browser.chrome_binary
-                        )
-                    browser = playwright.chromium.launch(**launch)
-                    context = browser.new_context(storage_state=self.storage_state)
-                    self._read_candidates(context)
+                launch = {
+                    "headless": self.headless,
+                    "timeout": max(1000, self.timeout_sec * 1000),
+                }
+                if Path(str(self.policy.browser.chrome_binary)).exists():
+                    launch["executable_path"] = str(
+                        self.policy.browser.chrome_binary
+                    )
+                browser = playwright.chromium.launch(**launch)
+                context = browser.new_context(storage_state=self.storage_state)
+                self._read_candidates(context)
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
                 CandidateObservation.failure(

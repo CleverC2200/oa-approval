@@ -425,7 +425,7 @@ def test_socket_collect_guards_batch_independently_of_pending_display_limit(tmp_
 
 
 @pytest.fixture
-def blocked_collection(tmp_path):
+def blocked_collection(tmp_path, request):
     import socket
 
     from apps.oa.approvals.cli import socket_path
@@ -440,11 +440,16 @@ from pathlib import Path
 import socket
 import sys
 sys.path.insert(0, PROJECT)
-from apps.oa.approvals import cli, demo
+from apps.oa.approvals import cli, demo, owner
+owner.COLLECTION_TIMEOUT_SECONDS = COLLECTION_BUDGET
 original_collect = demo.collect_demo
 
 def collect(request_id, **options):
     if request_id == '90002':
+        if owner.COLLECTION_TIMEOUT_SECONDS < 900:
+            import subprocess
+            descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'], start_new_session=True)
+            Path(DETACHED_PID).write_text(str(descendant.pid))
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
             channel.connect(CONTROL)
             channel.sendall(b'collecting')
@@ -466,7 +471,7 @@ demo.DemoApi.submit_and_verify = submit
 demo.collect_demo = collect
 if __name__ == '__main__':
     raise SystemExit(cli.main())
-'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))))
+'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(getattr(request, 'param', 900))).replace('DETACHED_PID', repr(str(tmp_path / 'detached-pid'))))
     process = subprocess.Popen([sys.executable, str(entry), '--root', str(tmp_path), 'pending', '--demo'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
@@ -704,3 +709,107 @@ def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blo
                               input='{"operation":"finish"}\n', capture_output=True, text=True, timeout=10)
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
     assert json.loads(reopened.stdout)['run_id'] != started['run_id']
+
+
+@pytest.mark.parametrize('blocked_collection', [3], indirect=True)
+@pytest.mark.parametrize('finish', [False, True])
+def test_collection_deadline_releases_worker_and_allows_finish(blocked_collection, tmp_path, finish):
+    import socket
+
+    process, started, first, invoke, client, channel = blocked_collection
+    before = invoke('status', '--view', 'batch')
+    assert before['owner']['phase'] == 'running'
+    assert before['owner']['collection']['timeout_seconds'] == 3
+    assert before['owner']['collection']['elapsed_seconds'] >= 0
+    finishing = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    finishing.settimeout(10)
+    try:
+        if finish:
+            finishing.connect(started['socket'])
+            finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+            assert invoke('status')['owner']['phase'] == 'finishing'
+        result = json.loads(client.makefile().readline())
+        assert result['status'] == 'failed' and result['error'] == 'collection_deadline'
+        child_pid = int((tmp_path / 'detached-pid').read_text())
+        child = subprocess.run(['ps', '-p', str(child_pid), '-o', 'stat='], capture_output=True, text=True)
+        assert not child.stdout.strip() or child.stdout.strip().startswith('Z')
+        facts = invoke('status', '--view', 'batch')
+        assert facts['batch']['summary']['failed'] == 1
+        assert facts['acceptance']['attempt_count'] == 0
+        if finish:
+            assert json.loads(finishing.makefile().readline())['status'] == 'closed'
+        else:
+            assert facts['owner']['collection'] is None
+            assert invoke('finish', '--run-id', started['run_id'])['status'] == 'closed'
+        process.wait(timeout=10)
+        assert invoke('status')['owner']['reachable'] is False
+    finally:
+        finishing.close()
+
+
+def _partial_collection_result(output):
+    import os
+    import struct
+    import time
+
+    os.setsid()
+    os.write(output.fileno(), struct.pack('!i', 10000))
+    time.sleep(60)
+
+
+def test_partial_collection_reply_cannot_block_deadline(tmp_path, monkeypatch):
+    import multiprocessing
+    import time
+
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.demo import create_demo
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    task = started['tasks'][0]
+    app.store.claim(started['run_id'], agent_id='partial', expected_task_id=task['id'],
+                    agent_workflow_key=task['workflow_key'])
+    context = multiprocessing.get_context('spawn')
+    incoming, output = context.Pipe(duplex=False)
+    process = context.Process(target=_partial_collection_result, args=(output,))
+    process.start()
+    output.close()
+    replies = []
+    collection = owner._Collection(process, incoming, replies.append, app.store, started['run_id'])
+    monkeypatch.setattr(owner, 'COLLECTION_TIMEOUT_SECONDS', 1)
+    beginning = time.monotonic()
+    try:
+        assert incoming.poll(5)
+        collection.complete()
+        assert time.monotonic() - beginning < 6
+        assert replies == [{'status': 'failed', 'error': 'collection_deadline'}]
+        assert app.store.get_task(task['id'])['status'] == 'failed'
+    finally:
+        app.store.connection.close()
+
+
+def test_process_scan_failure_does_not_leave_frozen_collector(tmp_path, monkeypatch):
+    import multiprocessing
+
+    from apps.oa.approvals import owner
+    from apps.oa.approvals.demo import create_demo
+
+    context = multiprocessing.get_context('spawn')
+    incoming, output = context.Pipe(duplex=False)
+    process = context.Process(target=_partial_collection_result, args=(output,))
+    process.start()
+    output.close()
+    app = create_demo(tmp_path)
+    collection = owner._Collection(process, incoming, lambda value: None, app.store, 'synthetic')
+    try:
+        assert incoming.poll(5)
+        def failed_scan(*args, **kwargs):
+            raise subprocess.TimeoutExpired(args[0], 2)
+        monkeypatch.setattr(owner.subprocess, 'run', failed_scan)
+        with pytest.raises(subprocess.TimeoutExpired):
+            collection.stop()
+        assert not process.is_alive()
+    finally:
+        incoming.close()
+        process.close()
+        app.store.connection.close()

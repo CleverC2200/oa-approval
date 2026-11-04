@@ -98,12 +98,14 @@ class Approval:
         self.configs = self.configs if self.configs is not None else flow.load_all_configs()
         return api.build_api(self.configs[0],source_policy=self.source_policy)
 
-    def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None):
+    def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None, retry_failed=False):
         continuation = self.store.continuation_options(continue_from)
         if continuation is not None:
-            if any(value is not None for value in (workflows, batch_size, request_ids)):
+            if retry_failed or any(value is not None for value in (workflows, batch_size, request_ids)):
                 raise ValueError('continuation_selection_changed')
             workflows, batch_size, request_ids = (continuation[key] for key in ('workflows', 'batch_size', 'request_ids'))
+        if retry_failed and not request_ids:
+            raise ValueError("retry_failed_requires_request_ids")
         rows = []
         for raw in self._api().pending_rows():
             item = dict(raw)
@@ -126,7 +128,7 @@ class Approval:
                 continue
             item["workflow_key"] = key
             rows.append(item)
-        run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from,
+        run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from, retry_failed=retry_failed,
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids})
         cleanup = retention.cleanup(self.store, execute=True)
         result = {"run_id":run,"tasks":self.store.tasks(run)}

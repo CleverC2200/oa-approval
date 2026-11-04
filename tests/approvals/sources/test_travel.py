@@ -320,8 +320,9 @@ def browser_transport(monkeypatch):
             self.url = url
             self.outcome = getattr(transport, 'candidate_outcomes', {}).get(url, self.outcome)
             failure = self.outcome.get('failure')
+            assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
             if failure == 'deadline':
-                signal.raise_signal(signal.SIGALRM)
+                raise playwright.sync_api.TimeoutError('synthetic navigation deadline')
             if failure == 'read':
                 raise RuntimeError('synthetic navigation failure')
             if self.outcome.get('expense_rows'):

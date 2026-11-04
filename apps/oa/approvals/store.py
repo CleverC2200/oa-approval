@@ -107,7 +107,7 @@ class Store:
             raise ValueError('continuation_not_available')
         return stored['selection']
 
-    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None):
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -135,6 +135,10 @@ class Store:
                     raise ValueError("pending_identity_missing")
                 occurrence = occurrence_key(row)
                 if occurrence in processed:
+                    continue
+                previous_task = self.connection.execute(
+                    "SELECT status FROM tasks WHERE occurrence=?", (occurrence,)).fetchone()
+                if previous_task and previous_task['status'] == 'failed' and not retry_failed:
                     continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",

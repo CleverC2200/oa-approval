@@ -54,7 +54,8 @@ def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
         assert json.loads(wrong.stdout)['error'] == 'run_mismatch'
         assert process.poll() is None
         status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
-        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id']}
+        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'],
+                                                    'phase': 'running', 'collection': None}
         finished = subprocess.run([*base, 'finish', '--run-id', started['run_id']], cwd=PROJECT, capture_output=True, text=True, timeout=10)
         assert finished.returncode == 0, finished.stderr + finished.stdout
         assert json.loads(finished.stdout)['status'] == 'closed'
@@ -75,7 +76,8 @@ def test_stdin_null_reports_failure_and_continues_to_the_next_request(tmp_path):
     assert result.returncode == 0, result.stderr
     started, failed, status = [json.loads(line) for line in result.stdout.splitlines()]
     assert failed == {'status': 'failed', 'error': 'AttributeError'}
-    assert status == {'run_id': started['run_id'], 'status': 'running'}
+    assert status == {'run_id': started['run_id'], 'status': 'running',
+                      'phase': 'running', 'collection': None}
     assert not Path(started['socket']).exists()
 
 
@@ -353,7 +355,7 @@ def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(
             assert cli.main(['--root', str(app.root), 'finish', '--run-id', started['run_id'], '--orphaned']) == 0
             assert json.loads(capsys.readouterr().out)['status'] == 'closed'
             assert acceptance['tasks'][0]['submissions'][0]['resolved'] is True
-            fresh = app.pending()
+            fresh = app.pending(request_ids=[task["request_id"]], retry_failed=True)
             assert fresh['run_id'] != started['run_id']
             assert app.store.get_task(task['id'])['status'] == 'queued'
     app.store.connection.close()
@@ -711,3 +713,29 @@ def test_collection_stopped_confirmation_requires_orphaned_and_nonempty_note(arg
     with pytest.raises(SystemExit) as error:
         cli.main(['finish', '--run-id', 'round', *arguments])
     assert error.value.code == 2
+
+
+def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
+    from apps.oa.approvals.demo import create_demo
+
+    app = create_demo(tmp_path)
+    try:
+        first = app.pending(batch_size=1)
+        task = first['tasks'][0]
+        claimed = app.store.claim(first['run_id'], agent_id='first', expected_task_id=task['id'],
+                                  agent_workflow_key=task['workflow_key'])
+        assert claimed['status'] == 'claimed'
+        app.store.fail_collection(task['id'], 'synthetic_collection_failure')
+        app.close(first['run_id'])
+        second = app.pending(batch_size=1)
+        assert task['id'] not in [item['id'] for item in second['tasks']]
+        assert app.store.get_task(task['id'])['last_run_id'] == first['run_id']
+        app.close(second['run_id'])
+        with pytest.raises(ValueError, match='retry_failed_requires_request_ids'):
+            app.pending(retry_failed=True)
+        retry = app.pending(request_ids=[task['request_id']], retry_failed=True, batch_size=1)
+        assert retry['batch']['task_ids'] == [task['id']]
+        assert app.store.get_task(task['id'])['failure_count'] == 1
+        assert app.store.get_task(task['id'])['status'] == 'queued'
+    finally:
+        app.store.connection.close()
