@@ -210,6 +210,9 @@ class ReadPage:
                 if response.status in {401, 403}
                 else "travel_source_failed"
             )
+        rejection = sso_rejection(self.raw.url, self.owner.session.policy.travel_origin)
+        if rejection:
+            raise ReadFailure(rejection)
         previous = None
         stable = 0
         while time.monotonic() < self.owner.deadline:
@@ -372,9 +375,6 @@ class CompatibleCandidate(_CandidateSession):
                 wait_until="domcontentloaded",
                 timeout=max(1000, int(self.budget * 1000)),
             )
-            rejection = sso_rejection(self.page.raw.url, self.policy.travel_origin)
-            if rejection:
-                raise ReadFailure(rejection)
             base, _, _ = source_data(self.context.payloads, self.context.marker)
             verify_trip_identity(self.page.raw, base["bxdzb"])
             initial = self.page.locator("body").inner_text()
