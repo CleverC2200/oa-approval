@@ -5,7 +5,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from apps.oa.approvals.sources import auth
+from apps.oa.approvals.sources import auth, official_sql
 from apps.oa.approvals.sources import browser_session as rpa_session
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources.download_errors import detect_oa_download_fail_code
@@ -35,7 +35,7 @@ def accepts(resource: dict, url: str, *, base_url: str) -> bool:
 
 
 def verify(resource: dict, url: str, *, base_url: str, document_id: str,
-           timeout_sec: int, initialize: bool = True) -> bool:
+           timeout_sec: int, initialize: bool = True, allow_ofd_attachment: bool = False) -> bool:
     if not accepts(resource, url, base_url=base_url):
         return False
     request_id = str(resource.get('_workflow_request_id') or '')
@@ -44,6 +44,16 @@ def verify(resource: dict, url: str, *, base_url: str, document_id: str,
 
     if not document_id:
         return False
+
+    def matches(payload):
+        if str(payload.get("status")) != "1":
+            return False
+        if str(payload.get("mainimagefile")) == file_id:
+            return True
+        data = payload.get("data")
+        return bool(allow_ofd_attachment and payload.get("mainimagefile") == ""
+                    and isinstance(data, dict) and data.get("docMain") == ""
+                    and official_sql.document_ofd_attachment_matches(document_id, file_id))
 
     def read(path: str, params: dict[str, str] | None = None) -> dict:
         query = "?" + urllib.parse.urlencode(params) if params else ""
@@ -65,7 +75,7 @@ def verify(resource: dict, url: str, *, base_url: str, document_id: str,
                 rpa_session.RPA_SESSION_INVALID_CODE, "RPA 文档读取账号与配置不一致"
             )
         preview = read("/api/doc/detail/basicInfo", {"docid": document_id})
-        if str(preview.get("status")) != "1" or str(preview.get("mainimagefile")) != file_id:
+        if not matches(preview):
             return False
         if not initialize:
             return True
@@ -75,7 +85,7 @@ def verify(resource: dict, url: str, *, base_url: str, document_id: str,
             "/api/doc/detail/basicInfo",
             {"docid": document_id, "isrequest": "1", "requestid": request_id},
         )
-        return str(info.get("status")) == "1" and str(info.get("mainimagefile")) == file_id
+        return matches(info)
     except rpa_session.RpaSessionError:
         raise
     except Exception:

@@ -92,6 +92,7 @@ class OriginalSources:
             document_id=source["document_id"],
             timeout_sec=timeout_sec,
             initialize=initialize,
+            allow_ofd_attachment=source.get("representation") == "official_pdf",
         )
 
     def read(
