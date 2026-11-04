@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from apps.oa.runtime import collection_budget
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import html
 from html.parser import HTMLParser
 import os
@@ -676,10 +676,6 @@ class _BrowserAttempt:
         self.results = []
 
     def read(self):
-        with collection_budget.phase("travel_browser", max(1, self.timeout_sec) + BROWSER_CLEANUP_SECONDS):
-            return self._read()
-
-    def _read(self):
         try:
             from playwright.sync_api import sync_playwright
         except Exception as error:
@@ -692,22 +688,30 @@ class _BrowserAttempt:
                 )
             ]
         try:
-            with sync_playwright() as playwright:
-                launch = {
-                    "headless": self.headless,
-                    "timeout": max(1000, self.timeout_sec * 1000),
-                }
-                if Path(str(self.policy.browser.chrome_binary)).exists():
-                    launch["executable_path"] = str(
-                        self.policy.browser.chrome_binary
-                    )
-                browser = playwright.chromium.launch(**launch)
-                try:
+            stack = ExitStack()
+            browser = None
+            try:
+                with collection_budget.phase("travel_browser", max(1, self.timeout_sec)):
+                    self.deadline = time.monotonic() + max(1, self.timeout_sec)
+                    playwright = stack.enter_context(sync_playwright())
+                    launch = {
+                        "headless": self.headless,
+                        "timeout": max(1, int((self.deadline - time.monotonic()) * 1000)),
+                    }
+                    if Path(str(self.policy.browser.chrome_binary)).exists():
+                        launch["executable_path"] = str(
+                            self.policy.browser.chrome_binary
+                        )
+                    browser = playwright.chromium.launch(**launch)
                     context = browser.new_context(storage_state=self.storage_state)
                     self._read_candidates(context)
-                finally:
-                    with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
-                        browser.close()
+            finally:
+                with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
+                    try:
+                        if browser is not None:
+                            browser.close()
+                    finally:
+                        stack.close()
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
                 CandidateObservation.failure(
@@ -722,7 +726,7 @@ class _BrowserAttempt:
         return self.results
 
     def _read_candidates(self, context):
-        deadline = time.monotonic() + max(1, self.timeout_sec)
+        deadline = self.deadline
         for index, url in enumerate(self.urls):
             remaining = deadline - time.monotonic()
             if remaining <= 0:

@@ -395,6 +395,7 @@ def browser_transport(monkeypatch):
         def launch(self, *, headless, **_kwargs):
             transport.launches.append(headless)
             browser = Browser(headless)
+            getattr(transport, 'launched', lambda: None)()
             transport.browsers.append(browser)
             return browser
 
@@ -563,7 +564,8 @@ def test_sso_error_is_reported_without_scanning_or_leaking_redirect(browser_tran
     assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)
 
 
-def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypatch, tmp_path):
+@pytest.mark.parametrize('launch_seconds', [0.0, 6.0])
+def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypatch, tmp_path, launch_seconds):
     import time
     from apps.oa.runtime import collection_budget
 
@@ -572,7 +574,14 @@ def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypat
     marker = tmp_path / 'phase.json'
     seen = []
 
+    def launched():
+        clock[0] = launch_seconds
+
+    browser_transport.launched = launched
+
     def read_candidates(_attempt, _context):
+        assert _attempt.deadline == 10.0
+        assert clock[0] == launch_seconds
         clock[0] = 9.0
         browser = browser_transport.browsers[0]
         close = browser.close
