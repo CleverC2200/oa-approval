@@ -441,11 +441,15 @@ import socket
 import sys
 sys.path.insert(0, PROJECT)
 from apps.oa.approvals import cli, demo, owner
+from apps.oa.runtime import collection_budget
 owner.COLLECTION_TIMEOUT_SECONDS = COLLECTION_BUDGET
 original_collect = demo.collect_demo
 
 def collect(request_id, **options):
     if request_id == '90002':
+        if PHASE_LIMIT:
+            phase = collection_budget.phase('synthetic_browser_cleanup', 1)
+            phase.__enter__()
         if owner.COLLECTION_TIMEOUT_SECONDS < 900:
             import subprocess
             descendant = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3600)'], start_new_session=True)
@@ -471,7 +475,7 @@ demo.DemoApi.submit_and_verify = submit
 demo.collect_demo = collect
 if __name__ == '__main__':
     raise SystemExit(cli.main())
-'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(getattr(request, 'param', 900))).replace('DETACHED_PID', repr(str(tmp_path / 'detached-pid'))))
+'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(900 if getattr(request, 'param', None) == 'phase' else getattr(request, 'param', 900))).replace('DETACHED_PID', repr(str(tmp_path / 'detached-pid'))).replace('PHASE_LIMIT', repr(getattr(request, 'param', None) == 'phase')))
     process = subprocess.Popen([sys.executable, str(entry), '--root', str(tmp_path), 'pending', '--demo'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
@@ -813,3 +817,20 @@ def test_process_scan_failure_does_not_leave_frozen_collector(tmp_path, monkeypa
         incoming.close()
         process.close()
         app.store.connection.close()
+
+
+@pytest.mark.parametrize('blocked_collection', ['phase'], indirect=True)
+def test_browser_cleanup_deadline_does_not_wait_for_collection_total(blocked_collection):
+    import time
+
+    process, started, first, invoke, client, channel = blocked_collection
+    beginning = time.monotonic()
+    before = invoke('status')['owner']['collection']
+    assert before['timeout_seconds'] == 900
+    assert before['phase']['phase'] == 'synthetic_browser_cleanup'
+    result = json.loads(client.makefile().readline())
+    assert result['error'] == 'collection_deadline'
+    assert time.monotonic() - beginning < 6
+    assert invoke('finish', '--run-id', started['run_id'])['status'] == 'closed'
+    process.wait(timeout=10)
+    assert invoke('status')['owner']['reachable'] is False
