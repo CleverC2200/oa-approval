@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+from apps.oa.runtime import collection_budget
 from contextlib import contextmanager
 import html
 from html.parser import HTMLParser
@@ -669,6 +671,10 @@ class _BrowserAttempt:
         self.results = []
 
     def read(self):
+        with collection_budget.phase("travel_browser", max(1, self.timeout_sec) + 5):
+            return self._read()
+
+    def _read(self):
         try:
             from playwright.sync_api import sync_playwright
         except Exception as error:

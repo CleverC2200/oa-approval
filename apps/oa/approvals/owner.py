@@ -13,6 +13,9 @@ import subprocess
 import sys
 import threading
 import time
+from uuid import uuid4
+
+from apps.oa.runtime import collection_budget, control
 
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
@@ -127,7 +130,7 @@ def dispatch(approval, run_id, request):
         return approval.fail(run_id, request['task_id'], request['reason'])
     raise ValueError('unknown_operation')
 
-def collect_process(root, demo, run_id, request, output, source_policy):
+def collect_process(root, demo, run_id, request, output, source_policy, phase_file=None):
     from apps.oa.approvals.operations import Approval
 
     os.setsid()
@@ -138,7 +141,8 @@ def collect_process(root, demo, run_id, request, output, source_policy):
             approval = create_demo(root)
         else:
             approval = Approval(root, source_policy=source_policy)
-        result = dispatch(approval, run_id, request)
+        with collection_budget.tracking(phase_file):
+            result = dispatch(approval, run_id, request)
     except Exception as error:
         result = failure(error)
     finally:
@@ -158,7 +162,7 @@ def reply(client, result):
         client.close()
 
 class _Collection:
-    def __init__(self, process, incoming, respond, store, run_id):
+    def __init__(self, process, incoming, respond, store, run_id, phase_file=None):
         self.process = process
         self.incoming = incoming
         self._respond = respond
@@ -166,12 +170,20 @@ class _Collection:
         self._run_id = run_id
         self.started = time.monotonic()
         self.timed_out = False
+        self.phase_file = phase_file
+
+    def phase(self):
+        raw = control.read_control_bytes(self.phase_file) if self.phase_file is not None else None
+        return json.loads(raw) if raw is not None else None
 
     def status(self):
         elapsed = time.monotonic() - self.started
+        state = self.phase()
+        if state is not None:
+            state = {**state, "remaining_seconds": round(max(0, state["deadline"] - time.monotonic()), 1)}
         return {"pid": self.process.pid, "elapsed_seconds": round(elapsed, 1),
                 "timeout_seconds": COLLECTION_TIMEOUT_SECONDS,
-                "deadline_exceeded": elapsed >= COLLECTION_TIMEOUT_SECONDS}
+                "deadline_exceeded": self.expired(), "phase": state}
 
     def stop(self):
         stopped = set()
@@ -203,13 +215,20 @@ class _Collection:
             self.process.join(COLLECTION_STOP_SECONDS)
 
     def expired(self):
-        return time.monotonic() - self.started >= COLLECTION_TIMEOUT_SECONDS
+        state = self.phase()
+        deadline = self.started + COLLECTION_TIMEOUT_SECONDS
+        if state is not None:
+            deadline = min(deadline, state["deadline"])
+        return time.monotonic() >= deadline
 
     @classmethod
     def start(cls, root, demo, run_id, request, respond, store, source_policy):
         context = multiprocessing.get_context('spawn')
         receiver, output = context.Pipe(duplex=False)
-        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy))
+        directory = root / 'collection-states'
+        directory.mkdir(exist_ok=True, mode=0o700)
+        phase_file = directory / f'{uuid4().hex}.json'
+        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy, phase_file))
         try:
             process.start()
         except Exception:
@@ -218,7 +237,7 @@ class _Collection:
             process.close()
             raise
         output.close()
-        return cls(process, receiver, respond, store, run_id)
+        return cls(process, receiver, respond, store, run_id, phase_file)
 
     def complete(self):
         received = []
@@ -232,16 +251,20 @@ class _Collection:
         reader = threading.Thread(target=receive, daemon=True)
         reader.start()
         try:
-            remaining = max(0, COLLECTION_TIMEOUT_SECONDS - (time.monotonic() - self.started))
-            reader.join(remaining)
+            while reader.is_alive() and not self.expired():
+                reader.join(0.1)
             if reader.is_alive():
                 self.timed_out = True
                 self.stop()
                 reader.join(COLLECTION_STOP_SECONDS)
             if not received:
+                stage = self.phase()
+                reason = "collection_deadline" if self.timed_out else "collection_process_failed"
+                if self.timed_out and stage is not None:
+                    reason += ":" + stage["phase"]
                 for task in self._store.tasks(self._run_id):
                     if task['status'] == 'preparing':
-                        self._store.fail_collection(task['id'], 'collection_deadline' if self.timed_out else 'collection_process_failed')
+                        self._store.fail_collection(task['id'], reason)
                 result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
             else:
                 result = received[0]

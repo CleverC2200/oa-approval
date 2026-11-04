@@ -43,7 +43,7 @@ from apps.oa.approvals.sources.travel_read_auth import (
     ApiSessionError,
 )
 from apps.oa.approvals.sources.travel_read_transport import Policy, ReadonlyProxy
-from apps.oa.runtime import control, slots
+from apps.oa.runtime import collection_budget, control, slots
 
 
 ACCEPTED_MOLI_SHA256 = frozenset(
@@ -370,7 +370,12 @@ class TravelReadSession:
             ),
         )
 
-    def read_attempt(
+    def read_attempt(self, urls, *, timeout_sec, expected_marker, expected_resource_count):
+        with collection_budget.phase("travel_read", timeout_sec):
+            return self._read_attempt(urls, timeout_sec=timeout_sec, expected_marker=expected_marker,
+                                      expected_resource_count=expected_resource_count)
+
+    def _read_attempt(
         self, urls, *, timeout_sec, expected_marker, expected_resource_count
     ):
         self.marker = expected_marker
@@ -431,7 +436,7 @@ class TravelReadSession:
                 if engine != "moli" or not error.retryable:
                     raise error
                 self._archive_transport(engine)
-                self.engine_stack.close()
+                self._close_engine()
                 self.engine_stack = ExitStack()
                 self.page = self.context = None
                 self.payloads.clear()
@@ -538,6 +543,10 @@ class TravelReadSession:
                 )
 
     def download(self, resource, *, dest_dir, timeout_sec):
+        with collection_budget.phase("travel_download", timeout_sec):
+            return self._download(resource, dest_dir=dest_dir, timeout_sec=timeout_sec)
+
+    def _download(self, resource, *, dest_dir, timeout_sec):
         try:
             deadline = time.monotonic() + max(0.1, timeout_sec)
             self._remaining(deadline)
@@ -607,9 +616,13 @@ class TravelReadSession:
             )
             return Failed(DownloadError(code, code))
 
+    def _close_engine(self):
+        with collection_budget.phase("browser_cleanup", 5):
+            self.engine_stack.close()
+
     def close(self):
         try:
-            self.engine_stack.close()
+            self._close_engine()
         finally:
             self.stack.close()
             self.context = self.page = None

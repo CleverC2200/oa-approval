@@ -681,3 +681,31 @@ def test_browser_attempt_and_fallback_do_not_arm_process_signal(monkeypatch):
         assert calls == ["moli", "chromium"]
     finally:
         session.close()
+
+
+def test_browser_phase_deadlines_are_reported_outside_browser_process(tmp_path, monkeypatch):
+    import json
+    import time
+
+    from apps.oa.runtime import collection_budget
+
+    marker = tmp_path / 'phase.json'
+    seen = []
+    monkeypatch.setattr(sessions, 'api_storage_state', lambda *a, **kw: {'cookies': []})
+    session = sessions.TravelReadSession(policy('chromium'))
+
+    def attempt(*args, **kwargs):
+        state = json.loads(marker.read_text())
+        assert state['phase'] == 'travel_read'
+        assert 0 < state['deadline'] - time.monotonic() <= 10
+        return CandidateObservation(text='CASE-A', scan_status='empty')
+
+    monkeypatch.setattr(session, '_attempt', attempt)
+    session.engine_stack.callback(lambda: seen.append(json.loads(marker.read_text())['phase']))
+    with collection_budget.tracking(marker):
+        session.read_attempt(['https://oa.example.test/sn_slv_bxbz.jsp'], timeout_sec=10,
+                             expected_marker='CASE-A', expected_resource_count=0)
+        assert json.loads(marker.read_text()) is None
+        session.close()
+        assert json.loads(marker.read_text()) is None
+    assert seen == ['browser_cleanup']
