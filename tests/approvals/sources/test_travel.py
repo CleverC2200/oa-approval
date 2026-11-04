@@ -561,3 +561,34 @@ def test_sso_error_is_reported_without_scanning_or_leaking_redirect(browser_tran
     assert 'synthetic-private-trace' not in json.dumps(error.diagnostics)
     assert message not in json.dumps(error.diagnostics)
     assert all(browser.close_timers == [0.0] for browser in browser_transport.browsers)
+
+
+def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypatch, tmp_path):
+    import time
+    from apps.oa.runtime import collection_budget
+
+    clock = [0.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    marker = tmp_path / 'phase.json'
+    seen = []
+
+    def read_candidates(_attempt, _context):
+        clock[0] = 9.0
+        browser = browser_transport.browsers[0]
+        close = browser.close
+
+        def finish():
+            state = json.loads(marker.read_text())
+            assert state['phase'] == 'travel_browser_cleanup'
+            assert 10 < state['deadline'] - clock[0] <= 15
+            seen.append(True)
+            close()
+
+        browser.close = finish
+
+    monkeypatch.setattr(travel_browser._BrowserAttempt, '_read_candidates', read_candidates)
+    with collection_budget.tracking(marker):
+        travel_source.browser.read_attempt([], timeout_sec=10, storage_state={}, headless=True,
+                                          expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)
+    assert seen == [True]
+    assert json.loads(marker.read_text()) is None

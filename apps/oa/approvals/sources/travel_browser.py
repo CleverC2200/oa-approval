@@ -33,6 +33,7 @@ TRIP_ATTACHMENT_API_PATHS = {
 TRIP_EXPENSE_API_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
 DEFAULT_TRAVEL_BROWSER_CAPACITY = 2
 MAX_TRAVEL_BROWSER_CAPACITY = 8
+BROWSER_CLEANUP_SECONDS = 15
 
 
 def _travel_browser_capacity() -> int:
@@ -675,7 +676,7 @@ class _BrowserAttempt:
         self.results = []
 
     def read(self):
-        with collection_budget.phase("travel_browser", max(1, self.timeout_sec) + 5):
+        with collection_budget.phase("travel_browser", max(1, self.timeout_sec) + BROWSER_CLEANUP_SECONDS):
             return self._read()
 
     def _read(self):
@@ -705,7 +706,7 @@ class _BrowserAttempt:
                     context = browser.new_context(storage_state=self.storage_state)
                     self._read_candidates(context)
                 finally:
-                    with collection_budget.phase("travel_browser_cleanup", 15):
+                    with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
                         browser.close()
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
