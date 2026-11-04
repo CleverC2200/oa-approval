@@ -69,7 +69,8 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
         store.connection.close()
     try:
         response = send(root, {'operation': 'status'}, timeout=0.5)
-        owner = {'reachable': True, 'run_id': response['run_id']}
+        owner = {'reachable': True, 'run_id': response['run_id'],
+                 **{key: response[key] for key in ('phase', 'collection') if key in response}}
     except TimeoutError:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
             probe.settimeout(0.5)

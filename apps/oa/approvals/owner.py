@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
@@ -19,6 +20,8 @@ from apps.oa.approvals.source_policy import load_source_policy
 
 
 _STDIN_EOF = object()
+COLLECTION_TIMEOUT_SECONDS = 900
+COLLECTION_STOP_SECONDS = 2
 
 
 @contextmanager
@@ -127,6 +130,7 @@ def dispatch(approval, run_id, request):
 def collect_process(root, demo, run_id, request, output, source_policy):
     from apps.oa.approvals.operations import Approval
 
+    os.setsid()
     approval = None
     try:
         if demo:
@@ -160,6 +164,25 @@ class _Collection:
         self._respond = respond
         self._store = store
         self._run_id = run_id
+        self.started = time.monotonic()
+        self.timed_out = False
+
+    def status(self):
+        elapsed = time.monotonic() - self.started
+        return {"pid": self.process.pid, "elapsed_seconds": round(elapsed, 1),
+                "timeout_seconds": COLLECTION_TIMEOUT_SECONDS,
+                "deadline_exceeded": elapsed >= COLLECTION_TIMEOUT_SECONDS}
+
+    def stop(self):
+        for signum in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(self.process.pid, signum)
+            except ProcessLookupError:
+                pass
+            self.process.join(COLLECTION_STOP_SECONDS)
+
+    def expired(self):
+        return time.monotonic() - self.started >= COLLECTION_TIMEOUT_SECONDS
 
     @classmethod
     def start(cls, root, demo, run_id, request, respond, store, source_policy):
@@ -178,14 +201,20 @@ class _Collection:
 
     def complete(self):
         try:
+            remaining = max(0, COLLECTION_TIMEOUT_SECONDS - (time.monotonic() - self.started))
+            if not self.incoming.poll(remaining):
+                self.timed_out = True
+                self.stop()
+                raise EOFError
             result = self.incoming.recv()
         except EOFError:
             for task in self._store.tasks(self._run_id):
                 if task['status'] == 'preparing':
-                    self._store.fail_collection(task['id'], 'collection_process_failed')
-            result = {'status': 'failed', 'error': 'collection_process_failed'}
+                    self._store.fail_collection(task['id'], 'collection_deadline' if self.timed_out else 'collection_process_failed')
+            result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
         finally:
-            self.process.join()
+            self.process.join(COLLECTION_STOP_SECONDS)
+            self.stop()
             self.incoming.close()
             self.process.close()
         self._respond(result)
@@ -230,6 +259,10 @@ class _RoundSession:
                 self._finishing = True
                 self._handoff = request.get('handoff', False)
                 self._finish_responders.append(respond)
+            elif request.get('operation') == 'status':
+                respond({**dispatch(self._approval, self._run_id, request),
+                         'phase': 'finishing' if self._finishing else 'running',
+                         'collection': self._collection.status() if self._collection is not None else None})
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
             else:
@@ -257,6 +290,12 @@ class _RoundSession:
     def _close_if_drained(self):
         if self._finishing and self._collection is None:
             self.shutdown()
+
+    def check_deadline(self):
+        if self._collection is not None and self._collection.expired():
+            self._collection.timed_out = True
+            self._collection.stop()
+            self.collection_ready()
 
     def collection_ready(self):
         self._drain_collection()
@@ -317,7 +356,7 @@ def require_production_main(project=None):
         raise ValueError('production_main_not_synced')
 
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None,
-          continue_from=None):
+          continue_from=None, retry_failed=False):
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
@@ -332,7 +371,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
         else:
             approval = Approval(root, source_policy=source_policy)
         started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
-                                   continue_from=continue_from)
+                                   continue_from=continue_from, retry_failed=retry_failed)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
         server = None
@@ -375,6 +414,17 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                     while not session.closed:
                         if stopping.is_set():
                             return 130
+                        session.check_deadline()
+                        if session.closed:
+                            return 0
+                        incoming = session.collection_pipe
+                        current_pipe = incoming.fileno() if incoming is not None else None
+                        if current_pipe != watched_pipe:
+                            if watched_pipe is not None:
+                                selector.unregister(watched_pipe)
+                            if current_pipe is not None:
+                                selector.register(current_pipe, selectors.EVENT_READ, 'collection')
+                            watched_pipe = current_pipe
                         for selected, _events in selector.select(timeout=0.5):
                             if stopping.is_set():
                                 return 130
@@ -392,13 +442,6 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                                                respond=lambda result, client=client: reply(client, result))
                             if session.closed:
                                 return 0
-                            incoming = session.collection_pipe
-                            current_pipe = incoming.fileno() if incoming is not None else None
-                            if current_pipe != watched_pipe:
-                                if watched_pipe is not None:
-                                    selector.unregister(watched_pipe)
-                                if current_pipe is not None:
-                                    selector.register(current_pipe, selectors.EVENT_READ, 'collection')
-                                watched_pipe = current_pipe
+
         finally:
             session.shutdown()

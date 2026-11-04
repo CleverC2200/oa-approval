@@ -425,7 +425,7 @@ def test_socket_collect_guards_batch_independently_of_pending_display_limit(tmp_
 
 
 @pytest.fixture
-def blocked_collection(tmp_path):
+def blocked_collection(tmp_path, request):
     import socket
 
     from apps.oa.approvals.cli import socket_path
@@ -440,7 +440,8 @@ from pathlib import Path
 import socket
 import sys
 sys.path.insert(0, PROJECT)
-from apps.oa.approvals import cli, demo
+from apps.oa.approvals import cli, demo, owner
+owner.COLLECTION_TIMEOUT_SECONDS = COLLECTION_BUDGET
 original_collect = demo.collect_demo
 
 def collect(request_id, **options):
@@ -466,7 +467,7 @@ demo.DemoApi.submit_and_verify = submit
 demo.collect_demo = collect
 if __name__ == '__main__':
     raise SystemExit(cli.main())
-'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))))
+'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(getattr(request, 'param', 900))))
     process = subprocess.Popen([sys.executable, str(entry), '--root', str(tmp_path), 'pending', '--demo'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
@@ -704,3 +705,36 @@ def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blo
                               input='{"operation":"finish"}\n', capture_output=True, text=True, timeout=10)
     assert reopened.returncode == 0, reopened.stdout + reopened.stderr
     assert json.loads(reopened.stdout)['run_id'] != started['run_id']
+
+
+@pytest.mark.parametrize('blocked_collection', [3], indirect=True)
+@pytest.mark.parametrize('finish', [False, True])
+def test_collection_deadline_releases_worker_and_allows_finish(blocked_collection, tmp_path, finish):
+    import socket
+
+    process, started, first, invoke, client, channel = blocked_collection
+    before = invoke('status', '--view', 'batch')
+    assert before['owner']['phase'] == 'running'
+    assert before['owner']['collection']['timeout_seconds'] == 3
+    assert before['owner']['collection']['elapsed_seconds'] >= 0
+    finishing = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    finishing.settimeout(10)
+    try:
+        if finish:
+            finishing.connect(started['socket'])
+            finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
+            assert invoke('status')['owner']['phase'] == 'finishing'
+        result = json.loads(client.makefile().readline())
+        assert result['status'] == 'failed' and result['error'] == 'collection_deadline'
+        facts = invoke('status', '--view', 'batch')
+        assert facts['batch']['summary']['failed'] == 1
+        assert facts['acceptance']['attempt_count'] == 0
+        if finish:
+            assert json.loads(finishing.makefile().readline())['status'] == 'closed'
+        else:
+            assert facts['owner']['collection'] is None
+            assert invoke('finish', '--run-id', started['run_id'])['status'] == 'closed'
+        process.wait(timeout=10)
+        assert invoke('status')['owner']['reachable'] is False
+    finally:
+        finishing.close()

@@ -68,8 +68,8 @@
 
 | 当前分支 | 关闭命令 |
 | --- | --- |
-| 小时任务或其接续对话，当前任务已明确授权通过独立对话接续，计划仍为 ACTIVE，且没有停止指令或未知提交 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --handoff`，随后按[接续结果](hourly-dispatch.md#排空后立即接续)处理 |
-| 人工单批、任务暂停、用户停止、未知提交或当前没有独立对话接续授权 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"`，关闭后结束本轮 |
+| 小时任务或其接续对话，当前任务已明确授权通过后续小时对话接续，计划仍为 ACTIVE，且没有停止指令或未知提交 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --handoff`，随后按[接续结果](hourly-dispatch.md#保存接续并结束)处理 |
+| 人工单批、任务暂停、用户停止、未知提交或当前没有后续小时接续授权 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"`，关闭后结束本轮 |
 
 关闭前后均使用同一查询入口，分别核对验收事实及关闭结果：
 

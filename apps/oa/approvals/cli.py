@@ -27,6 +27,7 @@ def main(argv=None):
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
     pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
+    pending.add_argument('--retry-failed', choices=['YES'], help='仅按本次明确授权重试 --request-id 指定的失败投递；小时任务默认排除历史失败')
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
@@ -76,6 +77,8 @@ def main(argv=None):
     if args.operation == 'finish' and args.collection_stopped_note is not None and (
             not args.orphaned or not args.collection_stopped_note.strip()):
         parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
+    if args.operation in {'pending', 'start'} and args.retry_failed and (not args.request_id or args.continue_from):
+        parser.error('--retry-failed YES requires --request-id and cannot change a continuation')
     if args.operation in {'pending', 'start'} and args.limit < 0:
         parser.error('--limit must be non-negative')
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
@@ -109,7 +112,7 @@ def main(argv=None):
 
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
-                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from)
+                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from, retry_failed=args.retry_failed == 'YES')
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0
