@@ -26,6 +26,7 @@ class _PredictionSession:
                         'Content-Type': 'application/x-www-form-urlencoded'}
         self.deadline = time.monotonic() + timeout
         self.operator_cache = {}
+        self.operator_responses = []
         if not verified_identity(self.read(ACCOUNT_PATH), auth.env('OA_UID')):
             raise RuntimeError('prediction_session_identity_mismatch')
 
@@ -54,11 +55,13 @@ class _PredictionSession:
                 raise TimeoutError('prediction_timeout') from None
             raise
 
-    def operators(self, request_id, node_id):
-        if node_id not in self.operator_cache:
-            payload = self.read(OPERATOR_PATH, {
-                'requestid': request_id, 'cnodeid': node_id, 'nodeType': 3, 'isForecastNode': 1,
-            })
+    def operators(self, request_id, node_id, node_type):
+        key = (node_id, node_type)
+        if key not in self.operator_cache:
+            params = {'requestid': request_id, 'cnodeid': node_id, 'nodeType': node_type}
+            if node_type == 3:
+                params['isForecastNode'] = 1
+            payload = self.read(OPERATOR_PATH, params)
             groups = payload.get('nodes') if isinstance(payload, dict) else None
             if (not isinstance(groups, list) or not groups
                     or any(not isinstance(group, dict) or not isinstance(group.get('operators'), list)
@@ -73,20 +76,27 @@ class _PredictionSession:
                         raise RuntimeError('prediction_operators_invalid')
                     operators.append({'id': str(operator['id']), 'name': operator['name'],
                                       'type': operator.get('type')})
-            self.operator_cache[node_id] = operators
-        return self.operator_cache[node_id]
+            self.operator_cache[key] = operators
+            self.operator_responses.append({'request': params, 'response': payload})
+        return self.operator_cache[key]
 
 
-def _future_nodes(payload):
+def _all_nodes(payload):
     nodes = []
-    for raw in payload['nodeInfo']:
+    for sequence, raw in enumerate(payload['nodeInfo'], 1):
         node_id = str(raw.get('nodeid', ''))
-        if raw.get('nodeType') != 3 and node_id not in {'-1', '-2'}:
-            continue
-        if not re.fullmatch(r'[1-9][0-9]*|-1|-2', node_id):
+        if not re.fullmatch(r'-?(0|[1-9][0-9]*)', node_id):
             raise RuntimeError('prediction_response_invalid')
-        state = {'-1': 'loading', '-2': 'unknown'}.get(node_id, 'predicted')
+        node_type = raw.get('nodeType')
+        state = 'unknown'
+        if type(node_type) is int:
+            state = {0: 'passed', 1: 'current', 3: 'predicted'}.get(node_type, 'unknown')
+        if node_id == '-1':
+            state = 'loading'
+        elif int(node_id) <= 0:
+            state = 'unknown'
         nodes.append({
+            'sequence': sequence, 'node_type': node_type,
             'node_id': node_id,
             'node_name': raw.get('nodeName') or ('后续节点无法预知' if state == 'unknown' else '未命名节点'),
             'state': state, 'operators': [], 'operators_loaded': False,
@@ -100,9 +110,10 @@ def predict(request_id, *, timeout=60, refresh=False):
         raise ValueError('prediction_request_id_invalid')
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
         raise ValueError('prediction_timeout_invalid')
-    data, nodes, complete = None, [], False
+    data, nodes, operator_responses, complete = None, [], [], False
     try:
         session = _PredictionSession(timeout)
+        operator_responses = session.operator_responses
         params = {'requestid': request_id}
         if refresh:
             params['resetForecast'] = 1
@@ -114,15 +125,15 @@ def predict(request_id, *, timeout=60, refresh=False):
                     or not isinstance(raw_nodes, list) or not raw_nodes
                     or any(not isinstance(node, dict) for node in raw_nodes)):
                 raise RuntimeError('prediction_response_invalid')
-            nodes = _future_nodes(payload)
+            nodes = _all_nodes(payload)
             data = payload
             if forecast['isEnd']:
                 break
             params.pop('resetForecast', None)
             time.sleep(min(1, session.remaining()))
         for node in nodes:
-            if node['state'] == 'predicted':
-                node['operators'] = session.operators(request_id, node['node_id'])
+            if node['state'] in {'passed', 'current', 'predicted'}:
+                node['operators'] = session.operators(request_id, node['node_id'], node['node_type'])
                 node['operators_loaded'] = True
         complete = True
     except TimeoutError:
@@ -135,11 +146,13 @@ def predict(request_id, *, timeout=60, refresh=False):
         'has_unknown_nodes': any(node['state'] in {'loading', 'unknown'} for node in nodes),
         'forecast': data['forecastInfo'] if data is not None else None,
         'nodes': nodes,
+        'raw_prediction': data,
+        'raw_operators': operator_responses,
     }
 
 
 def render_text(result):
-    lines = [f"流程 {result['request_id']} · 后续办理人预测 · {result['status']}"]
+    lines = [f"流程 {result['request_id']} · 完整节点及流转预测 · {result['status']}"]
     forecast = result['forecast']
     if forecast:
         lines.append(
@@ -147,6 +160,8 @@ def render_text(result):
             f"{forecast.get('forecastDate', '')} {forecast.get('forecastTime', '')}"
         )
     for index, node in enumerate(result['nodes'], 1):
+        state = {'passed': '已经过', 'current': '当前', 'predicted': '预测',
+                 'unknown': '未知', 'loading': '计算中'}[node['state']]
         operators = '、'.join(f"{operator['name']} ({operator['id']})" for operator in node['operators'])
         if node['state'] == 'unknown':
             operators = '无法预知办理人'
@@ -155,7 +170,7 @@ def render_text(result):
         branch = ''
         if (node['branch_count'] or 0) > 1:
             branch = f" · 分支 {node['selected_branch']}/{node['branch_count']}"
-        lines.append(f"{index}. {node['node_name']} ({node['node_id']}) · {operators or '无办理人'}{branch}")
+        lines.append(f"{index}. [{state}] {node['node_name']} ({node['node_id']}) · {operators or '无办理人'}{branch}")
     if not result['complete']:
         lines.append('查询等待超时，以上仅为已取得的部分结果。')
     lines.append('预测路径可能随表单和人员变化；未提交审批。')
