@@ -9,6 +9,7 @@ import urllib.parse
 import pytest
 
 from apps.oa.__main__ import main
+from apps.oa.approvals import finance_precheck
 from apps.oa.approvals.sources import prediction
 from tests.approvals.source_fakes import POLICY
 
@@ -20,11 +21,11 @@ def result(*, complete=True):
         'forecastLinkColor': '#123456',
         'nativeExtra': {'retained': ['a', 'b']},
         'nodeInfo': [
-            {'nodeid': '9', 'nodeName': '发起', 'nodeType': 0},
-            {'nodeid': '10', 'nodeName': '预审', 'nodeType': 1},
-            {'nodeid': 20, 'nodeName': '财务', 'nodeType': 3, 'branchNumber': 2,
+            {'nodeid': '9', 'nodeName': '发起', 'nodeType': 0, 'ntype': '0'},
+            {'nodeid': '10', 'nodeName': '预审', 'nodeType': 1, 'ntype': '1'},
+            {'nodeid': 20, 'nodeName': '财务', 'nodeType': 3, 'ntype': '1', 'branchNumber': 2,
              'currentBranch': 1, 'nodeRemark': '20_1', 'nodeColor': '#654321'},
-            {'nodeid': 20, 'nodeName': '财务', 'nodeType': 3, 'nodeRemark': '20_1'},
+            {'nodeid': 20, 'nodeName': '财务', 'nodeType': 3, 'ntype': '1', 'nodeRemark': '20_1'},
             {'nodeid': -2, 'nodeName': '', 'nodeType': 3},
         ],
     }
@@ -32,6 +33,7 @@ def result(*, complete=True):
 
 @pytest.fixture
 def native(monkeypatch):
+    monkeypatch.setattr(finance_precheck, 'load_policy', lambda: None)
     clock = SimpleNamespace(now=0)
     monkeypatch.setattr(prediction, 'time', SimpleNamespace(
         monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
@@ -39,6 +41,8 @@ def native(monkeypatch):
     monkeypatch.setattr(prediction.auth, 'env', lambda name: values.get(name, ''))
     authentications, requests, replies = [], [], []
     account = {'data': {'userid': '1'}}
+    request_details = {'payload': {'code': 'SUCCESS', 'data': {
+        'requestId': '123', 'creatorId': '9', 'creatorName': '名单外发起人', 'canView': True}}}
     operators = {('9', '0'): {'nodes': [{'operators': [{'id': 4, 'name': '发起人', 'type': 0}]}]},
                  ('10', '1'): {'nodes': [{'operators': [{'id': 1, 'name': '测试账号', 'type': 0}]}]},
                  ('20', '3'): {'nodes': [{'operators': [
@@ -54,11 +58,14 @@ def native(monkeypatch):
 
     def urlopen(request, *, timeout):
         path = urllib.parse.urlsplit(request.full_url).path
-        params = urllib.parse.parse_qs((request.data or b'').decode())
+        params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query or (request.data or b'').decode())
         requests.append((path, params, dict(request.header_items()), timeout))
         assert timeout > 0
         if path == prediction.ACCOUNT_PATH:
             payload = account
+        elif path == prediction.REQUEST_PATH:
+            assert request.get_method() == 'GET' and request.data is None
+            payload = request_details['payload']
         elif path == prediction.OPERATOR_PATH:
             payload = operators[(params['cnodeid'][0], params['nodeType'][0])]
         else:
@@ -70,7 +77,7 @@ def native(monkeypatch):
     monkeypatch.setattr(prediction.auth, 'credentials', credentials)
     monkeypatch.setattr(prediction.http, 'urlopen', urlopen)
     return SimpleNamespace(authentications=authentications, requests=requests, replies=replies,
-                           account=account, operators=operators)
+                           account=account, operators=operators, request_details=request_details)
 
 
 def test_public_cli_preserves_full_raw_responses_and_every_node(native, tmp_path, capsys):
@@ -81,6 +88,7 @@ def test_public_cli_preserves_full_raw_responses_and_every_node(native, tmp_path
     assert output['status'] == 'ok'
     assert output['complete'] is True and output['has_unknown_nodes'] is True
     assert output['session_source'] == 'api'
+    assert output['finance_precheck']['status'] == 'not_configured'
     assert native.authentications == [POLICY.attachments.oa_origin]
     assert [request[0] for request in native.requests] == [
         prediction.ACCOUNT_PATH, prediction.PREDICTION_PATH,
@@ -248,3 +256,125 @@ def test_invalid_arguments_do_not_authenticate(native, request_id, timeout):
     with pytest.raises(ValueError):
         prediction.predict(request_id, timeout=timeout)
     assert not native.authentications and not native.requests
+
+
+@pytest.fixture
+def finance_rule(native, monkeypatch):
+    policy = {'leader': {'id': '100', 'name': '测试高层'},
+              'initiators': [{'id': '4', 'name': '名单内发起人'}]}
+    monkeypatch.setattr(finance_precheck, 'load_policy', lambda: policy)
+    return policy
+
+
+@pytest.mark.parametrize('initiator_hit, route_hit', [(True, False), (False, True), (True, True), (False, False)])
+def test_finance_precheck_or_conditions_through_public_cli(native, finance_rule, initiator_hit, route_hit, capsys):
+    payload = result()
+    payload['nodeInfo'].pop()
+    native.replies.append(payload)
+    if initiator_hit:
+        native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
+    if route_hit:
+        native.operators[('20', '3')]['nodes'][0]['operators'].append({'id': 100, 'name': '测试高层', 'type': 0})
+    assert main(['approvals', 'predict', '--request-id', '123', '--format', 'json']) == 0
+    output = json.loads(capsys.readouterr().out)
+    assessment = output['finance_precheck']
+    assert assessment['required'] is (initiator_hit or route_hit)
+    assert assessment['status'] == ('required' if initiator_hit or route_hit else 'not_required')
+    codes = {reason['code'] for reason in assessment['reasons']}
+    assert ('initiator_in_list' in codes) is initiator_hit
+    assert ('future_approver_match' in codes) is route_hit
+    assert output['raw_prediction'] == payload
+    assert output['initiator']['id'] == ('4' if initiator_hit else '9')
+    assert native.requests[1][0:2] == (prediction.REQUEST_PATH, {'requestId': ['123']})
+    if route_hit:
+        assert [reason['sequence'] for reason in assessment['reasons']
+                if reason['code'] == 'future_approver_match'] == [3, 4]
+
+
+@pytest.mark.parametrize('node_type, kind, person_type, expected', [
+    (0, '1', 0, False), (1, '1', 0, False), (3, '3', 0, False),
+    (3, '5', 0, False), (3, '6', 0, False), (3, '1', 2, False),
+    (3, '1', 1, False), (3, '1', None, None), (3, '1', 99, None), (3, None, 0, None), (3, '2', 0, True),
+])
+def test_finance_matches_only_future_human_approval_or_processing_nodes(native, finance_rule,
+                                                                      node_type, kind, person_type, expected):
+    payload = result()
+    payload['nodeInfo'] = [{'nodeid': 20, 'nodeName': '目标节点', 'nodeType': node_type, 'ntype': kind}]
+    native.operators[('20', str(node_type))] = {'nodes': [{'operators': [
+        {'id': 100, 'name': '测试高层', 'type': person_type}]}]}
+    native.replies.append(payload)
+    output = prediction.predict('123')
+    assert output['finance_precheck']['required'] is expected
+
+
+@pytest.mark.parametrize('initiator_hit', [False, True])
+def test_unknown_route_is_not_false_but_initiator_match_still_requires_finance(native, finance_rule, initiator_hit):
+    native.replies.append(result())
+    if initiator_hit:
+        native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
+    assessment = prediction.predict('123')['finance_precheck']
+    assert assessment['required'] is (True if initiator_hit else None)
+    assert 'prediction_path_unknown' in assessment['uncertainties']
+
+
+@pytest.mark.parametrize('route_hit', [False, True])
+def test_initiator_read_failure_does_not_hide_independent_future_approver_match(native, finance_rule, route_hit):
+    payload = result()
+    payload['nodeInfo'].pop()
+    native.replies.append(payload)
+    native.request_details['payload'] = urllib.error.HTTPError('https://example.test/private', 403,
+                                                              'private-server-message', {}, None)
+    if route_hit:
+        native.operators[('20', '3')]['nodes'][0]['operators'].append({'id': 100, 'name': '测试高层', 'type': 0})
+    output = prediction.predict('123')
+    assert output['complete'] is True and output['initiator']['read_status'] == 'unavailable'
+    assert output['finance_precheck']['required'] is (True if route_hit else None)
+    assert 'private-server-message' not in json.dumps(output)
+
+
+@pytest.mark.parametrize('details', [
+    {'code': 'ERROR', 'data': {'requestId': '123', 'creatorId': '4'}},
+    {'code': 'SUCCESS', 'data': {'requestId': '999', 'creatorId': '4'}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorId': '4', 'canView': False}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorName': '名单内发起人'}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorId': '9'}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorId': '9', 'canView': None}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorId': '9', 'canView': 0}},
+    {'code': 'SUCCESS', 'data': {'requestId': '123', 'creatorId': '9', 'canView': 'false'}},
+])
+def test_initiator_requires_valid_response_and_matching_request_identity(native, finance_rule, details):
+    payload = result()
+    payload['nodeInfo'].pop()
+    native.replies.append(payload)
+    native.request_details['payload'] = details
+    output = prediction.predict('123')
+    assert output['finance_precheck']['required'] is None
+    assert output['initiator']['read_status'] == 'unavailable'
+
+
+def test_initiator_hit_is_retained_when_prediction_times_out(native, finance_rule, capsys):
+    native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
+    native.replies.append(result(complete=False))
+    assert main(['approvals', 'predict', '--request-id', '123', '--timeout', '1']) == 1
+    output = capsys.readouterr().out
+    assert '需要财务前置' in output and '名单内发起人 (4)' in output
+
+
+def test_empty_future_people_is_unknown_not_negative(native, finance_rule):
+    payload = result()
+    payload['nodeInfo'].pop()
+    native.replies.append(payload)
+    native.operators[('20', '3')]['nodes'][0]['operators'] = []
+    assessment = prediction.predict('123')['finance_precheck']
+    assert assessment['required'] is None
+    assert 'future_operators_unavailable' in assessment['uncertainties']
+
+
+def test_unknown_operator_namespace_cannot_prove_a_negative_match(native, finance_rule):
+    payload = result()
+    payload['nodeInfo'].pop()
+    native.replies.append(payload)
+    native.operators[('20', '3')]['nodes'][0]['operators'] = [{'id': 200, 'name': '未知类型', 'type': 99}]
+    assessment = prediction.predict('123')['finance_precheck']
+    assert assessment['required'] is None
+    assert 'operator_type_unknown' in assessment['uncertainties']

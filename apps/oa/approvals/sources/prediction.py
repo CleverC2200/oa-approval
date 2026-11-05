@@ -11,10 +11,12 @@ import urllib.request
 
 from apps.oa.approvals.sources import auth, http
 from apps.oa.approvals.sources.travel_read_auth import ACCOUNT_PATH, verified_identity
+from apps.oa.approvals import finance_precheck
 
 
 PREDICTION_PATH = '/api/workflow/layout/getSimpleModeData'
 OPERATOR_PATH = '/api/workflow/layout/getOperator'
+REQUEST_PATH = '/api/workflow/paService/getWorkflowRequest'
 
 
 class _PredictionSession:
@@ -37,11 +39,13 @@ class _PredictionSession:
         return remaining
 
     def read(self, path, params=None):
-        if path not in {ACCOUNT_PATH, PREDICTION_PATH, OPERATOR_PATH}:
+        if path not in {ACCOUNT_PATH, PREDICTION_PATH, OPERATOR_PATH, REQUEST_PATH}:
             raise ValueError('prediction_endpoint_not_allowed')
+        query = urllib.parse.urlencode(params or {})
+        use_query = path == REQUEST_PATH
         request = urllib.request.Request(
-            self.origin + path,
-            data=urllib.parse.urlencode(params).encode() if params is not None else None,
+            self.origin + path + ('?' + query if use_query else ''),
+            data=query.encode() if params is not None and not use_query else None,
             headers=self.headers,
         )
         try:
@@ -54,6 +58,16 @@ class _PredictionSession:
             if isinstance(error.reason, TimeoutError):
                 raise TimeoutError('prediction_timeout') from None
             raise
+
+    def initiator(self, request_id):
+        payload = self.read(REQUEST_PATH, {'requestId': request_id})
+        data = payload.get('data') if isinstance(payload, dict) and payload.get('code') == 'SUCCESS' else None
+        if (not isinstance(data, dict) or str(data.get('requestId')) != request_id
+                or data.get('canView') is not True
+                or not re.fullmatch(r'[1-9][0-9]*', str(data.get('creatorId', '')))):
+            raise ValueError('prediction_initiator_unavailable')
+        return {'id': str(data['creatorId']), 'name': str(data.get('creatorName') or ''),
+                'read_status': 'ok', 'source': REQUEST_PATH}
 
     def operators(self, request_id, node_id, node_type):
         key = (node_id, node_type)
@@ -97,6 +111,7 @@ def _all_nodes(payload):
             state = 'unknown'
         nodes.append({
             'sequence': sequence, 'node_type': node_type,
+            'node_kind': str(raw['ntype']) if raw.get('ntype') is not None else None,
             'node_id': node_id,
             'node_name': raw.get('nodeName') or ('后续节点无法预知' if state == 'unknown' else '未命名节点'),
             'state': state, 'operators': [], 'operators_loaded': False,
@@ -110,10 +125,17 @@ def predict(request_id, *, timeout=60, refresh=False):
         raise ValueError('prediction_request_id_invalid')
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
         raise ValueError('prediction_timeout_invalid')
+    policy = finance_precheck.load_policy()
+    initiator = {'id': None, 'name': '', 'read_status': 'unavailable', 'source': REQUEST_PATH}
     data, nodes, operator_responses, complete = None, [], [], False
     try:
         session = _PredictionSession(timeout)
         operator_responses = session.operator_responses
+        if policy is not None:
+            try:
+                initiator = session.initiator(request_id)
+            except (OSError, ValueError):
+                pass
         params = {'requestid': request_id}
         if refresh:
             params['resetForecast'] = 1
@@ -138,7 +160,7 @@ def predict(request_id, *, timeout=60, refresh=False):
         complete = True
     except TimeoutError:
         pass
-    return {
+    result = {
         'status': 'ok' if complete else 'timeout', 'request_id': request_id,
         'source': 'oa_native_prediction', 'session_source': 'api',
         'queried_at': datetime.now(timezone.utc).isoformat(),
@@ -148,7 +170,10 @@ def predict(request_id, *, timeout=60, refresh=False):
         'nodes': nodes,
         'raw_prediction': data,
         'raw_operators': operator_responses,
+        'initiator': initiator,
     }
+    result['finance_precheck'] = finance_precheck.assess(result, policy)
+    return result
 
 
 def render_text(result):
@@ -173,5 +198,17 @@ def render_text(result):
         lines.append(f"{index}. [{state}] {node['node_name']} ({node['node_id']}) · {operators or '无办理人'}{branch}")
     if not result['complete']:
         lines.append('查询等待超时，以上仅为已取得的部分结果。')
+    assessment = result['finance_precheck']
+    label = {'required': '需要财务前置', 'not_required': '本次预测与发起人未命中财务前置条件',
+             'unknown': '财务前置判断不完整，不能确认无需财务前置', 'not_configured': '未配置财务前置规则'}
+    lines.append('财务前置：' + label[assessment['status']])
+    for reason in assessment['reasons']:
+        if reason['code'] == 'initiator_in_list':
+            lines.append(f"命中原因：发起人 {reason['initiator_name']} ({reason['initiator_id']}) 在指定名单中。")
+        else:
+            lines.append(f"命中原因：第 {reason['sequence']} 项 {reason['node_name']} 的预测办理人包含 "
+                         f"{reason['approver_name']} ({reason['approver_id']})。")
+    if assessment['uncertainties']:
+        lines.append('判断缺口：' + '、'.join(assessment['uncertainties']))
     lines.append('预测路径可能随表单和人员变化；未提交审批。')
     return '\n'.join(lines)
