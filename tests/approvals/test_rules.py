@@ -80,18 +80,23 @@ def test_collect_freezes_only_current_flow_rules(rule_case):
 @pytest.mark.parametrize('workflow_key', [
     'travel_expense', 'business_entertainment', 'business_support_fee',
     'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense',
-    'packaging_layout_approval', 'overseas_invoice',
+    'packaging_layout_approval', 'overseas_invoice', 'dealer_closure',
 ])
 def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workflow_key):
     app, run_id, guards = rule_case(workflow_key)
     try:
         collected = app.collect(run_id, **guards)
         root = Path(collected['rules_root'])
-        expected = set() if workflow_key == 'overseas_invoice' else {workflow_key.replace('_', '-') + '.md'}
+        expected = set() if workflow_key in {'overseas_invoice', 'dealer_closure'} else {workflow_key.replace('_', '-') + '.md'}
         assert {path.name for path in root.rglob('flows/*.md')} == expected
         if workflow_key == 'overseas_invoice':
             assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
                 '.agents/skills/oa-overseas-invoice/SKILL.md', 'docs/overseas-invoice.md'}
+        if workflow_key == 'dealer_closure':
+            assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
+                '.agents/skills/oa-dealer-closure/SKILL.md',
+                '.agents/skills/oa-dealer-closure/references/read-sources.md',
+                '.agents/skills/oa-dealer-closure/references/result-format.md'}
         for document in root.rglob('*.md'):
             for link in re.findall(r'\]\(([^)]+)\)', document.read_text()):
                 path = link.split('#', 1)[0]

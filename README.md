@@ -65,6 +65,8 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 批次范围、FIFO、在途数量、Agent 轮换和审核规则统一见[财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)。海外规则见[海外 Skill](.agents/skills/oa-overseas-invoice/SKILL.md)。Python 不替 Agent 形成财务业务结论。
 
+经销商关户使用`dealer_closure`进入同一批次与提交入口，按[关户 Skill](.agents/skills/oa-dealer-closure/SKILL.md)核对本轮冻结BI、正式SAP、DMS及表单，输出✅/❗简版意见。正常审批与未阅转发批注分别核对提交上下文，后者反馈意见并核验原流程未推进；已阅记录不重复列入。私有连接配置见Skill数据入口说明。
+
 ## 材料与参考资料
 
 商旅采集默认使用原 Chromium 与 RPA 会话。可在启动进程时设置 `OA_TRAVEL_BROWSER_ENGINE=moli`、`OA_TRAVEL_SESSION_SOURCE=api` 和 `OA_MOLI_BIN=/absolute/path/moli`，启用独立只读会话及 Moli。`chromium` 加 `api` 使用同一只读会话运行无头 Chromium；`moli` 加 `rpa` 仍需现有 RPA 登录态。浏览器读取授权仍由 `OA_ALLOW_BROWSER_DOWNLOAD` 控制。API 模式复用现有注册凭据，不注册新应用，必须通过账号核对才继续。

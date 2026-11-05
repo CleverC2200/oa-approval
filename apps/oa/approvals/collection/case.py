@@ -133,7 +133,7 @@ def _authority_facts(
         if str(item.get("observed_at") or "").strip():
             fact["observed_at"] = str(item["observed_at"])
         facts.append(fact)
-    if str(config.get("flow_key") or "") == _PACKAGING_FLOW:
+    if str(config.get("flow_key") or "") in {_PACKAGING_FLOW, "dealer_closure"}:
         return facts
     workflow_key = str(config.get("flow_key") or "")
     invoice_result = invoice_buyers.read_invoice_buyers(
@@ -508,6 +508,10 @@ def _collect_case(
     except (RuntimeError, SystemExit) as error:
         raise RuntimeError("workflow_ambiguous") from error
     identity = flow.workflow_identity(workflow)
+    closure_evidence = None
+    if config.get("flow_key") == "dealer_closure":
+        from apps.oa.approvals.sources import dealer_closure
+        closure_evidence = dealer_closure.read(oa_api, workflow, raw_resources)
     invoice_evidence: dict = {}
     authority_facts = _authority_facts(
         oa_api=oa_api,
@@ -717,6 +721,11 @@ def _collect_case(
         for descriptor in descriptors
     ]
 
+    if (closure_evidence is not None and not logical_resources
+            and all(field['read_status'] == 'empty' for field in declared_fields
+                    if '附件' in field['name'] and field['name'] != '附件数量')):
+        empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
+
     return {
         **({"travel_read_exception": read_exception} if read_exception is not None else {}),
         "schema_version": 1,
@@ -729,6 +738,7 @@ def _collect_case(
         "attachment_deduplication": attachment_deduplication,
         "prepared": prepared,
         "authority_facts": authority_facts,
+        **({"dealer_closure_evidence": closure_evidence} if closure_evidence is not None else {}),
         **({"attachment_scan": travel_scan} if travel_scan else {}),
         **({"invoice_evidence": invoice_evidence} if invoice_evidence else {}),
         "warnings": warnings,

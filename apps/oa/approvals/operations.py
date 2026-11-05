@@ -244,6 +244,9 @@ class Approval:
             matches = [row for row in current if occurrence_key(row) == task["occurrence"]]
             if len(matches) != 1:
                 raise ValueError("submission_target_changed")
+            if task['workflow_key'] == 'dealer_closure':
+                from apps.oa.approvals.sources import dealer_closure
+                dealer_closure.validate_submission(self._api(), material)
             submission = self.store.begin_submission(task_id,review["id"])
             try:
                 if plan is not None:
@@ -259,7 +262,11 @@ class Approval:
                     if writer is None:
                         from apps.oa.approvals.sources.writer import build_writer_api
                         writer = build_writer_api(source_policy=self.source_policy)
-                    result = writer.submit_and_verify(task["request_id"],opinion)
+                    options = {}
+                    if (task['workflow_key'] == 'dealer_closure'
+                            and material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment'):
+                        options['dealer_material'] = material
+                    result = writer.submit_and_verify(task["request_id"],opinion, **options)
             except Exception:
                 result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
             status = receipts.submission_status(result)
@@ -290,7 +297,15 @@ class Approval:
                 raise ValueError('confirmation_submission_changed')
             pending_rows = self._api().pending_rows()
             pending = any(str(row.get("request_id")) == task["request_id"] for row in pending_rows)
-            handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
+            handled = None
+            if task['workflow_key'] == 'dealer_closure':
+                material = json.loads(task['material_json'])
+                if material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment':
+                    from apps.oa.approvals.sources import dealer_closure
+                    handled = dealer_closure.feedback_verified(self._api(), material,
+                        details['reviews'][-1]['opinion'], submission['started_at'])
+            if handled is None:
+                handled = handled_since(self._api().handled_rows(),task['request_id'],submission['started_at'])
             fields_match = None
             if task["workflow_key"] == "overseas_invoice":
                 review = details["reviews"][-1]
