@@ -17,10 +17,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='单轮 SQLite 审批；默认预览，不写 OA。')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
-    prediction = commands.add_parser('predict', help='复用审批专用 RPA 浏览器查询智能预测；会生成预测缓存，不提交或保存表单',
-                                     description='复用审批专用 RPA 浏览器查询 OA 智能预测。会生成预测缓存，不提交审批或保存表单。')
+    prediction = commands.add_parser('predict', help='直接调用 OA API 查询后续办理人；会生成预测缓存，不提交或保存表单',
+                                     description='通过 OA API 认证查询后续节点及办理人姓名、ID，无需浏览器。会生成预测缓存，不提交审批或保存表单。')
     prediction.add_argument('--request-id', required=True)
-    prediction.add_argument('--timeout', type=int, default=60, help='会话核验及预测轮询的总等待秒数，1–300，默认60')
+    prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号核验、预测轮询及办理人读取的总等待秒数，1–300，默认60')
     prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
     prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')

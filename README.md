@@ -34,7 +34,7 @@ bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID"
 bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID" --format json
 ```
 
-使用审批专用 OA RPA Chrome 的当前登录态，并核对账号与私有配置一致。需要该浏览器已登录；不会切换到个人 Chrome 或另行注册应用。预测可能生成或更新 OA 的预测缓存，不提交审批或保存表单。缓存来源、无法预知节点及结果语义见[接口合同](docs/agents/oa-api.md#流程智能预测)。等待时限和重新预测参数见 `predict --help`。
+使用私有配置中既有应用的 OA API 认证，核对当前账号后，返回后续节点及办理人的姓名和 ID。无需浏览器、Cookie 或页面操作；不另行注册应用。预测可能生成或更新 OA 的预测缓存，不提交审批或保存表单。缓存来源、无法预知节点及结果语义见[接口合同](docs/agents/oa-api.md#流程智能预测)。等待时限和重新预测参数见 `predict --help`。
 
 ## 审批运行
 
