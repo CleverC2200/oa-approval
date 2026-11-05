@@ -18,9 +18,9 @@ def main(argv=None):
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
     prediction = commands.add_parser('predict', help='直接调用 OA API 查询完整节点和流转预测；JSON 保留原始响应，不提交或保存表单',
-                                     description='通过 OA API 查询全部节点及办理人，区分已经过、当前、预测和未知节点；JSON 保留完整原始响应。无需浏览器，会生成预测缓存，不提交审批或保存表单。')
+                                     description='通过 OA API 查询全部节点及办理人，保留完整原始响应，并按私有名单标记财务前置需求及原因。无需浏览器，会生成预测缓存，不提交审批或保存表单。')
     prediction.add_argument('--request-id', required=True)
-    prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号核验、预测轮询及办理人读取的总等待秒数，1–300，默认60')
+    prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号及发起人核验、预测轮询和办理人读取的总等待秒数，1–300，默认60')
     prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
     prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')

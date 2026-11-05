@@ -36,6 +36,8 @@ bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID"
 
 使用私有配置中既有应用的 OA API 认证，核对当前账号后，返回全部节点及办理人的姓名和 ID，区分已经过、当前、预测和未知状态。JSON 同时保留完整原始响应，字段含义见[接口合同](docs/agents/oa-api.md#流程智能预测)。无需浏览器、Cookie 或页面操作；不另行注册应用。预测可能生成或更新 OA 的预测缓存，不提交审批或保存表单。等待时限和重新预测参数见 `predict --help`。
 
+财务前置判断读取 OA 私有认证文件同目录的 `prediction-finance-precheck.json`，使用指定审批人和固定发起人名单。输出的 `finance_precheck` 给出是否命中及原因；规则、配置格式和未知结果的处理见[接口合同](docs/agents/oa-api.md#财务前置标记)。真实名单保留在私有配置，不提交源码仓库。该标记不改变 OA 路由。
+
 ## 审批运行
 
 开发分支可启动合成轮次：
