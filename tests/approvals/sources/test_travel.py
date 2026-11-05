@@ -326,11 +326,10 @@ def browser_transport(monkeypatch):
                 raise playwright.sync_api.TimeoutError('synthetic navigation deadline')
             if failure == 'read':
                 raise RuntimeError('synthetic navigation failure')
-            if self.outcome.get('expense_rows'):
-                response = SimpleNamespace(url=POLICY.travel_origin + travel_browser.TRIP_EXPENSE_API_PATH,
-                    status=200, json=lambda: {'success': True, 'result': self.outcome['expense_rows']})
-                for handler in self.handlers:
-                    handler(response)
+            response = SimpleNamespace(url=POLICY.travel_origin + travel_browser.TRIP_EXPENSE_API_PATH,
+                status=200, json=lambda: {'success': True, 'result': self.outcome.get('expense_rows', [])})
+            for handler in self.handlers:
+                handler(response)
 
         def locator(self, *_args, **_kwargs):
             return self

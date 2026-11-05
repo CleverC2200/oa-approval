@@ -567,7 +567,7 @@ def _collect_case(
         )
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
-        source_resources = _merge_resources(form_resources, discovered_resources, origins=source_policy.attachments)
+        source_resources = _merge_resources(form_resources, [item for item in discovered_resources if not item.get("_travel_order_invoice")], origins=source_policy.attachments)
         coverage = travel_evidence.coverage(
             source_file_ids={_trip_content_id(item) for item in source_resources},
             source_resource_count=len(source_resources), declared_count=declared_attachment_count,
