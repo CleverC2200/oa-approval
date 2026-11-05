@@ -58,6 +58,21 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 SQL_TEMPLATES: dict[str, SqlTemplate] = {
+    "dealer_closure_history": SqlTemplate(
+        name="dealer_closure_history",
+        purpose="按关户申请读取历史意见并保留文本完整性依据",
+        sql="""
+            select l.logid, l.requestid, l.nodeid, l.logtype,
+                   l.operator as operator_id, l.operatedate, l.operatetime,
+                   length(l.remark) as remark_length,
+                   dbms_lob.substr(l.remark, 4000, 1) as remark
+            from ecology.workflow_requestlog l
+            join ecology.workflow_requestbase r on r.requestid=l.requestid
+            where r.workflowid=195127 and l.requestid=:request_id
+            order by l.logid
+        """,
+        params=("request_id",), max_rows=1001, timeout_sec=10,
+    ),
     "dealer_closure_forward_log": SqlTemplate(
         name="dealer_closure_forward_log",
         purpose="按本次关户投递的节点和接收时点核对唯一原转发日志",

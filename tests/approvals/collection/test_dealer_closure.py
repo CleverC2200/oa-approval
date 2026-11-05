@@ -16,6 +16,9 @@ class ClosureApi:
     def __init__(self):
         self.rows = [{**delivery(), 'workflow_id': '195127', 'workflow_name': '经销商管理-关户'}]
         self.form = workflow()
+        self.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].extend(
+            [{'fieldName': code, 'fieldValue': ''} for code in ['fjsc1', 'fjsc2', 'tksqs']]
+            + [{'fieldName': 'fj', 'fieldValue': 'https://crm.example.test/old-license.jpg', 'fieldShowName': '附件'}])
         self.form['workflowBaseInfo'] = {'workflowId': '195127', 'workflowName': '经销商管理-关户'}
         self.posts = []
 
@@ -35,7 +38,8 @@ class ClosureApi:
 def closure_app(tmp_path, monkeypatch):
     actual = {'requestid': 101, 'currentnodeid': 30, 'currentnodetype': '3', 'nodename': '归档'}
     monkeypatch.setattr(dealer_closure.official_sql, '_query_rows',
-        lambda name, *_a, **_kw: [{'operator_id': 9}] if name == 'dealer_closure_forward_log' else [actual.copy()])
+        lambda name, *_a, **_kw: ([{'operator_id': 9}] if name == 'dealer_closure_forward_log'
+            else [{'remark': '合成历史意见', 'remark_length': 6}] if name == 'dealer_closure_history' else [actual.copy()]))
     monkeypatch.setattr(dealer_closure, 'settings', lambda: {})
     def worker(mode, payload, _config):
         if mode == 'doris':
@@ -62,6 +66,8 @@ def test_public_collect_freezes_closure_facts_and_uses_registered_feedback_write
     assert material['dealer_closure_evidence']['bi']['rows'][0]['freezers_qty'] is None
     assert material['attachment_presence']['status'] == 'confirmed_empty'
     assert material['dealer_closure_evidence']['resource_inventory']['resource_count'] == 0
+    assert material['dealer_closure_evidence']['history']['rows'][0]['remark'] == '合成历史意见'
+    assert any(f['code'] == 'fj' and f['read_status'] != 'empty' for f in material['declared_fields'])
     assert Path(collected['rule_file']).name == 'SKILL.md'
     assert 'oa-dealer-closure' in collected['rule_file']
     result = app.submit(collected['task_id'], opinion='✅ 无余额，不退款。❗ 冰柜待核。', confirm_write=True)
@@ -87,3 +93,20 @@ def test_changed_customer_or_amount_stops_before_submission_attempt(closure_app)
         app.submit(collected['task_id'], opinion='✅ 合成意见。', confirm_write=True)
     assert api.posts == []
     assert app.inspect(collected['task_id'])['submissions'] == []
+
+
+@pytest.mark.parametrize('change', ['nonempty', 'missing'])
+def test_incomplete_closing_attachment_is_not_hidden_by_generic_zero_count(closure_app, change):
+    from apps.oa.approvals.collection.case import collect_case
+
+    app, api, _ = closure_app
+    fields = api.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']
+    fields.append({'fieldName': 'attachment_count', 'fieldShowName': '附件数量', 'fieldValue': '0'})
+    next(f for f in fields if f['fieldName'] == 'fj')['fieldValue'] = ''
+    if change == 'nonempty':
+        next(f for f in fields if f['fieldName'] == 'fjsc1')['fieldValue'] = 'unresolved_statement_reference'
+    else:
+        fields[:] = [f for f in fields if f['fieldName'] != 'tksqs']
+    material = collect_case('101', oa_api=api, configs=flows.load_all_configs(), source_policy=POLICY,
+        allow_browser_download=False, attachment_root=app.root / 'extra-attachments', prepared_root=app.root / 'extra-prepared')
+    assert 'attachment_presence' not in material

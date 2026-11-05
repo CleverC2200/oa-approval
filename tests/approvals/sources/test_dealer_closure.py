@@ -28,7 +28,8 @@ def delivery(**changes):
 def context(monkeypatch):
     node = {'requestid': 101, 'currentnodeid': 30, 'currentnodetype': '3', 'nodename': '归档'}
     monkeypatch.setattr(source.official_sql, '_query_rows',
-        lambda name, *_a, **_kw: [{'operator_id': 9}] if name == 'dealer_closure_forward_log' else [node.copy()])
+        lambda name, *_a, **_kw: ([{'operator_id': 9}] if name == 'dealer_closure_forward_log'
+            else [] if name == 'dealer_closure_history' else [node.copy()]))
     return node
 
 
@@ -67,6 +68,7 @@ def test_no_balance_collection_skips_refund_and_keeps_raw_null_scoped_confirmati
     assert result['freezer_none_confirmation'] == confirmation
     assert result['submission_context']['forwarder_id'] == '9'
     assert result['submission_context']['actual_node'] == context
+    assert result['history'] == {'source': 'official_sql.dealer_closure_history', 'complete': True, 'rows': []}
     changed = delivery(task_instance_id='1002')
     api.pending_rows = lambda: [changed]
     assert source.read(api, workflow(), [])['freezer_none_confirmation'] is None
@@ -166,3 +168,16 @@ def test_worker_retains_safe_source_failure_diagnostics(monkeypatch):
                                   'sap_user': 'synthetic-user', 'sap_keychain_service': 'synthetic-service'})
     assert captured.value.diagnostics == [{'stage': 'sap_BSID',
         'reason': 'dealer_closure_sap_rows_truncated', 'exception_type': 'RuntimeError'}]
+
+
+@pytest.mark.parametrize('rows', [[{'remark': '历史意见', 'remark_length': 9}], [{}] * 1001])
+def test_incomplete_history_stops_before_financial_sources(monkeypatch, context, rows):
+    api = SimpleNamespace(pending_rows=lambda: [delivery()])
+    original = source.official_sql._query_rows
+    monkeypatch.setattr(source.official_sql, '_query_rows',
+        lambda name, *a, **kw: rows if name == 'dealer_closure_history' else original(name, *a, **kw))
+    worker = Mock(side_effect=AssertionError('financial source called'))
+    monkeypatch.setattr(source, '_worker', worker)
+    with pytest.raises(RuntimeError, match='dealer_closure_history_incomplete'):
+        source.read(api, workflow(), [])
+    worker.assert_not_called()
