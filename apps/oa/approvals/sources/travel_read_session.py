@@ -29,7 +29,7 @@ from apps.oa.approvals.sources.travel_page_compat import (
     BASE_PATH,
     EXP_PATH,
     SUMMARY_PATH,
-    HOTEL_PATHS,
+    ORDER_PATHS,
     CompatibleCandidate,
     ReadContext,
     ReadFailure,
@@ -221,7 +221,7 @@ class TravelReadSession:
             BASE_PATH,
             EXP_PATH,
             SUMMARY_PATH,
-            *HOTEL_PATHS,
+            *ORDER_PATHS,
         }:
             return
         try:
@@ -244,7 +244,7 @@ class TravelReadSession:
             raise ReadFailure(control.STOP_CODE)
         if self.transport is None:
             return
-        critical = {BASE_PATH, EXP_PATH, SUMMARY_PATH, *HOTEL_PATHS, ACCOUNT_PATH}
+        critical = {BASE_PATH, EXP_PATH, SUMMARY_PATH, *ORDER_PATHS, ACCOUNT_PATH}
         for record in list(self.transport.records):
             path, decision = record.get("path", ""), record.get("decision")
             if decision == "forwarded" and record.get("status") in {401, 403}:
@@ -277,7 +277,7 @@ class TravelReadSession:
         if not idle:
             raise ReadFailure("travel_delivery_not_drained", retryable=True)
         records = list(self.transport.records)
-        critical_paths = {BASE_PATH, EXP_PATH, SUMMARY_PATH, *HOTEL_PATHS, ACCOUNT_PATH}
+        critical_paths = {BASE_PATH, EXP_PATH, SUMMARY_PATH, *ORDER_PATHS, ACCOUNT_PATH}
         critical_ids = {
             r.get("request_id")
             for r in records
@@ -312,7 +312,7 @@ class TravelReadSession:
                 raise ReadFailure("travel_delivery_incomplete", retryable=True)
             if (
                 any(
-                    r.get("path") in {BASE_PATH, EXP_PATH, SUMMARY_PATH, *HOTEL_PATHS}
+                    r.get("path") in {BASE_PATH, EXP_PATH, SUMMARY_PATH, *ORDER_PATHS}
                     for r in events
                 )
                 and request_id not in observed
@@ -341,12 +341,16 @@ class TravelReadSession:
             budget=self._remaining(deadline),
             headless=True,
             expected_resource_count=expected,
+            expected_marker=marker,
         )
         observation = candidate.read()
         self._remaining(deadline)
         self._verify_oa(deadline)
         self._verify_delivery([p["request_id"] for p in self.payloads])
-        self.files = frozenset(str(r["id"]) for r in observation.download_targets)
+        self.files = frozenset(str(r["id"]) for r in observation.download_targets) | frozenset(
+            str(invoice["resource"]["id"])
+            for record in observation.order_invoices for invoice in record["invoices"] if "resource" in invoice
+        )
         self.attempts.append(
             {
                 "stage": "engine",

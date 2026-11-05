@@ -6,7 +6,7 @@ from typing import Any
 import re
 import urllib.parse
 
-from apps.oa.approvals.sources import travel_hotel
+from apps.oa.approvals.sources import travel_hotel, travel_invoices
 
 
 DISCOVERY_FAILED = "travel_attachment_discovery_failed"
@@ -77,6 +77,7 @@ class CandidateObservation:
     browser: str = ""
     diagnostics: tuple[dict, ...] = ()
     source_facts: tuple[dict, ...] = ()
+    order_invoices: tuple[dict, ...] = ()
 
     @classmethod
     def failure(
@@ -218,6 +219,21 @@ class TravelEvidence:
                         "discovery_ref": f"travel_platform:{flow_mark}",
                     }
                 )
+        manual_targets = list(targets)
+        try:
+            invoice_targets, invoice_facts = travel_invoices.project(
+                [record for observation in valid for record in observation.order_invoices], fields
+            )
+        except ValueError as error:
+            return cls(errors=(TravelReadError(str(error), "商旅订单发票未能完成读取或归属核对"),))
+        for item in invoice_targets:
+            resource_id = "travel_platform:" + item["id"]
+            if resource_id not in seen_ids:
+                seen_ids.add(resource_id)
+                targets.append({**item, "id": resource_id, "allowExtraDownloadHost": True,
+                                "source": "travel_platform", "source_request_id": str(request_id),
+                                "discovery_ref": f"travel_platform:{flow_mark}"})
+        page_fields.extend(invoice_facts)
         page_fields.extend(
             travel_hotel.fields_for_details(
                 fields,
@@ -258,10 +274,10 @@ class TravelEvidence:
         if (
             inventory
             or any(item.scan_status == "empty" for item in valid)
-            and not targets
+            and not manual_targets
         ):
             scan = {
-                "status": "resources_found" if targets else "empty",
+                "status": "resources_found" if manual_targets else "empty",
                 "source": "travel_platform",
                 "source_request_id": str(request_id),
                 "discovery_ref": f"travel_platform:{flow_mark}",

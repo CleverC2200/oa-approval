@@ -38,6 +38,7 @@ OA_READ = frozenset(
 )
 TRIP_READ = frozenset(
     {
+        "/train/fcc/train/normal/detail",
         "/fcecf/fcc/pcapi/COMM_B2G_bldDetail",
         "/fccost/fcc/pcapi/COMM_B2G_QueryCommonConfigBusiness",
         "/fcecf/fcc/pcapi/COMM_B2G_QueryHotelSubsidy",

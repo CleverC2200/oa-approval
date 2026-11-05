@@ -14,7 +14,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List
 from apps.oa.approvals.source_policy import SourcePolicy
-from apps.oa.approvals.sources import downloads as attachments, travel_hotel
+from apps.oa.approvals.sources import downloads as attachments, travel_hotel, travel_invoices
 from apps.oa.approvals.sources.travel_evidence import (
     ATTACHMENT_ID_RE as TRIP_ATTACHMENT_ID_RE,
     CandidateObservation,
@@ -175,6 +175,7 @@ class _CandidateCapture:
         self.resources = []
         self.inventory = []
         self.hotel_orders = []
+        self.expenses = None
         self.diagnostics = []
 
     def observe(self, response):
@@ -385,9 +386,16 @@ class _CandidateCapture:
         trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
         if parsed.hostname != trip_host or parsed.path != TRIP_EXPENSE_API_PATH:
             return
+        self.expenses = None
         try:
             payload = response.json()
             discovered = travel_hotel.orders_from_expenses(payload)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            rows = result.get("bxmxList") if isinstance(result, dict) else result
+            if getattr(response, "status", 200) == 200 and payload.get("success") is True and isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+                self.expenses = rows
+            else:
+                self.expenses = None
             if isinstance(payload, dict) and payload.get("success") is False:
                 diagnostics.append(
                     {
@@ -423,6 +431,7 @@ class _CandidateSession:
         budget,
         headless,
         expected_resource_count,
+        expected_marker="",
     ):
         (self.context, self.policy, self.url) = (context, policy, url)
         (self.deadline, self.budget) = (deadline, budget)
@@ -434,6 +443,7 @@ class _CandidateSession:
         self.capture = _CandidateCapture(policy)
         self.page.on("response", self.capture.observe)
         self.stage = "navigation"
+        self.expected_marker = expected_marker
 
     def __enter__(self):
         return self
@@ -484,12 +494,19 @@ class _CandidateSession:
             )
 
     def _observation(self, initial_text, details, snapshot):
+        invoices = travel_invoices.read_invoices(
+            self.context.request, self.capture.expenses,
+            marker=self.expected_marker,
+            origin=self.policy.travel_origin,
+            timeout_sec=max(0.1, self.deadline - time.monotonic()),
+        )
         text = str(snapshot.get("text") or initial_text)
         if initial_text and initial_text not in text:
             text = f"{initial_text}\n{text}".strip()
         observed = list(snapshot.get("resources") or [])
         resources = observed if snapshot.get("resource_scan_stable") else []
-        if resources:
+        invoice_resources = [invoice["resource"] for record in invoices for invoice in record["invoices"] if "resource" in invoice]
+        if resources or invoice_resources:
             try:
                 cookie = self._ephemeral_trip_cookie_header(
                     self.context.cookies([self.policy.travel_origin])
@@ -497,7 +514,7 @@ class _CandidateSession:
             except Exception:
                 cookie = ""
             if cookie:
-                for resource in resources:
+                for resource in resources + invoice_resources:
                     resource["_ephemeral_cookie_header"] = cookie
         status = "resources_found" if resources else "read_failed"
         if (
@@ -521,6 +538,7 @@ class _CandidateSession:
             tuple(details),
             mode,
             tuple(({**item, "browser": mode} for item in self.capture.diagnostics)),
+            order_invoices=tuple(invoices),
         )
 
     def _ephemeral_trip_cookie_header(self, cookies: List[Dict[str, Any]]) -> str:
@@ -745,6 +763,7 @@ class _BrowserAttempt:
                 budget=budget,
                 headless=self.headless,
                 expected_resource_count=self.expected_resource_count,
+                expected_marker=self.expected_marker,
             ) as candidate:
                 observation = candidate.read()
                 self.results.append(observation)

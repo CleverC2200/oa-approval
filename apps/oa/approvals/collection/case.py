@@ -17,6 +17,7 @@ from apps.oa.approvals.collection import invoice_originals
 from apps.oa.approvals.sources import official_sql
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources import travel as travel_orders
+from apps.oa.approvals.sources import travel_invoices
 from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 
 
@@ -567,7 +568,7 @@ def _collect_case(
         )
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
-        source_resources = _merge_resources(form_resources, discovered_resources, origins=source_policy.attachments)
+        source_resources = _merge_resources(form_resources, [item for item in discovered_resources if not item.get("_travel_order_invoice")], origins=source_policy.attachments)
         coverage = travel_evidence.coverage(
             source_file_ids={_trip_content_id(item) for item in source_resources},
             source_resource_count=len(source_resources), declared_count=declared_attachment_count,
@@ -587,6 +588,11 @@ def _collect_case(
         _resource_descriptor(item, request_id=str(request_id))
         for item in logical_resources
     ]
+    travel_invoices.bind_resources(authority_facts, {
+        "travel_platform:" + _trip_content_id(resource): descriptor["resource_id"]
+        for resource, descriptor in zip(logical_resources, descriptors)
+        if _trip_content_id(resource)
+    })
     prepared_result = attachment_extractors.PreparedMaterial({"images": [], "structured_contents": [], "manifest": []})
     if logical_resources:
         attachment_dir = Path(
