@@ -111,3 +111,17 @@ def project(records, fields):
         value = json.dumps({**record, "invoices": invoices, "oa_detail_refs": owners}, ensure_ascii=False, sort_keys=True)
         facts.append({"name": "商旅订单发票", "value": value, "subject_ref": "travel_expense:" + record["expense_id"]})
     return resources, facts
+
+
+def bind_resources(facts, bindings):
+    for fact in facts:
+        if fact.get("source") != "travel_platform" or fact.get("name") != "商旅订单发票":
+            continue
+        record = json.loads(fact["value"])
+        for invoice in record["invoices"]:
+            resource_id = invoice.get("resource_id")
+            if resource_id:
+                if resource_id not in bindings:
+                    raise RuntimeError("resource_ownership_untrusted")
+                invoice["resource_id"] = bindings[resource_id]
+        fact["value"] = json.dumps(record, ensure_ascii=False, sort_keys=True)

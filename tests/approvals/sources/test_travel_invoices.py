@@ -111,7 +111,8 @@ def test_order_invoice_keeps_oa_detail_links_and_rejects_conflicting_file_identi
 
 
 @pytest.mark.parametrize('declared_count', ['0', '1'])
-def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_attachment(browser_transport, monkeypatch, tmp_path, declared_count):
+@pytest.mark.parametrize('existing_attachment', [False, True])
+def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_attachment(browser_transport, monkeypatch, tmp_path, declared_count, existing_attachment):
     from zipfile import ZipFile
     from apps.oa.approvals.collection import case, downloads
     from tests.approvals.source_fakes import POLICY
@@ -125,6 +126,12 @@ def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_
         {'fieldName': 'lcbh', 'fieldShowName': '流程编号', 'fieldShowValue': 'SYNTHETIC-TRAVEL'},
         {'fieldName': 'fjsl', 'fieldShowName': '附件数量', 'fieldShowValue': declared_count},
     ]}]}
+    if existing_attachment:
+        workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].append({
+            'fieldName': 'fpfj', 'fieldShowName': '发票附件',
+            'fieldValue': 'https://trip.example.test/fcfile/fcc/opera/getFile/123/invoice.ofd',
+            'fieldShowValue': 'invoice.ofd',
+        })
     api.request_context = lambda _: (workflow, [])
     browser_transport.outcomes[True] = {'expense_rows': [expense()], 'hotel_payload': order()}
     original = tmp_path / 'invoice.ofd'
@@ -137,14 +144,15 @@ def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_
         return downloads.DownloadResult(tuple({'resource_id': item['id'], 'path': str(original), 'name': item['name']} for item in targets), (), 'complete')
 
     monkeypatch.setattr(downloads, 'download_resources', download)
-    if declared_count == '1':
+    if declared_count == '1' and not existing_attachment:
         with pytest.raises(case.CollectionFailure, match='travel_attachment_resources_incomplete'):
             case.collect_case('12', oa_api=api, configs=[config], source_policy=POLICY, allow_browser_download=True, attachment_timeout_sec=1)
         assert calls == []
         return
-    material = case.collect_case('12', oa_api=api, configs=[config], source_policy=POLICY, allow_browser_download=True, attachment_root=tmp_path/'attachments', prepared_root=tmp_path/'prepared')
+    material = case.collect_case('12', oa_api=api, configs=[config], source_policy=POLICY, allow_browser_download=True, attachment_timeout_sec=1, attachment_root=tmp_path/'attachments', prepared_root=tmp_path/'prepared')
     assert len(calls) == 1
     resource, = material['resources']
+    assert resource['resource_id'] == ('trip_file:123' if existing_attachment else 'travel_platform:123')
     prepared, = material['prepared']['structured_contents']
     assert prepared['source_resource_id'] == resource['resource_id']
     assert '示例公司' in prepared['key_text']
