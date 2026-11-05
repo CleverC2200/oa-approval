@@ -25,6 +25,17 @@ bash .codex/python.sh -m apps.oa.references --help
 
 审批负责轮次、任务、材料冻结、预览、提交与回查；材料负责完整准备、读取、识别和阅读副本；参考资料负责当前 TPM 报价导入。具体参数、副作用和结果见各操作 `--help`。能力内部直接组合函数，正常使用无需临时 Python 或 SQL。
 
+## 流程智能预测
+
+无需启动审批轮次，直接查询 OA 原生的后续流转预测：
+
+```bash
+bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID"
+bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID" --format json
+```
+
+使用审批专用 OA RPA Chrome 的当前登录态，并核对账号与私有配置一致。需要该浏览器已登录；不会切换到个人 Chrome 或另行注册应用。预测可能生成或更新 OA 的预测缓存，不提交审批或保存表单。缓存来源、无法预知节点及结果语义见[接口合同](docs/agents/oa-api.md#流程智能预测)。等待时限和重新预测参数见 `predict --help`。
+
 ## 审批运行
 
 开发分支可启动合成轮次：
