@@ -17,6 +17,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='单轮 SQLite 审批；默认预览，不写 OA。')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
+    prediction = commands.add_parser('predict', help='复用审批专用 RPA 浏览器查询智能预测；会生成预测缓存，不提交或保存表单',
+                                     description='复用审批专用 RPA 浏览器查询 OA 智能预测。会生成预测缓存，不提交审批或保存表单。')
+    prediction.add_argument('--request-id', required=True)
+    prediction.add_argument('--timeout', type=int, default=60, help='会话核验及预测轮询的总等待秒数，1–300，默认60')
+    prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
+    prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
     cleanup.add_argument('--execute', action='store_true')
     pending = commands.add_parser('start', aliases=['pending'], help='重新拉取待办并保持前台owner；EOF或finish安全结束')
@@ -90,6 +96,15 @@ def main(argv=None):
         parser.error('submit requires --opinion-file or --recognition-file')
     root = args.root.expanduser().resolve()
     try:
+        if args.operation == 'predict':
+            from apps.oa.approvals.sources.prediction import predict, render_text
+
+            result = predict(args.request_id, timeout=args.timeout, refresh=args.refresh)
+            if args.format == 'json':
+                emit(result)
+            else:
+                print(render_text(result), flush=True)
+            return 0 if result['complete'] else 1
         if args.operation == 'cleanup':
             from apps.oa.approvals import retention
             from apps.oa.approvals.owner import round_lock
