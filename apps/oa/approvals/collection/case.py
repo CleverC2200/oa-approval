@@ -701,7 +701,8 @@ def _collect_case(
             or field["name"] == "发票号码"
         )
     )
-    if (not logical_resources and not warnings and not invoice_evidence.get("invoices")
+    if (config.get('flow_key') != 'dealer_closure'
+            and not logical_resources and not warnings and not invoice_evidence.get("invoices")
             and _declared_attachment_count(workflow) in {None, 0}
             and (travel_empty_placeholders if config.get("flow_key") == "travel_expense"
                  else all(field["read_status"] == "empty" for field in declared_fields
@@ -721,9 +722,11 @@ def _collect_case(
         for descriptor in descriptors
     ]
 
+    closure_attachment_fields = [field for field in declared_fields if field['code'] in {'fjsc1', 'fjsc2', 'tksqs'}]
     if (closure_evidence is not None and not logical_resources
-            and all(field['read_status'] == 'empty' for field in declared_fields
-                    if '附件' in field['name'] and field['name'] != '附件数量')):
+            and closure_evidence['resource_inventory']['resource_count'] == 0
+            and {field['code'] for field in closure_attachment_fields} == {'fjsc1', 'fjsc2', 'tksqs'}
+            and all(field['read_status'] == 'empty' for field in closure_attachment_fields)):
         empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
 
     return {

@@ -72,7 +72,7 @@ def snapshot_context(api, workflow):
 def _form_snapshot(workflow, resources):
     fields = {f['fieldName']: f.get('fieldValue') for row in workflow['workflowMainTableInfo']['requestRecords']
               for f in row['workflowRequestTableFields']}
-    return {'fields': {key: fields.get(key) for key in ['lcbh', 'gsdm', 'jxsdm', 'jxsmc', 'yetk', 'sftk', 'je']},
+    return {'fields': {key: fields.get(key) for key in ['lcbh', 'gsdm', 'jxsdm', 'jxsmc', 'yetk', 'sftk', 'je', 'fjsc1', 'fjsc2', 'tksqs']},
             'resources': sorted([[str(r.get('id') or ''), str(r.get('name') or '')] for r in resources])}
 
 
@@ -133,6 +133,12 @@ def _dms(customer, tag, config):
 
 def read(api, workflow, resources):
     context = snapshot_context(api, workflow)
+    history = official_sql._query_rows('dealer_closure_history',
+        {'request_id': int(context['request_id'])}, require_connection=True)
+    if len(history) >= 1001 or any(len(str(r.get('remark') or '')) != (r.get('remark_length') or 0) for r in history):
+        from apps.oa.approvals.collection.case import CollectionFailure
+        raise CollectionFailure('dealer_closure_history_incomplete', diagnostics=[
+            {'stage': 'oa_history', 'reason': 'row_limit' if len(history) >= 1001 else 'text_truncated'}])
     fields = {f['fieldName']: f.get('fieldValue') for row in workflow['workflowMainTableInfo']['requestRecords']
               for f in row['workflowRequestTableFields']}
     company, customer = str(fields.get('gsdm') or ''), str(fields.get('jxsdm') or '')
@@ -164,6 +170,7 @@ def read(api, workflow, resources):
     return {'observed_at': now.isoformat(), 'company_code': company, 'customer_code': customer,
             'form_snapshot': _form_snapshot(workflow, resources),
             'submission_context': context, 'bi': bi, 'sap': sap,
+            'history': {'source': 'official_sql.dealer_closure_history', 'complete': True, 'rows': history},
             'dms': {tag: _dms(customer, tag, config) for tag in tags},
             'resource_inventory': {'source': 'getRequestResources', 'request_id': context['request_id'],
                                    'resource_count': len(resources)},
