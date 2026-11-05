@@ -65,7 +65,7 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 批次范围、FIFO、在途数量、Agent 轮换和审核规则统一见[财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)。海外规则见[海外 Skill](.agents/skills/oa-overseas-invoice/SKILL.md)。Python 不替 Agent 形成财务业务结论。
 
-经销商关户按[关户 Skill](.agents/skills/oa-dealer-closure/SKILL.md)执行只读核对和简版意见生成，使用业务确认的分支与✅/❗标注。该流程尚未接入上述通用费用批次及提交入口。
+经销商关户使用`dealer_closure`进入同一批次与提交入口，按[关户 Skill](.agents/skills/oa-dealer-closure/SKILL.md)核对本轮冻结BI、正式SAP、DMS及表单，输出✅/❗简版意见。正常审批与未阅转发批注分别核对提交上下文，后者反馈意见并核验原流程未推进；已阅记录不重复列入。私有连接配置见Skill数据入口说明。
 
 ## 材料与参考资料
 

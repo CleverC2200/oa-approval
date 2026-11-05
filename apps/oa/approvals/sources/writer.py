@@ -66,7 +66,7 @@ class FrozenWriterApi(OaApi):
         with safe_http.urlopen(request, timeout=TIMEOUT) as response:
             return _decode_json(response.read().decode("utf-8", errors="ignore"))
 
-    def submit_and_verify(self, request_id: str, remark: str) -> dict[str, Any]:
+    def submit_and_verify(self, request_id: str, remark: str, *, dealer_material=None) -> dict[str, Any]:
         started_at = datetime.now(timezone.utc).isoformat()
         try:
             response = self._post_submit(request_id, remark)
@@ -80,7 +80,11 @@ class FrozenWriterApi(OaApi):
         target = str(request_id)
         for attempt in range(POSTCHECK_ATTEMPTS):
             try:
-                done_hit = handled_since(self.handled_rows(),target,started_at)
+                if dealer_material is not None:
+                    from apps.oa.approvals.sources.dealer_closure import feedback_verified
+                    done_hit = feedback_verified(self, dealer_material, remark, started_at)
+                else:
+                    done_hit = handled_since(self.handled_rows(),target,started_at)
                 pending_hit = any(
                     row.get("request_id") == target for row in self.pending_rows()
                 )
