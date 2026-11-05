@@ -9,6 +9,7 @@ from playwright.sync_api import Frame
 
 from apps.oa.approvals.sources.travel_browser import _CandidateSession, _browser_roots
 from apps.oa.approvals.sources import travel_hotel
+from apps.oa.approvals.sources.travel_evidence import sso_rejection
 
 BASE_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxdBaseInfoDetails"
 EXP_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
@@ -209,6 +210,9 @@ class ReadPage:
                 if response.status in {401, 403}
                 else "travel_source_failed"
             )
+        rejection = sso_rejection(self.raw.url, self.owner.session.policy.travel_origin)
+        if rejection:
+            raise ReadFailure(rejection)
         previous = None
         stable = 0
         while time.monotonic() < self.owner.deadline:

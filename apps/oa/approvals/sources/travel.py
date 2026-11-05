@@ -91,6 +91,9 @@ class TravelSource:
             for item in results
         ):
             return results
+        if any(diagnostic.get("reason", "").startswith("travel_sso_")
+               for item in results for diagnostic in item.diagnostics):
+            return results
         if attachments.browser_visible_fallback_enabled():
             return [
                 *results,

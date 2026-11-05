@@ -17,6 +17,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='单轮 SQLite 审批；默认预览，不写 OA。')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
+    prediction = commands.add_parser('predict', help='直接调用 OA API 查询完整节点和流转预测；JSON 保留原始响应，不提交或保存表单',
+                                     description='通过 OA API 查询全部节点及办理人，保留完整原始响应，并按私有名单标记财务前置需求及原因。无需浏览器，会生成预测缓存，不提交审批或保存表单。')
+    prediction.add_argument('--request-id', required=True)
+    prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号及发起人核验、预测轮询和办理人读取的总等待秒数，1–300，默认60')
+    prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
+    prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
     cleanup.add_argument('--execute', action='store_true')
     pending = commands.add_parser('start', aliases=['pending'], help='重新拉取待办并保持前台owner；EOF或finish安全结束')
@@ -27,6 +33,7 @@ def main(argv=None):
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
     pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
+    pending.add_argument('--retry-failed', choices=['YES'], help='仅按本次明确授权重试 --request-id 指定的失败投递；小时任务默认排除历史失败')
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
@@ -76,6 +83,8 @@ def main(argv=None):
     if args.operation == 'finish' and args.collection_stopped_note is not None and (
             not args.orphaned or not args.collection_stopped_note.strip()):
         parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
+    if args.operation in {'pending', 'start'} and args.retry_failed and (not args.request_id or args.continue_from):
+        parser.error('--retry-failed YES requires --request-id and cannot change a continuation')
     if args.operation in {'pending', 'start'} and args.limit < 0:
         parser.error('--limit must be non-negative')
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
@@ -87,6 +96,15 @@ def main(argv=None):
         parser.error('submit requires --opinion-file or --recognition-file')
     root = args.root.expanduser().resolve()
     try:
+        if args.operation == 'predict':
+            from apps.oa.approvals.sources.prediction import predict, render_text
+
+            result = predict(args.request_id, timeout=args.timeout, refresh=args.refresh)
+            if args.format == 'json':
+                emit(result)
+            else:
+                print(render_text(result), flush=True)
+            return 0 if result['complete'] else 1
         if args.operation == 'cleanup':
             from apps.oa.approvals import retention
             from apps.oa.approvals.owner import round_lock
@@ -109,7 +127,7 @@ def main(argv=None):
 
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
-                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from)
+                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from, retry_failed=args.retry_failed == 'YES')
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0

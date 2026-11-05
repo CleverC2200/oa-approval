@@ -124,6 +124,21 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
         max_rows=2,
         timeout_sec=5,
     ),
+    "document_ofd_attachment": SqlTemplate(
+        name="document_ofd_attachment",
+        purpose="核对关联发票文档唯一的 OFD 附件身份",
+        sql="""
+            select d.docid, d.imagefileid, d.imagefilename, d.isextfile,
+                   d.docfiletype, m.doctype
+            from ecology.docimagefile d
+            join ecology.docdetail m on m.id = d.docid
+            where d.docid = :document_id
+              and rownum <= 2
+        """,
+        params=("document_id",),
+        max_rows=2,
+        timeout_sec=5,
+    ),
     "workflow_request_by_mark": SqlTemplate(
         name="workflow_request_by_mark",
         purpose="按业务流程编号精确定位唯一 OA requestId",

@@ -14,6 +14,18 @@ PENDING_TEXT_MARKERS = ("系统正在处理中，请稍后", "正在处理中，
 ATTACHMENT_ID_RE = re.compile(r"/opera/(?:getFile|share/open)/(\d+)/", re.IGNORECASE)
 
 
+def sso_rejection(url: str, origin: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.hostname != urllib.parse.urlsplit(origin).hostname
+            or parsed.path != "/fcc/default/login/ssoError.html"):
+        return ""
+    message = urllib.parse.parse_qs(parsed.query).get("errorMsg", [""])[0]
+    return {
+        "非单点登录场景，请联系管理员": "travel_sso_account_missing",
+        "未绑定法人公司，请联系管理员": "travel_sso_company_missing",
+    }.get(message, "travel_sso_rejected")
+
+
 def attachment_id(url: str) -> str:
     match = ATTACHMENT_ID_RE.search(urllib.parse.urlparse(url).path)
     if match:

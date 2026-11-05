@@ -43,7 +43,7 @@ from apps.oa.approvals.sources.travel_read_auth import (
     ApiSessionError,
 )
 from apps.oa.approvals.sources.travel_read_transport import Policy, ReadonlyProxy
-from apps.oa.runtime import control, slots
+from apps.oa.runtime import collection_budget, control, slots
 
 
 ACCEPTED_MOLI_SHA256 = frozenset(
@@ -370,7 +370,12 @@ class TravelReadSession:
             ),
         )
 
-    def read_attempt(
+    def read_attempt(self, urls, *, timeout_sec, expected_marker, expected_resource_count):
+        with collection_budget.phase("travel_read", timeout_sec):
+            return self._read_attempt(urls, timeout_sec=timeout_sec, expected_marker=expected_marker,
+                                      expected_resource_count=expected_resource_count)
+
+    def _read_attempt(
         self, urls, *, timeout_sec, expected_marker, expected_resource_count
     ):
         self.marker = expected_marker
@@ -401,16 +406,15 @@ class TravelReadSession:
                 0.6 if engine == "moli" else 1
             )
             try:
-                with _wall_clock_timeout(self._remaining(primary_deadline)):
-                    result = self._attempt(
-                        engine,
-                        state,
-                        urls,
-                        expected_marker,
-                        expected_resource_count,
-                        primary_deadline,
-                        patches=True,
-                    )
+                result = self._attempt(
+                    engine,
+                    state,
+                    urls,
+                    expected_marker,
+                    expected_resource_count,
+                    primary_deadline,
+                    patches=True,
+                )
             except (_TravelReadDeadline, ReadFailure) as error:
                 if isinstance(error, _TravelReadDeadline) or (
                     isinstance(error, ReadFailure)
@@ -432,23 +436,22 @@ class TravelReadSession:
                 if engine != "moli" or not error.retryable:
                     raise error
                 self._archive_transport(engine)
-                self.engine_stack.close()
+                self._close_engine()
                 self.engine_stack = ExitStack()
                 self.page = self.context = None
                 self.payloads.clear()
                 fallback_budget = self._remaining(deadline)
                 try:
-                    with _wall_clock_timeout(fallback_budget):
-                        result = self._attempt(
-                            "chromium",
-                            state,
-                            urls,
-                            expected_marker,
-                            expected_resource_count,
-                            deadline,
-                            patches=error.code
-                            != "travel_compatibility_version_mismatch",
-                        )
+                    result = self._attempt(
+                        "chromium",
+                        state,
+                        urls,
+                        expected_marker,
+                        expected_resource_count,
+                        deadline,
+                        patches=error.code
+                        != "travel_compatibility_version_mismatch",
+                    )
                 except (_TravelReadDeadline, Exception) as fallback_error:
                     code = (
                         fallback_error.code
@@ -540,66 +543,69 @@ class TravelReadSession:
                 )
 
     def download(self, resource, *, dest_dir, timeout_sec):
-        try:
-            with _wall_clock_timeout(max(0.1, timeout_sec)):
-                deadline = time.monotonic() + max(0.1, timeout_sec)
-                self._remaining(deadline)
-                url = self.policy.attachments.download_url(
-                    str(resource.get("downloadUrl") or resource.get("url") or ""),
-                    allow_extra=True,
-                )
+        with collection_budget.phase("travel_download", timeout_sec):
+            return self._download(resource, dest_dir=dest_dir, timeout_sec=timeout_sec)
 
-                raw_id = attachment_id(url)
-                claimed_id = str(resource.get("id") or "")
-                if (
-                    claimed_id.startswith("travel_platform:")
-                    and claimed_id.removeprefix("travel_platform:") != raw_id
-                ):
-                    raise ReadFailure("travel_download_binding_mismatch")
-                self.transport.deadline = deadline
-                parsed = urllib.parse.urlsplit(url)
-                if (
-                    not self.page
-                    or raw_id not in self.files
-                    or attachment_id(url) != raw_id
-                    or parsed.hostname != self.transport.policy.trip_host
-                    or not self.transport.policy.allows(
-                        "GET", parsed.hostname, parsed.path
-                    )
-                ):
-                    raise ReadFailure("travel_download_binding_mismatch")
-                self._verify_oa(deadline)
-                self._verify_trip()
-                result = self.page.evaluate(
-                    """async p=>{
-                    const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
-                    try{const r=await fetch(p.url,{credentials:'include',redirect:'manual',signal:a.signal});
-                        const b=new Uint8Array(await r.arrayBuffer());if(b.length>25000000)throw Error('file_limit');
-                        let s='';for(let i=0;i<b.length;i+=16384)s+=String.fromCharCode(...b.subarray(i,i+16384));
-                        return {status:r.status,type:r.headers.get('content-type'),request_id:r.headers.get('X-OA-Readonly-Request-Id'),data:btoa(s)};
-                    }finally{clearTimeout(timer)}
-                }""",
-                    {"url": url, "timeout": max(1, self._remaining(deadline) * 1000)},
+    def _download(self, resource, *, dest_dir, timeout_sec):
+        try:
+            deadline = time.monotonic() + max(0.1, timeout_sec)
+            self._remaining(deadline)
+            url = self.policy.attachments.download_url(
+                str(resource.get("downloadUrl") or resource.get("url") or ""),
+                allow_extra=True,
+            )
+
+            raw_id = attachment_id(url)
+            claimed_id = str(resource.get("id") or "")
+            if (
+                claimed_id.startswith("travel_platform:")
+                and claimed_id.removeprefix("travel_platform:") != raw_id
+            ):
+                raise ReadFailure("travel_download_binding_mismatch")
+            self.transport.deadline = deadline
+            parsed = urllib.parse.urlsplit(url)
+            if (
+                not self.page
+                or raw_id not in self.files
+                or attachment_id(url) != raw_id
+                or parsed.hostname != self.transport.policy.trip_host
+                or not self.transport.policy.allows(
+                    "GET", parsed.hostname, parsed.path
                 )
-                self._verify_delivery([result["request_id"]])
-                kind = str(result.get("type") or "").lower()
-                body = base64.b64decode(result["data"], validate=True)
-                if (
-                    result["status"] != 200
-                    or not body
-                    or any(
-                        t in kind
-                        for t in ("text/", "application/json", "application/xml")
-                    )
-                ):
-                    raise ReadFailure("travel_download_response_invalid")
-                self._verify_oa(deadline)
-                self._verify_trip()
-                dest_dir.mkdir(parents=True, exist_ok=True)
-                path = dest_dir / downloads.deterministic_filename(resource)
-                path.write_bytes(body)
-                path.chmod(0o600)
-                return Downloaded(path)
+            ):
+                raise ReadFailure("travel_download_binding_mismatch")
+            self._verify_oa(deadline)
+            self._verify_trip()
+            result = self.page.evaluate(
+                """async p=>{
+                const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
+                try{const r=await fetch(p.url,{credentials:'include',redirect:'manual',signal:a.signal});
+                    const b=new Uint8Array(await r.arrayBuffer());if(b.length>25000000)throw Error('file_limit');
+                    let s='';for(let i=0;i<b.length;i+=16384)s+=String.fromCharCode(...b.subarray(i,i+16384));
+                    return {status:r.status,type:r.headers.get('content-type'),request_id:r.headers.get('X-OA-Readonly-Request-Id'),data:btoa(s)};
+                }finally{clearTimeout(timer)}
+            }""",
+                {"url": url, "timeout": max(1, self._remaining(deadline) * 1000)},
+            )
+            self._verify_delivery([result["request_id"]])
+            kind = str(result.get("type") or "").lower()
+            body = base64.b64decode(result["data"], validate=True)
+            if (
+                result["status"] != 200
+                or not body
+                or any(
+                    t in kind
+                    for t in ("text/", "application/json", "application/xml")
+                )
+            ):
+                raise ReadFailure("travel_download_response_invalid")
+            self._verify_oa(deadline)
+            self._verify_trip()
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            path = dest_dir / downloads.deterministic_filename(resource)
+            path.write_bytes(body)
+            path.chmod(0o600)
+            return Downloaded(path)
         except (_TravelReadDeadline, Exception) as error:
             code = (
                 error.code
@@ -610,9 +616,13 @@ class TravelReadSession:
             )
             return Failed(DownloadError(code, code))
 
+    def _close_engine(self):
+        with collection_budget.phase("browser_cleanup", 5):
+            self.engine_stack.close()
+
     def close(self):
         try:
-            self.engine_stack.close()
+            self._close_engine()
         finally:
             self.stack.close()
             self.context = self.page = None

@@ -334,7 +334,16 @@ def original_source(data: dict, invoice_number: str) -> dict:
     file_id = _positive_id(native.get('img_id'))
     file_type = 'pdf' if active[0]['type'] == 'pdf' else 'jpg'
     pdf_reference = modified.get('pdf')
-    if not doc_id or not file_id or str(modified.get('furl')) != cloud_file:
+    if not doc_id or not file_id:
+        return {}
+    original_file = str(modified.get('furl'))
+    converted_ofd = file_type == 'pdf' and original_file != cloud_file
+    if converted_ofd:
+        ofd_files = [item for item in files if item.get('type') == 'ofd']
+        if (str(modified.get('fileType')) != '4' or len(ofd_files) != 1
+                or _positive_id(ofd_files[0].get('id')) != original_file):
+            return {}
+    elif original_file != cloud_file:
         return {}
     if file_type == 'pdf' and str(pdf_reference) != cloud_file:
         return {}
@@ -342,6 +351,8 @@ def original_source(data: dict, invoice_number: str) -> dict:
         return {}
     source = {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
               'document_id': doc_id, 'native_file_id': file_id}
+    if converted_ofd:
+        source.update(original_cloud_file_id=original_file, representation='official_pdf')
     if file_type != 'pdf':
         source['file_type'] = file_type
     return source

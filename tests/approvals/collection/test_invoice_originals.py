@@ -78,7 +78,7 @@ def original_transport(monkeypatch, tmp_path):
             body = {'actionMsg': {'code': '0'}, 'data': state.detail}
         elif path == '/invoiceApi/file/download':
             assert urlsplit(request.full_url).hostname == 'api.mypiaojia.com'
-            assert params == {'id': [state.detail['modify_info']['furl']], 'fid': ['9001'], 'dataId': ['101'],
+            assert params == {'id': [state.detail['modify_info'].get('pdf') or state.detail['modify_info']['furl']], 'fid': ['9001'], 'dataId': ['101'],
                               'token': ['synthetic-token']}
             assert request.get_header('Cookie') is None
             if state.cloud_failure == 'http':
@@ -99,7 +99,8 @@ def original_transport(monkeypatch, tmp_path):
             if 'requestid' in params:
                 assert params['requestid'] == ['101'] and params['isrequest'] == ['1']
                 state.initialized = True
-            body = {'status': 1, 'mainimagefile': state.main_file}
+            body = {'status': 1, 'mainimagefile': state.main_file,
+                    'data': {'docMain': getattr(state, 'doc_main', '')}}
         else:
             assert path == '/weaver/weaver.file.FileDownload'
             assert params == {'fileid': ['202']}
@@ -764,3 +765,134 @@ def test_cloud_incomplete_original_preserves_safe_failure_diagnostics(
     }]
     assert 'synthetic-token' not in json.dumps(caught.value.diagnostics)
     assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_ofd_invoice_reads_its_explicit_official_pdf(original_transport, tmp_path, monkeypatch):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    monkeypatch.setattr(remote.DownloadTransfer, 'native',
+                        lambda *a, **kw: pytest.fail('native OFD must not be treated as PDF'))
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    pdf, = [file for file in invoice['files'] if file['media_type'] == 'pdf']
+    ofd, = [file for file in invoice['files'] if file['media_type'] == 'ofd']
+    assert pdf['body_read_status'] == 'content_read'
+    assert ofd['body_read_status'] == 'not_read'
+    assert pdf['original_source']['original_cloud_file_id'] == '8000'
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+
+
+@pytest.mark.parametrize('change', ['missing_ofd', 'wrong_pdf', 'multiple_ofd'])
+def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, change):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    if change == 'missing_ofd':
+        state.detail['modify_info']['furl'] = '7999'
+    elif change == 'wrong_pdf':
+        state.detail['modify_info']['pdf'] = '8999'
+    else:
+        state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
+    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
+
+
+@pytest.mark.parametrize('change,reason', [('pdf', 'resource_ownership_untrusted'),
+                                            ('ofd', 'resource_ownership_untrusted'),
+                                            ('actor', 'rpa_session_invalid')])
+def test_official_pdf_rechecks_ofd_pair_and_actor_after_download(original_transport, tmp_path, change, reason):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    if change == 'actor':
+        state.after_cloud_download = lambda: setattr(state, 'actor', '78')
+    else:
+        state.after_cloud_download = lambda: state.detail['modify_info'].update(
+            **{'pdf' if change == 'pdf' else 'furl': '8999'})
+    with pytest.raises(RuntimeError, match=reason):
+        collect_original(state, tmp_path)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+@pytest.fixture
+def ofd_document_attachment(original_transport, monkeypatch):
+    from apps.oa.approvals.sources import sql_templates
+
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.main_file = ''
+    state.doc_main = ''
+    state.cloud_pdf = state.pdf
+    state.document_rows = [{'docid': 303, 'imagefileid': 202, 'imagefilename': 'original.ofd',
+                            'doctype': 1, 'isextfile': '1', 'docfiletype': '2'}]
+    state.sql_calls = []
+
+    def query(name, params, *, require_connection=False):
+        assert name == 'document_ofd_attachment'
+        assert params == {'document_id': 303} and require_connection
+        rendered = sql_templates.render_query(name, params)
+        assert rendered.max_rows == 2 and rendered.timeout_sec == 5
+        state.sql_calls.append(name)
+        return state.document_rows
+
+    monkeypatch.setattr(official_sql, '_query_rows', query)
+    return state
+
+
+def test_official_pdf_can_verify_the_documents_sole_ofd_attachment(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    material = collect_original(state, tmp_path)
+    pdf, = [file for file in material['invoice_evidence']['invoices'][0]['files']
+            if file['media_type'] == 'pdf']
+    assert pdf['body_read_status'] == 'content_read'
+    assert len(state.sql_calls) >= 3
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+
+
+@pytest.mark.parametrize('change', ['missing', 'multiple', 'document', 'file', 'role',
+                                     'doctype', 'filetype', 'extension', 'doc_body', 'main', 'sql'])
+def test_ofd_attachment_requires_a_unique_current_binding(ofd_document_attachment, tmp_path, monkeypatch, change):
+    state = ofd_document_attachment
+    if change == 'missing':
+        state.document_rows = []
+    elif change == 'multiple':
+        state.document_rows *= 2
+    elif change == 'doc_body':
+        state.doc_main = 'Unexpected document body'
+    elif change == 'main':
+        state.main_file = '999'
+    elif change == 'sql':
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError('official_sql_unavailable')
+        monkeypatch.setattr(official_sql, '_query_rows', unavailable)
+    else:
+        field, value = {'document': ('docid', 999), 'file': ('imagefileid', 999),
+                        'role': ('isextfile', '0'), 'doctype': ('doctype', 2),
+                        'filetype': ('docfiletype', '1'), 'extension': ('imagefilename', 'other.pdf')}[change]
+        state.document_rows[0][field] = value
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert not any(row[0] == '/invoiceApi/file/download' for row in state.requests)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_ofd_attachment_binding_is_rechecked_after_cloud_download(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    state.after_cloud_download = lambda: state.document_rows[0].update(imagefileid=999)
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_regular_pdf_still_requires_its_native_main_file(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    state.detail['flist'] = [state.detail['flist'][1]]
+    state.detail['modify_info'].update(furl='8001', fileType='1')
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert state.sql_calls == []
