@@ -77,6 +77,8 @@ def _form_snapshot(workflow, resources):
 
 
 def _worker(mode, payload, config):
+    from apps.oa.approvals.collection.case import CollectionFailure
+
     executable = config['sap_python' if mode == 'sap' else 'doris_python']
     command = [executable, str(Path(__file__).with_name('dealer_closure_reader.py')), mode]
     inputs = {**payload, 'connection': config}
@@ -93,10 +95,14 @@ def _worker(mode, payload, config):
             capture_output=True, timeout=300, env=env)
         data = json.loads(result.stdout)
         if result.returncode or data.get('status') != 'ok':
-            raise ValueError()
+            raise CollectionFailure('dealer_closure_' + mode + '_read_failed', diagnostics=[
+                {'stage': mode + '_' + str(data.get('stage', 'source')),
+                 'reason': data.get('reason'), 'exception_type': data.get('error_type'),
+                 'result_type': data.get('error_key')}])
         return data
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise RuntimeError('dealer_closure_' + mode + '_read_failed') from None
+        raise CollectionFailure('dealer_closure_' + mode + '_read_failed', diagnostics=[
+            {'stage': mode, 'reason': 'worker_response_unavailable'}]) from None
 
 
 def _dms(customer, tag, config):

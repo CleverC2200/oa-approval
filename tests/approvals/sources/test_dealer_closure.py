@@ -152,3 +152,17 @@ def test_dms_null_is_data_but_cross_customer_is_rejected(monkeypatch):
     body['result'] = {'customerCode': '99000002'}
     with pytest.raises(RuntimeError, match='dealer_closure_dms_read_failed'):
         source._dms('99000001', 'queryLatestRefundApplyByCustomerCode', config)
+
+
+def test_worker_retains_safe_source_failure_diagnostics(monkeypatch):
+    from apps.oa.approvals.collection.case import CollectionFailure
+
+    monkeypatch.setattr(source.official_sql, '_keychain_password', lambda *_: 'synthetic-secret')
+    monkeypatch.setattr(source.subprocess, 'run', lambda *_a, **_kw: SimpleNamespace(returncode=1,
+        stdout=json.dumps({'status': 'failed', 'reason': 'dealer_closure_sap_rows_truncated',
+                           'stage': 'BSID', 'error_type': 'RuntimeError', 'error_key': 'unsafe secret text'})))
+    with pytest.raises(CollectionFailure) as captured:
+        source._worker('sap', {}, {'sap_python': 'synthetic-python', 'sap_sdk': '/synthetic/sdk',
+                                  'sap_user': 'synthetic-user', 'sap_keychain_service': 'synthetic-service'})
+    assert captured.value.diagnostics == [{'stage': 'sap_BSID',
+        'reason': 'dealer_closure_sap_rows_truncated', 'exception_type': 'RuntimeError'}]

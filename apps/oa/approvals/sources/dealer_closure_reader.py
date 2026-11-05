@@ -48,10 +48,16 @@ def sap(payload):
     def read(table, fields, options, limit=10000):
         request = {'QUERY_TABLE': table, 'DELIMITER': '|', 'ROWCOUNT': limit,
                    'FIELDS': [{'FIELDNAME': f} for f in fields], 'OPTIONS': [{'TEXT': s} for s in options]}
-        response = connection.call('RFC_READ_TABLE', **request)
+        try:
+            response = connection.call('RFC_READ_TABLE', **request)
+        except Exception as error:
+            error.source_stage = table
+            raise
         values = response.get('DATA', [])
         if len(values) >= limit:
-            raise RuntimeError('dealer_closure_sap_rows_truncated')
+            error = RuntimeError('dealer_closure_sap_rows_truncated')
+            error.source_stage = table
+            raise error
         rows = []
         for item in values:
             parts = item['WA'].split('|', len(fields) - 1)
@@ -84,7 +90,7 @@ def sap(payload):
             ('credit', 'KNKK', ['KUNNR', 'KKBER', 'KNKLI', 'KLIMK', 'SKFOR', 'SSOBL', 'CRBLB'], [f"KUNNR = '{kunnr}'"]),
             ('payer', 'KNVP', ['KUNNR', 'VKORG', 'VTWEG', 'SPART', 'PARVW', 'KUNN2'], [f"KUNNR = '{kunnr}' AND PARVW = 'RG'"]),
             ('sales', 'KNVV', ['KUNNR', 'VKORG', 'VTWEG', 'SPART', 'AUFSD', 'LIFSD'], [f"KUNNR = '{kunnr}'"]),
-            ('company_accounts', 'KNB1', ['KUNNR', 'BUKRS', 'AKONT', 'SPERR'], [f"KUNNR = '{kunnr}'"]),
+            ('company_accounts', 'KNB1', ['KUNNR', 'BUKRS', 'AKONT', 'SPERR'], [f"KUNNR = '{kunnr}' AND BUKRS = '{company}'"]),
             ('merge_group', 'ZTCREDITLIMIT01', ['ZJXS', 'ZJXSBM'], [f"ZJXSBM = '{kunnr}'"]),
         ]:
             q[label] = read(table, fields, options)
@@ -106,9 +112,30 @@ def sap(payload):
                               [values_condition('KUNDE', customers), "AND PARVW = 'RG'"])
         out['contract_status'] = {r['VBELN']: read('VBUK', ['VBELN', 'RFGSK'], [f"VBELN = '{r['VBELN']}'"])
                                   for r in q['contracts']['rows']}
+        out['contract_amounts'] = {}
+        for document, status in out['contract_status'].items():
+            if not any(r['RFGSK'] == 'A' for r in status['rows']):
+                continue
+            header = read('VBAK', ['VBELN', 'VKORG', 'VBTYP', 'WAERK', 'AUDAT'], [f"VBELN = '{document}'"])
+            if not any(r['VBTYP'] == 'G' for r in header['rows']):
+                continue
+            items = read('VBAP', ['VBELN', 'POSNR', 'KZWI2', 'ABGRU'], [f"VBELN = '{document}' AND ABGRU = ''"])
+            item_status = read('VBUP', ['VBELN', 'POSNR', 'RFSTA'], [f"VBELN = '{document}' AND RFSTA = 'A'"])
+            eligible = {r['POSNR'] for r in item_status['rows']}
+            following = []
+            for item in items['rows']:
+                if item['POSNR'] not in eligible:
+                    continue
+                links = read('VBFA', ['VBELV', 'POSNV', 'VBELN', 'POSNN', 'VBTYP_N'],
+                    [f"VBELV = '{document}' AND POSNV = '{item['POSNR']}'", "AND VBTYP_N = 'C'"])
+                amounts = [read('VBAP', ['VBELN', 'POSNR', 'KZWI2'],
+                    [f"VBELN = '{r['VBELN']}' AND POSNR = '{r['POSNN']}'"]) for r in links['rows']]
+                following.append({'item': item['POSNR'], 'links': links, 'amounts': amounts})
+            out['contract_amounts'][document] = {'header': header, 'items': items,
+                'item_status': item_status, 'following_orders': following}
         fields = ['BUKRS', 'KUNNR', 'BELNR', 'GJAHR', 'BUZEI', 'BUDAT', 'BLART', 'HKONT', 'UMSKZ', 'SHKZG', 'DMBTR', 'XNEGP', 'SGTXT']
-        q['open_items'] = read('BSID', fields, [f"KUNNR = '{kunnr}'"])
-        q['cleared_period'] = read('BSAD', fields, [f"KUNNR = '{kunnr}'", f"AND BUDAT >= '{begin}' AND BUDAT <= '{cutoff}'"])
+        q['open_items'] = read('BSID', fields, [f"KUNNR = '{kunnr}' AND BUKRS = '{company}'"])
+        q['cleared_period'] = read('BSAD', fields, [f"KUNNR = '{kunnr}' AND BUKRS = '{company}'", f"AND BUDAT >= '{begin}' AND BUDAT <= '{cutoff}'"])
         q['actual_deliveries'] = read('LIKP', ['VBELN', 'KUNAG', 'KUNNR', 'WADAT_IST', 'LFDAT'],
                                      [f"KUNAG = '{kunnr}'", f"AND WADAT_IST >= '20240101' AND WADAT_IST <= '{cutoff}'"])
         out['headers'] = {}
@@ -166,6 +193,15 @@ def sap(payload):
         connection.close()
 
 
+def failure(error):
+    reason = str(error)
+    if not re.fullmatch(r'dealer_closure_[a-z_]{1,45}', reason):
+        reason = 'dealer_closure_source_failed'
+    return {'status': 'failed', 'error_type': type(error).__name__, 'reason': reason,
+            'stage': getattr(error, 'source_stage', 'source'),
+            'error_key': getattr(error, 'key', '')}
+
+
 def main():
     try:
         payload = json.load(sys.stdin)
@@ -173,8 +209,7 @@ def main():
         print(json.dumps(result, ensure_ascii=False, default=str))
         return 0
     except Exception as error:
-        print(json.dumps({'status': 'failed', 'error_type': type(error).__name__,
-                          'error_key': getattr(error, 'key', '')}))
+        print(json.dumps(failure(error)))
         return 1
 
 
