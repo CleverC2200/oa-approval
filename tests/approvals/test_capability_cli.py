@@ -628,7 +628,8 @@ def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkey
     assert status['summary'] == {'submitted': 1, 'queued': 2}
 
 
-def test_status_does_not_report_a_busy_owner_as_missing(tmp_path):
+@pytest.mark.parametrize('view', [None, 'batch'])
+def test_status_does_not_report_a_busy_owner_as_missing(tmp_path, view):
     import socket
 
     from apps.oa.approvals.client import query, socket_path
@@ -640,8 +641,11 @@ def test_status_does_not_report_a_busy_owner_as_missing(tmp_path):
         server.bind(str(socket_path(tmp_path)))
         server.listen()
         try:
-            status = query(tmp_path, 'status')
+            status = query(tmp_path, 'status', view=view)
             assert status['owner'] == {'reachable': True, 'busy': True}
+            if view == 'batch':
+                assert status['closeout']['drained'] is False
+                assert status['alerts'] == [{'code': 'owner_unresponsive', 'severity': 'warning'}]
         finally:
             socket_path(tmp_path).unlink(missing_ok=True)
 
@@ -737,5 +741,212 @@ def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
         assert retry['batch']['task_ids'] == [task['id']]
         assert app.store.get_task(task['id'])['failure_count'] == 1
         assert app.store.get_task(task['id'])['status'] == 'queued'
+    finally:
+        app.store.connection.close()
+
+
+def test_guarded_finish_drains_before_handoff(tmp_path):
+    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo', '--batch-size', '1'],
+                               cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        line = process.stdout.readline()
+        assert line, process.stderr.read()
+        started = json.loads(line)
+        base = [sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path)]
+        wrong = subprocess.run([*base, 'finish', '--run-id', 'wrong'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert wrong.returncode == 1
+        assert json.loads(wrong.stdout)['error'] == 'run_mismatch'
+        assert process.poll() is None
+        status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None}
+        collected = subprocess.run([*base, 'collect', '--agent-id', 'reviewer', '--expected-task-id', '1',
+                                    '--agent-workflow-key', 'travel_expense'],
+                                   cwd=PROJECT, capture_output=True, text=True, timeout=10)
+        assert json.loads(collected.stdout)['status'] == 'reviewing'
+        refused = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained', '--handoff'],
+                                 cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert refused.returncode == 1
+        assert json.loads(refused.stdout) == {'run_id': started['run_id'], 'status': 'refused',
+                                             'reason': 'run_not_drained', 'blockers': ['tasks_inflight']}
+        assert process.poll() is None
+        failed = subprocess.run([*base, 'fail', '--task-id', '1', '--reason', 'synthetic_read_failure'],
+                                cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert json.loads(failed.stdout)['status'] == 'failed'
+        finished = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained', '--handoff'],
+                                  cwd=PROJECT, capture_output=True, text=True, timeout=10)
+        assert finished.returncode == 0, finished.stderr + finished.stdout
+        assert json.loads(finished.stdout)['status'] == 'closed'
+        assert json.loads(finished.stdout)['handoff']['status'] == 'ready'
+        process.wait(timeout=5)
+        assert process.returncode == 0, process.stderr.read()
+        checked = subprocess.run([*base, 'status', '--view', 'batch'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        report = json.loads(checked.stdout)
+        assert report['closeout'] == {'drained': True, 'blockers': [], 'batch_complete': True, 'complete': True}
+        assert {alert['code'] for alert in report['alerts']} == {'technical_failures', 'continuation_pending'}
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+def test_closeout_keeps_lost_owner_and_incomplete_closed_round_visible(tmp_path, capsys):
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    app.store.set_status(started['tasks'][0]['id'], 'reviewing')
+    arguments = ['--root', str(tmp_path), 'status', '--view', 'batch']
+    assert cli.main(arguments) == 0
+    lost = json.loads(capsys.readouterr().out)
+    assert lost['closeout'] == {'drained': False, 'blockers': ['tasks_inflight'],
+                               'batch_complete': False, 'complete': False}
+    assert lost['alerts'] == [{'code': 'owner_unreachable', 'severity': 'blocked'}]
+    app.close(started['run_id'])
+    assert cli.main(arguments) == 0
+    closed = json.loads(capsys.readouterr().out)
+    assert closed['closeout']['complete'] is False
+    assert closed['alerts'] == [{'code': 'run_closed_with_inflight', 'severity': 'blocked'}]
+
+
+def test_active_submission_prevents_closeout_without_raising_a_false_blocked_alert(tmp_path, capsys, monkeypatch):
+    from apps.oa.approvals import client
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    record_submission(app.store, started['tasks'][0]['id'])
+    monkeypatch.setattr(client, 'send', lambda *args, **kwargs: {'run_id': started['run_id'], 'status': 'running'})
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['closeout']['blockers'] == ['tasks_inflight', 'submission_unresolved']
+    assert status['closeout']['complete'] is False
+    assert status['alerts'] == []
+
+
+def test_status_and_finish_share_the_preclaim_collection_blocker(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from apps.oa.approvals import client, owner
+
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    collection = SimpleNamespace(incoming=SimpleNamespace(poll=lambda: False),
+                                 status=lambda: {'pid': 123, 'elapsed_seconds': 0})
+    monkeypatch.setattr(owner._Collection, 'start', lambda *args: collection)
+    session = owner._RoundSession(app, started['run_id'], root=tmp_path, demo=True,
+                                  close_transport=lambda: pytest.fail('owner must remain open'))
+    responses = []
+    session.handle(lambda: {'operation': 'collect', 'agent_id': 'reviewer', 'expected_task_id': 1,
+                            'agent_workflow_key': 'travel_expense'}, source='socket', respond=responses.append)
+    assert app.store.get_task(1)['status'] == 'queued'
+
+    def send(_root, request, **_options):
+        result = []
+        session.handle(lambda: request, source='socket', respond=result.append)
+        return result[0]
+
+    monkeypatch.setattr(client, 'send', send)
+    monkeypatch.setattr(cli, 'send', send)
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['owner']['collection'] == collection.status()
+    assert status['closeout']['drained'] is False
+    assert cli.main(['--root', str(tmp_path), 'finish', '--run-id', started['run_id'], '--require-drained']) == 1
+    refused = json.loads(capsys.readouterr().out)
+    assert refused['blockers'] == status['closeout']['blockers'] == ['tasks_inflight']
+    assert session._finishing is False
+    assert app.store.run(started['run_id'])['status'] == 'running'
+    app.store.connection.close()
+
+
+@pytest.mark.parametrize('state,result,expected', [
+    ('unknown', {'submit_ok': True}, 'submission_unresolved'),
+    ('submitted', {'submit_ok': True}, 'submission_unresolved'),
+    ('missing_receipt', {}, 'submission_unverified'),
+    ('confirmed_not_written', {'failure_code': 'user_confirmed_not_written', 'confirmation_note': 'Synthetic confirmation',
+                               'previous_result': {}}, None),
+])
+def test_closeout_requires_resolved_receipts_even_after_round_is_closed(tmp_path, capsys, state, result, expected):
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    task_id = started['tasks'][0]['id']
+    if state == 'missing_receipt':
+        app.store.set_status(task_id, 'submitted')
+    else:
+        record_submission(app.store, task_id, status='failed' if state == 'confirmed_not_written' else state, result=result)
+    app.close(started['run_id'])
+    assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status['closeout']['complete'] is (expected is None)
+    assert status['closeout']['blockers'] == ([] if expected is None else [expected])
+    assert {item['code'] for item in status['alerts']} == ({'technical_failures'} if expected is None else {expected})
+
+
+@pytest.mark.parametrize('state,blocker', [('unknown', 'submission_unresolved'), ('submitted', 'submission_unverified')])
+def test_guarded_finish_preserves_unresolved_submission_and_owner(tmp_path, state, blocker):
+    from apps.oa.approvals.store import Store
+
+    base = [sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path)]
+    process = subprocess.Popen([*base, 'start', '--demo', '--batch-size', '1'], cwd=PROJECT,
+                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    try:
+        started = json.loads(process.stdout.readline())
+        store = Store(tmp_path / 'approval.sqlite3')
+        try:
+            if state == 'unknown':
+                record_submission(store, 1, status='unknown', result={'submit_ok': True})
+            else:
+                store.set_status(1, 'submitted')
+            before = store.details(1)
+            result = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained'],
+                                    cwd=PROJECT, capture_output=True, text=True, timeout=5)
+            assert result.returncode == 1
+            assert json.loads(result.stdout)['blockers'] == [blocker]
+            assert store.details(1) == before
+            assert store.run(started['run_id'])['status'] in {'running', 'blocked'}
+            assert process.poll() is None
+        finally:
+            store.connection.close()
+        stopped = subprocess.run([*base, 'finish', '--run-id', started['run_id']],
+                                 cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        assert json.loads(stopped.stdout)['status'] == 'closed'
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@pytest.mark.parametrize('owner_state', [
+    {'reachable': True, 'busy': True},
+    {'reachable': None, 'reason': 'probe_timeout'},
+])
+def test_closeout_keeps_busy_or_uncertain_owner_unconfirmed(tmp_path, owner_state):
+    from apps.oa.approvals.status import batch_status
+
+    app = create_demo(tmp_path)
+    try:
+        started = app.pending(batch_size=1)
+        run_id = started['run_id']
+        app.store.set_status(started['tasks'][0]['id'], 'preview')
+        app.close(run_id)
+        result = batch_status(app.store, app.store.run(run_id), app.store.tasks(run_id), owner_state)
+        assert result['closeout']['complete'] is False
+        assert result['closeout']['drained'] is False
+        assert result['closeout']['blockers'] == ['owner_state_unconfirmed']
+        assert result['alerts'] == [{'code': 'owner_unresponsive', 'severity': 'warning'}]
+    finally:
+        app.store.connection.close()
+
+
+def test_batch_status_error_reply_cannot_prove_owner_exit(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals import client
+
+    app = create_demo(tmp_path)
+    try:
+        started = app.pending(batch_size=1)
+        app.store.set_status(started['tasks'][0]['id'], 'preview')
+        app.close(started['run_id'])
+        monkeypatch.setattr(client, 'send', lambda *_args, **_kwargs: {'status': 'failed'})
+        assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
+        status = json.loads(capsys.readouterr().out)
+        assert status['owner'] == {'reachable': None, 'reason': 'invalid_response'}
+        assert status['closeout']['complete'] is False
     finally:
         app.store.connection.close()

@@ -33,40 +33,7 @@ def send(root, request, *, timeout=None):
             return json.loads(incoming.readline())
 
 
-def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
-    database = root / 'approval.sqlite3'
-    if not database.is_file():
-        return {'status': 'not_initialized'}
-    store = Store(database, read_only=True)
-    try:
-        if view == 'batch':
-            store.connection.execute('BEGIN')
-        if operation == 'show':
-            details = store.details(task_id)
-            if not full:
-                details['task'].pop('material_json', None)
-                details['task'].pop('frozen_json', None)
-                details['attachments'] = [{key: item[key] for key in
-                    ('id', 'resource_id', 'parent_resource_id', 'name', 'path', 'sha256')} for item in details['attachments']]
-                details['contents'] = [{key: item[key] for key in
-                    ('id', 'attachment_id', 'locator', 'source', 'status')} for item in details['contents']]
-                details['reviews'] = [{key: value for key, value in item.items()
-                    if key not in {'recognition_json', 'frozen_json'}} for item in details['reviews']]
-                details['submissions'] = [{key: value for key, value in item.items()
-                    if key != 'result_json'} for item in details['submissions']]
-            return {'status': 'ok', **details}
-        run = store.run(run_id) if run_id is not None else store.latest_run()
-        if run is None:
-            return {'status': 'no_runs', 'owner': {'reachable': False}}
-        tasks = store.tasks(run['id'])
-        result = {'status': 'ok', 'run': run, 'summary': dict(Counter(task['status'] for task in tasks)),
-                  'tasks': tasks if full else [{key: task[key] for key in
-                    ('id', 'request_id', 'workflow_key', 'received_at', 'status')} for task in tasks]}
-        if view == 'batch':
-            result.pop('tasks')
-            result.update(batch_status(store, run, tasks))
-    finally:
-        store.connection.close()
+def _owner_status(root):
     try:
         response = send(root, {'operation': 'status'}, timeout=0.5)
         owner = {'reachable': True, 'run_id': response['run_id'],
@@ -81,6 +48,46 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
                 owner = {'reachable': None, 'reason': 'probe_timeout'}
             except OSError:
                 owner = {'reachable': False}
-    except (OSError, ValueError, KeyError):
+    except (ValueError, KeyError):
+        owner = {'reachable': None, 'reason': 'invalid_response'}
+    except OSError:
         owner = {'reachable': False}
+    return owner
+
+
+def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
+    database = root / 'approval.sqlite3'
+    if not database.is_file():
+        return {'status': 'not_initialized'}
+    store = Store(database, read_only=True)
+    try:
+        if operation == 'show':
+            details = store.details(task_id)
+            if not full:
+                details['task'].pop('material_json', None)
+                details['task'].pop('frozen_json', None)
+                details['attachments'] = [{key: item[key] for key in
+                    ('id', 'resource_id', 'parent_resource_id', 'name', 'path', 'sha256')} for item in details['attachments']]
+                details['contents'] = [{key: item[key] for key in
+                    ('id', 'attachment_id', 'locator', 'source', 'status')} for item in details['contents']]
+                details['reviews'] = [{key: value for key, value in item.items()
+                    if key not in {'recognition_json', 'frozen_json'}} for item in details['reviews']]
+                details['submissions'] = [{key: value for key, value in item.items()
+                    if key != 'result_json'} for item in details['submissions']]
+            return {'status': 'ok', **details}
+        owner = _owner_status(root)
+        if view == 'batch':
+            store.connection.execute('BEGIN')
+        run = store.run(run_id) if run_id is not None else store.latest_run()
+        if run is None:
+            return {'status': 'no_runs', 'owner': {'reachable': False}}
+        tasks = store.tasks(run['id'])
+        result = {'status': 'ok', 'run': run, 'summary': dict(Counter(task['status'] for task in tasks)),
+                  'tasks': tasks if full else [{key: task[key] for key in
+                    ('id', 'request_id', 'workflow_key', 'received_at', 'status')} for task in tasks]}
+        if view == 'batch':
+            result.pop('tasks')
+            result.update(batch_status(store, run, tasks, owner))
+    finally:
+        store.connection.close()
     return {**result, 'owner': owner}

@@ -44,6 +44,7 @@ def main(argv=None):
     finish = commands.add_parser('finish', help='结束指定轮次；等待当前采集落盘，不代表业务全部完成')
     finish.add_argument('--run-id', required=True)
     finish.add_argument('--handoff', action='store_true', help='排空后关闭并预留下一轮；返回原生独立对话接续信息')
+    finish.add_argument('--require-drained', action='store_true', help='正常收尾前拒绝在途采集、审核或未核实提交，保留 owner')
     finish.add_argument('--orphaned', action='store_true', help='显式核对后关闭失联轮次；仅写本地事实，不恢复审核或创建接续')
     finish.add_argument('--collection-stopped-note', help='仅与 --orphaned 使用，记录本次人工确认采集进程已停止的授权及核对依据')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
@@ -78,8 +79,8 @@ def main(argv=None):
             or bool(args.confirm_not_written) != (args.expected_submission_id is not None)
             or (args.expected_submission_id is not None and args.expected_submission_id <= 0)):
         parser.error('--confirm-not-written YES, a nonempty --confirmation-note and a positive --expected-submission-id must be supplied together')
-    if args.operation == 'finish' and args.orphaned and args.handoff:
-        parser.error('--orphaned cannot create a handoff')
+    if args.operation == 'finish' and args.orphaned and (args.handoff or args.require_drained):
+        parser.error('--orphaned cannot use --handoff or --require-drained')
     if args.operation == 'finish' and args.collection_stopped_note is not None and (
             not args.orphaned or not args.collection_stopped_note.strip()):
         parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
@@ -150,6 +151,7 @@ def main(argv=None):
         elif args.operation == 'finish':
             request['run_id'] = args.run_id
             request['handoff'] = args.handoff
+            request['require_drained'] = args.require_drained
         else:
             request['task_id'] = args.task_id
         if args.operation in {'submit', 'preview'}:

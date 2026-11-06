@@ -11,6 +11,7 @@ from apps.oa.approvals import cli, owner
 @pytest.mark.parametrize('name,content,kind', [
     ('.env', 'OA_DB_PASSWORD=synthetic', 'private_path'),
     ('runtime/report.json', '{}', 'private_path'),
+    ('.playwright-mcp/page.yml', 'synthetic browser snapshot', 'private_path'),
     ('apps/oa/runtime/report.json', '{}', 'private_path'),
     ('tests/runtime/report.json', '{}', 'private_path'),
     ('apps/oa/runtime/nested/report.py', 'value = 1', 'private_path'),

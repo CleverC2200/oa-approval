@@ -49,6 +49,17 @@ def test_matching_case_previews_then_transfers_with_persisted_target_and_never_s
     assert api.posts == []
     assert app.submit(task_id, opinion='禁止重复', confirm_write=True)['status'] == 'submitted'
     assert calls == ['prepare', 'transfer']
+    from apps.oa.approvals.client import query
+    from apps.oa.approvals.owner import _RoundSession
+
+    run_id = app.store.get_task(task_id)['last_run_id']
+    session = _RoundSession(app, run_id, root=tmp_path, demo=True, close_transport=lambda: None)
+    responses = []
+    session.handle(lambda: {'operation': 'finish', 'run_id': run_id, 'require_drained': True},
+                   source='socket', respond=responses.append)
+    assert responses[0]['status'] == 'closed'
+    assert query(tmp_path, 'status', view='batch')['closeout']['complete'] is True
+    assert calls == ['prepare', 'transfer']
 
 
 def test_blocked_or_changed_delivery_never_starts_a_write(tmp_path, monkeypatch, delivery):

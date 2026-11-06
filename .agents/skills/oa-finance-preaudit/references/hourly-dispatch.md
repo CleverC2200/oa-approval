@@ -7,7 +7,7 @@
 每小时检查用于空闲时发现待办。有积压时保存接续预留，由下一次实际权限及项目环境符合要求的小时对话消费。每次调度对话只处理一个批次。自动任务保持用户设定的启停状态；暂停后不创建新接续对话。
 
 1. 从 `/Users/synear/Documents/OA` 读取当前 AGENTS.md。小时任务及接续固定使用 `/Users/synear/Documents/OA/runtime/hourly-preaudit`，保留同一 SQLite 账本与材料。首次使用共享锁版本前确认旧版本 owner 已结束，正在审批的 checkout 保持原样，空闲后再同步主线。
-2. 用公开 `approvals --root <固定目录> status` 检查已有轮次及 owner。owner 可达时跳过本轮；失联的 running/blocked 或未知提交先报告核对。最新轮次 closed、handoff 为 ready 且 owner 不可达时，核对任务仍 ACTIVE、没有停止指令或未知提交，再用该精确 run_id 执行 `start --continue-from <run_id> --limit 0`。不得另开初始轮绕过预留。
+2. 用公开 `approvals --root <固定目录> status --view batch` 检查已有轮次、`alerts` 及 owner，按下文处理异常。健康且身份匹配的 owner 可达时跳过本轮；忙碌或探测不明先复查，不当作已退出。失联的 running/blocked 或未知提交先报告核对。最新轮次 closed、handoff 为 ready 且 owner 明确不可达时，核对任务仍 ACTIVE、没有停止指令或未知提交，再用该精确 run_id 执行 `start --continue-from <run_id> --limit 0`。不得另开初始轮绕过预留。
 3. 空闲后 fetch `origin/main`，确认分支为 main、工作区干净且 HEAD 与 `origin/main` 一致。失败即停止，不自动切换、重置或拉取合入。
 4. 初始轮使用 `start --batch-size 40 --limit 0`，显式限定当前授权的流程。非 demo 的审批入口先取得项目共享 `runtime/approval.lock`，再取得本轮目录锁；任一 runtime 有 owner 时，第二个启动返回 `already_running`，尚未读取 OA 或建立队列。收到该状态直接跳过，不等待或换目录绕过。
 
@@ -28,7 +28,7 @@
 
 ## 保存接续并结束
 
-先按[批次关闭分支](batch-execution.md#正常完成与关闭轮次)逐单验收并选择关闭命令。计划 ACTIVE、没有停止指令或未知提交时，执行一次 `finish --run-id <本轮ID> --handoff`，保存关闭回执，等待原 owner 工具会话退出，再核对 `run.status=closed`、`owner.reachable=false`。
+先按[批次关闭分支](batch-execution.md#正常完成与关闭轮次)逐单验收并选择关闭命令。计划 ACTIVE、没有停止指令或未知提交时，执行一次 `finish --run-id <本轮ID> --require-drained --handoff`，保存关闭回执，等待原 owner 工具会话退出，再核对 `run.status=closed`、`owner.reachable=false` 及本批收尾验收。
 
 - `handoff.status=ready`：报告剩余数量并结束，等待下一次小时触发消费。当前对话不循环启动下一批，不创建或 fork 聊天，不创建工作树。
 - `done`：当前队列耗尽，等待下次小时检查。
@@ -46,4 +46,19 @@
 
 ## 结束与反馈
 
-无待办也关闭 owner。每轮报告只含领取数、已验证提交/预览/技术失败数、未领取数、接续状态、耗时及证据路径。区分队列耗尽、对话轮换、已有运行跳过和异常阻断。意见、数据库和回执保持私有；通知偏好由自动任务配置维护。自动任务记忆不累积业务材料、历史单号或旧队列。
+无待办也按批次规则验收 owner 退出。每轮报告只含领取数、已验证提交/预览/技术失败数、未领取数、接续状态、耗时及证据路径。区分队列耗尽、对话轮换、已有运行跳过和异常阻断。
+
+`status --view batch` 的 `alerts` 表示当前事实，不以命令退出码或聊天结束状态代替验收：
+
+| 告警 | 接管方式 |
+| --- | --- |
+| `owner_unresponsive` | 执行者忙碌或探测结果不明。间隔 30 秒复查同一轮，核对原 owner 进程和工具会话，不判为失联、未知提交或已退出 |
+| `owner_unreachable` / `owner_mismatch` | 间隔 30 秒复查同一轮并核对原对话、进程及身份；确认异常后报告并保留现场，不自动恢复或关闭旧轮 |
+| `submission_unresolved` / `submission_unverified` | 停止补位和其他写入，仅用公开 `postcheck` 核对；正常同步执行的提交只阻止提前收尾，不单独误报未知提交 |
+| `run_blocked` / `run_closed_with_inflight` | 报告停止原因或未完成范围，不把 closed 当作完成，不恢复旧审核 |
+| `technical_failures` | 报告数量和具体错误的证据路径，其余任务按原授权继续 |
+| `continuation_pending` | 保存接续事实，按既定的下一次小时触发规则消费，不创建额外对话 |
+
+首次发现阻断或已核实的审核停滞，在当前对话说明原因、实际轮次或 Agent、最后事件及需要的处理；同轮同原因只报告一次，新事实再更新。通知偏好沿用自动任务的既有配置，不新增独立收件箱投递、后台监控或飞书消息。
+
+意见、数据库和回执保持私有；自动任务记忆不累积业务材料、历史单号或旧队列，只保留原因代码及证据引用。

@@ -20,6 +20,7 @@ from apps.oa.runtime import collection_budget, control
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
 from apps.oa.approvals.source_policy import load_source_policy
+from apps.oa.approvals.status import closeout_blockers, submission_acceptance
 
 
 _STDIN_EOF = object()
@@ -78,7 +79,6 @@ def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_s
 
 
 def finish_orphaned(root, run_id, *, collection_stopped_note=None):
-    from apps.oa.approvals.status import submission_acceptance
     from apps.oa.approvals.store import Store
 
     database = root / 'approval.sqlite3'
@@ -306,15 +306,24 @@ class _RoundSession:
             return
         try:
             request = receive_request()
-            if source == 'stdin' and (request is _STDIN_EOF or request.get('operation') == 'finish'):
-                self._handoff = request is not _STDIN_EOF and request.get('handoff', False)
+            if request is _STDIN_EOF:
                 self._finishing = True
             elif request.get('operation') == 'finish':
-                if request.get('run_id') != self._run_id:
+                if source == 'socket' and request.get('run_id') != self._run_id:
                     raise ValueError('run_mismatch')
+                if request.get('require_drained'):
+                    store = self._approval.store
+                    blockers = closeout_blockers(
+                        submission_acceptance(store, self._run_id, store.tasks(self._run_id)),
+                        collection_active=self._collection is not None)
+                    if blockers:
+                        respond({'run_id': self._run_id, 'status': 'refused',
+                                 'reason': 'run_not_drained', 'blockers': blockers})
+                        return
                 self._finishing = True
                 self._handoff = request.get('handoff', False)
-                self._finish_responders.append(respond)
+                if source == 'socket':
+                    self._finish_responders.append(respond)
             elif request.get('operation') == 'status':
                 respond({**dispatch(self._approval, self._run_id, request),
                          'phase': 'finishing' if self._finishing else 'running',

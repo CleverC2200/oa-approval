@@ -23,6 +23,7 @@ service-account*.json
 .ruff_cache/
 .mypy_cache/
 .playwright/
+.playwright-mcp/
 *.log
 __pycache__/
 *.pyc
