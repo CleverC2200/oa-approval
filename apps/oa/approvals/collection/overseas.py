@@ -12,18 +12,30 @@ from apps.oa.approvals.collection.downloads import download_resources, build_dow
 
 
 def snapshot(data, resources, request_id, *, origins, writable=True):
+    business._require(str(data.get('requestId') or '') == request_id, 'invoice_identity_mismatch')
     try:
         return business.snapshot(data,resources,writable=writable,origins=origins)
     except ValueError as error:
         if str(error) not in {"invoice_attachment_unbound","invoice_attachments_missing"}:
             raise
     empty = official_sql.confirmed_empty_attachment_fields(data,request_id=request_id,workflow_key="overseas_invoice")
-    return business.snapshot(data,resources,writable=writable,empty_fields=empty,origins=origins)
+    logical = evidence_packet.logical_attachment_resources(data, resources, origins=origins)
+    documents = {}
+    for field in evidence_packet.extract_fields(data):
+        if field['field_name'] != 'scfp':
+            continue
+        references = [value.strip() for value in field['raw_value'].split(',')]
+        bound = [resource for resource in logical if resource.get('_trusted_source_field_path') == field['path']]
+        if all(references) and set(references) != {str(resource.get('id') or '') for resource in bound}:
+            for resource in bound:
+                file_id = str(resource.get('id') or '')
+                documents[file_id] = official_sql.workflow_attachment_document(request_id, file_id)
+    return business.snapshot(data,resources,writable=writable,empty_fields=empty,
+                             attachment_documents=documents,origins=origins)
 
 def collect(api, request_id, directory, *, source_policy):
     data,resources = api.request_context(request_id)
     snap = snapshot(data,resources,request_id,origins=source_policy.attachments)
-    business._require(snap["request_id"] == request_id,"invoice_identity_mismatch")
     selected_ids = {str(item["id"]) for item in snap["resources"]}
     selected = [item for item in evidence_packet.logical_attachment_resources(data,resources,origins=source_policy.attachments) if str(item.get("id")) in selected_ids]
     files = download_fresh(selected,directory / "attachments",request_id=request_id,source_policy=source_policy) if selected else []

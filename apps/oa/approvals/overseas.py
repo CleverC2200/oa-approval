@@ -60,7 +60,7 @@ def _invoice_field_names(fields: dict) -> dict:
 
 
 def snapshot(data: dict, resources: list[dict], *, writable: bool = True,
-             empty_fields: dict | None = None, origins) -> dict:
+             empty_fields: dict | None = None, attachment_documents: dict | None = None, origins) -> dict:
     identity = flow.workflow_identity(data)
     _require(identity == {'workflow_id': WORKFLOW_ID, 'workflow_name': WORKFLOW_NAME}, 'invoice_workflow_mismatch')
     _require(bool(str(data.get('requestId') or '')) and bool(str(data.get('currentNodeId') or '')), 'invoice_identity_invalid')
@@ -116,10 +116,17 @@ def snapshot(data: dict, resources: list[dict], *, writable: bool = True,
             _require((len(ids) == 1 or all(raw_ids)) and len(raw_ids) == len(set(raw_ids)) and len(ids) == len(raw_ids),
                      'invoice_attachment_unbound')
             if all(raw_ids):
-                _require(set(ids) == set(raw_ids), 'invoice_attachment_unbound')
-                ids = raw_ids
+                if set(ids) == set(raw_ids):
+                    ids = raw_ids
+                else:
+                    matches = [[rid for rid in ids if (attachment_documents or {}).get(rid) == reference]
+                               for reference in raw_ids]
+                    _require(all(len(group) == 1 for group in matches), 'invoice_attachment_unbound')
+                    ordered_ids = [group[0] for group in matches]
+                    _require(set(ordered_ids) == set(ids), 'invoice_attachment_unbound')
+                    ids = ordered_ids
             orders = [field for field in declared if field['table'] == f'detail_{ti}'
-                        and field['row'] == ri and field['name'] == '采购订单号']
+                        and field['row'] == ri and field['name'] in {'采购订单号', '采购订单号码'}]
             purchase_order = {'value': '', 'read_status': 'unresolved'}
             if len(orders) == 1:
                 purchase_order = {key: orders[0][key] for key in ('value', 'read_status')}
