@@ -12,6 +12,11 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def offline_network(monkeypatch, tmp_path):
+    from apps.oa.approvals.sources import invoice_titles
+    from tests.approvals.invoice_title_fakes import InvoiceTitleTransport
+
+    monkeypatch.setattr(invoice_titles, 'urlopen', InvoiceTitleTransport())
+
     def reject(*args, **kwargs):
         pytest.fail('offline_network_forbidden: provide an explicit fake transport', pytrace=False)
 
