@@ -378,3 +378,20 @@ def test_unknown_operator_namespace_cannot_prove_a_negative_match(native, financ
     assessment = prediction.predict('123')['finance_precheck']
     assert assessment['required'] is None
     assert 'operator_type_unknown' in assessment['uncertainties']
+
+
+def test_public_cli_reports_transfer_target_without_writing(native, finance_rule, capsys):
+    payload = result()
+    payload['nodeInfo'] = payload['nodeInfo'][:3]
+    payload['nodeInfo'][2].update(nodeName='财务收单', branchNumber=1)
+    native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
+    native.operators[('20', '3')] = {'nodes': [{'operators': [{'id': 2, 'name': '合成财务', 'type': 0}]}]}
+    native.replies.append(payload)
+    assert main(['approvals', 'predict', '--request-id', '123', '--format', 'json']) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert output['delivery']['action'] == 'transfer'
+    assert output['delivery']['recipient_id'] == '2'
+    assert output['delivery']['finance_node_sequence'] == 3
+    assert output['raw_prediction'] == payload
+    assert {row[0] for row in native.requests} <= {
+        prediction.ACCOUNT_PATH, prediction.REQUEST_PATH, prediction.PREDICTION_PATH, prediction.OPERATOR_PATH}

@@ -6,6 +6,11 @@ import re
 from apps.oa.runtime.environment import stable_env_file
 
 
+WORKFLOWS = frozenset({'travel_expense', 'business_entertainment', 'business_support_fee',
+                       'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense'})
+FINANCE_NODE_NAMES = frozenset({'财务审核', '财务收单', '分支总账/结算会计审批'})
+
+
 def policy_path():
     return stable_env_file().with_name('prediction-finance-precheck.json')
 
@@ -72,3 +77,33 @@ def assess(result, policy):
     else:
         required, status = False, 'not_required'
     return {'status': status, 'required': required, 'reasons': reasons, 'uncertainties': sorted(uncertainties)}
+
+
+def delivery_plan(result, policy):
+    assessment = result['finance_precheck']
+    plan = {'action': 'blocked', 'request_id': result['request_id'],
+            'finance_precheck': assessment, 'prediction_queried_at': result['queried_at']}
+    if policy is None or assessment['required'] is False:
+        return {**plan, 'action': 'submit'}
+    if assessment['required'] is not True or not result['complete']:
+        return {**plan, 'reason': 'finance_prediction_incomplete'}
+    current = [node for node in result['nodes'] if node['state'] == 'current']
+    if len(current) != 1 or current[0]['node_kind'] not in {'1', '2'}:
+        return {**plan, 'reason': 'finance_current_node_unavailable'}
+    source = current[0]
+    future = [node for node in result['nodes'] if node['sequence'] > source['sequence']]
+    if ((source['branch_count'] or 0) > 1
+            or any(node['state'] in {'unknown', 'loading'} or (node['branch_count'] or 0) > 1 for node in future)):
+        return {**plan, 'reason': 'finance_route_ambiguous'}
+    for node in future:
+        if node['state'] != 'predicted' or node['node_name'] not in FINANCE_NODE_NAMES:
+            continue
+        people = node['operators']
+        if (node['node_kind'] not in {'1', '2'} or not node['operators_loaded'] or len(people) != 1
+                or str(people[0]['type']) != '0' or not re.fullmatch(r'[1-9][0-9]*', people[0]['id'])):
+            return {**plan, 'reason': 'finance_recipient_ambiguous'}
+        return {**plan, 'action': 'transfer', 'source_node_id': source['node_id'],
+                'finance_node_id': node['node_id'], 'finance_node_name': node['node_name'],
+                'finance_node_sequence': node['sequence'], 'recipient_id': people[0]['id'],
+                'recipient_name': people[0]['name']}
+    return {**plan, 'reason': 'finance_future_node_unavailable'}

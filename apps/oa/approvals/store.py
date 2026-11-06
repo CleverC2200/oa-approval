@@ -292,13 +292,13 @@ class Store:
         return dict(self.connection.execute("SELECT * FROM reviews WHERE task_id=? AND opinion=? AND recognition_json=? AND material_sha256=?",
             (task_id,opinion,recognized,task["material_sha256"])).fetchone())
 
-    def begin_submission(self, task_id, review_id):
+    def begin_submission(self, task_id, review_id, *, result=None):
         task = self.get_task(task_id)
         with self.connection:
             if task["status"] in {"submitting","submitted","unknown"}:
                 raise ValueError("submission_already_started")
-            cursor = self.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status) VALUES (?,?,?,?,'started')",
-                (task_id,review_id,task["last_run_id"],now()))
+            cursor = self.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status,result_json) VALUES (?,?,?,?,'started',?)",
+                (task_id,review_id,task["last_run_id"],now(),encoded(result or {})))
             self.connection.execute("UPDATE tasks SET status='submitting' WHERE id=?", (task_id,))
         return cursor.lastrowid
 
