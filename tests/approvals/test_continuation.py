@@ -86,3 +86,24 @@ def test_new_pending_delivery_is_not_hidden_by_previous_processed_identity(tmp_p
     assert repeated['status'] == 'queued'
     summary = json.loads(app.store.run(started['run_id'])['summary_json'])
     assert summary['handoff']['next_run_id'] == successor['run_id']
+
+
+@pytest.mark.parametrize('legacy_state', ['preview', 'queued', 'reviewed'])
+def test_initial_refresh_keeps_unsubmitted_preview_out_but_accepts_new_delivery(tmp_path, legacy_state):
+    app = create_demo(tmp_path)
+    first = app.pending(batch_size=1)
+    task = finish_one(app, first)
+    original = app.store.details(task['id'])
+    app.close(first['run_id'])
+    app.store.set_status(task['id'], legacy_state)
+    fresh = app.pending(batch_size=1)
+    assert task['id'] not in [item['id'] for item in fresh['tasks']]
+    assert fresh['batch']['task_ids'] == [fresh['tasks'][0]['id']]
+    assert app.store.details(task['id'])['reviews'] == original['reviews']
+    assert app.store.details(task['id'])['submissions'] == []
+    app.close(fresh['run_id'])
+    app.api.rows[0]['received_at'] = '2026-10-26 12:00:00'
+    new_delivery = app.pending(batch_size=1)
+    replacement = next(item for item in new_delivery['tasks'] if item['request_id'] == task['request_id'])
+    assert replacement['id'] != task['id']
+    assert replacement['status'] == 'queued'

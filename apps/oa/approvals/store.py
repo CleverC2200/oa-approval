@@ -137,8 +137,14 @@ class Store:
                 if occurrence in processed:
                     continue
                 previous_task = self.connection.execute(
-                    "SELECT status FROM tasks WHERE occurrence=?", (occurrence,)).fetchone()
+                    """SELECT status,
+                        EXISTS(SELECT 1 FROM reviews WHERE task_id=tasks.id)
+                        AND NOT EXISTS(SELECT 1 FROM submissions WHERE task_id=tasks.id) AS unsubmitted_review
+                    FROM tasks WHERE occurrence=?""", (occurrence,)).fetchone()
                 if previous_task and previous_task['status'] == 'failed' and not retry_failed:
+                    continue
+                if previous_task and (previous_task['status'] == 'preview' or
+                        (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
                     continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",
