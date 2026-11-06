@@ -78,6 +78,31 @@ def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_s
             approval.store.connection.close()
 
 
+def fail_closed_review(root, run_id, task_id, review_id, reason):
+    from apps.oa.approvals.store import Store
+
+    if not (root / 'approval.sqlite3').is_file():
+        raise ValueError('run_not_found')
+    with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
+        _require_owner_missing(root)
+        require_production_main()
+        store = Store(root / 'approval.sqlite3')
+        try:
+            latest = store.latest_run()
+            if latest is None or latest['id'] != run_id:
+                raise ValueError('closed_run_mismatch')
+            tasks = store.tasks(run_id)
+            acceptance = submission_acceptance(store, run_id, tasks)
+            if any(task['status'] == 'preparing' for task in tasks):
+                raise ValueError('collection_unresolved')
+            if (acceptance['unknown_attempt_count'] or acceptance['unfinished_attempt_count']
+                    or acceptance['unverified_attempt_count']):
+                raise ValueError('submission_unresolved')
+            return store.fail_closed_review(run_id, task_id, review_id, reason)
+        finally:
+            store.connection.close()
+
+
 def finish_orphaned(root, run_id, *, collection_stopped_note=None):
     from apps.oa.approvals.store import Store
 

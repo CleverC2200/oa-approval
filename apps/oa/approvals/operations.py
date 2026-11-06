@@ -235,7 +235,6 @@ class Approval:
                     raise ValueError("overseas_authorization_required")
             if not isinstance(opinion,str) or not opinion.strip():
                 raise ValueError("opinion_required")
-            review = self.store.review(task_id,opinion,recognition,observations)
             delivery = None
             if task['workflow_key'] in finance_precheck.WORKFLOWS and finance_precheck.load_policy() is not None:
                 from apps.oa.approvals.sources.prediction import predict
@@ -243,13 +242,14 @@ class Approval:
                 delivery = forecast['delivery']
                 if forecast['finance_precheck']['status'] == 'not_configured':
                     raise ValueError('finance_precheck_configuration_changed')
+            if confirm_write and delivery is not None and delivery['action'] == 'blocked':
+                raise ValueError(delivery['reason'])
+            review = self.store.review(task_id,opinion,recognition,observations)
             if not confirm_write:
                 self.store.set_status(task_id,"preview")
                 return {"task_id":task_id,"status":"preview","review_id":review["id"],"opinion":opinion,
                         **({'delivery': delivery} if delivery is not None else {}),
                         **({"field_plan":plan} if plan is not None else {})}
-            if delivery is not None and delivery['action'] == 'blocked':
-                raise ValueError(delivery['reason'])
             current = self._api().pending_rows()
             matches = [row for row in current if occurrence_key(row) == task["occurrence"]]
             if len(matches) != 1:

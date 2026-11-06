@@ -120,6 +120,35 @@ def _all_nodes(payload):
     return nodes
 
 
+def _resolve_terminal_loop(request_id, nodes):
+    if len(nodes) < 4:
+        return
+    first, repeated, unknown, archive = nodes[-4:]
+    if (unknown['node_id'] != '-2' or unknown['state'] != 'unknown'
+            or first['node_id'] != repeated['node_id'] or first['state'] != 'predicted'
+            or repeated['state'] != 'predicted' or repeated['node_kind'] not in {'1', '2'}
+            or not repeated['operators_loaded'] or not repeated['operators']
+            or archive['state'] != 'predicted' or archive['node_kind'] != '3'):
+        return
+    from apps.oa.approvals.sources import official_sql
+
+    try:
+        rows = official_sql._query_rows('prediction_terminal_loop_links',
+            {'request_id': int(request_id), 'node_id': int(repeated['node_id'])}, require_connection=True)
+    except RuntimeError:
+        return
+    expected = {repeated['node_id']: ('0', repeated['node_kind']), archive['node_id']: ('1', '3')}
+    if (len(rows) != 2 or {str(row['destnodeid']) for row in rows} != set(expected)
+            or any(str(row['requestid']) != request_id or str(row['nodeid']) != repeated['node_id']
+                   or str(row['isreject']) != '0' or row['customworkflowid'] not in (None, 0, '0', '')
+                   or (str(row['isend']), str(row['node_type'])) != expected[str(row['destnodeid'])]
+                   for row in rows)):
+        return
+    unknown['resolution'] = {'kind': 'terminal_self_loop', 'loop_node_id': repeated['node_id'],
+        'archive_node_id': archive['node_id'], 'source': 'official_sql.prediction_terminal_loop_links',
+        'rows': rows}
+
+
 def predict(request_id, *, timeout=60, refresh=False):
     if not isinstance(request_id, str) or not re.fullmatch(r'[1-9][0-9]*', request_id):
         raise ValueError('prediction_request_id_invalid')
@@ -157,6 +186,8 @@ def predict(request_id, *, timeout=60, refresh=False):
             if node['state'] in {'passed', 'current', 'predicted'}:
                 node['operators'] = session.operators(request_id, node['node_id'], node['node_type'])
                 node['operators_loaded'] = True
+        if policy is not None:
+            _resolve_terminal_loop(request_id, nodes)
         complete = True
     except TimeoutError:
         pass

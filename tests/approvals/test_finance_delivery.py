@@ -135,3 +135,18 @@ def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path
     result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
     assert result['status'] == 'submitted' and 'delivery' not in result
     assert api.posts == [('101', '合成审核意见')]
+
+
+def test_prediction_block_before_real_submission_remains_failurable_without_losing_material(tmp_path, delivery):
+    app, api = service(tmp_path)
+    task_id = task(app)
+    material = app.inspect(task_id)['task']['material_file']
+    delivery.update(action='blocked', reason='finance_prediction_incomplete')
+    with pytest.raises(ValueError, match='finance_prediction_incomplete'):
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    assert app.inspect(task_id)['task']['status'] == 'reviewing'
+    assert app.inspect(task_id)['submissions'] == []
+    assert api.posts == []
+    run_id = app.store.get_task(task_id)['last_run_id']
+    assert app.fail(run_id, task_id, 'finance_prediction_incomplete')['status'] == 'failed'
+    assert app.inspect(task_id)['task']['material_file'] == material
