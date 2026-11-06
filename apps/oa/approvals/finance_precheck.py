@@ -7,7 +7,7 @@ from apps.oa.runtime.environment import stable_env_file
 
 
 WORKFLOWS = frozenset({'travel_expense', 'business_entertainment', 'business_support_fee',
-                       'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense'})
+                       'small_marketing_fee', 'general_expense'})
 FINANCE_NODE_NAMES = frozenset({'财务审核', '财务收单', '分支总账/结算会计审批'})
 
 
