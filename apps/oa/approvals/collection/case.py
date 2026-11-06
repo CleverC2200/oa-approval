@@ -13,6 +13,7 @@ from apps.oa.materials import resources
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
+from apps.oa.approvals.sources import invoice_titles
 from apps.oa.approvals.collection import invoice_originals
 from apps.oa.approvals.sources import official_sql
 from apps.oa.runtime import control as runtime_control
@@ -735,6 +736,13 @@ def _collect_case(
             and all(field['read_status'] == 'empty' for field in closure_attachment_fields)):
         empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
 
+    invoice_title_reference = None
+    if config.get('flow_key') in invoice_titles.WORKFLOWS:
+        try:
+            invoice_title_reference = invoice_titles.snapshot()
+        except invoice_titles.InvoiceTitleReadError:
+            raise CollectionFailure('invoice_title_reference_read_failed') from None
+
     return {
         **({"travel_read_exception": read_exception} if read_exception is not None else {}),
         "schema_version": 1,
@@ -747,6 +755,7 @@ def _collect_case(
         "attachment_deduplication": attachment_deduplication,
         "prepared": prepared,
         "authority_facts": authority_facts,
+        **({'invoice_title_reference': invoice_title_reference} if invoice_title_reference is not None else {}),
         **({"dealer_closure_evidence": closure_evidence} if closure_evidence is not None else {}),
         **({"attachment_scan": travel_scan} if travel_scan else {}),
         **({"invoice_evidence": invoice_evidence} if invoice_evidence else {}),
