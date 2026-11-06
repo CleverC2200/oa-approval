@@ -18,14 +18,22 @@ def delivery(monkeypatch):
     return value
 
 
-def task(app):
+def task(app, workflow_key='travel_expense'):
+    app.api.rows[0]['workflow_key'] = workflow_key
+    collector = app.collector
+    def collect(*args, **kwargs):
+        material = collector(*args, **kwargs)
+        return {**material, 'workflow_key': workflow_key}
+    app.collector = collect
     return app.collect(app.pending()['run_id'], agent_id='synthetic-reviewer',
-        expected_task_id=1, agent_workflow_key='travel_expense')['task_id']
+        expected_task_id=1, agent_workflow_key=workflow_key)['task_id']
 
 
-def test_matching_case_previews_then_transfers_with_persisted_target_and_never_submits(tmp_path, monkeypatch, delivery):
+@pytest.mark.parametrize('workflow_key', ['travel_expense', 'business_entertainment', 'business_support_fee',
+                                        'general_expense', 'small_marketing_fee'])
+def test_matching_case_previews_then_transfers_with_persisted_target_and_never_submits(tmp_path, monkeypatch, delivery, workflow_key):
     app, api = service(tmp_path)
-    task_id = task(app)
+    task_id = task(app, workflow_key)
     calls = []
     def prepare(request_id, plan):
         calls.append('prepare')
@@ -109,4 +117,21 @@ def test_negative_match_retains_normal_submit(tmp_path, delivery):
     task_id = task(app)
     delivery['action'] = 'submit'
     assert app.submit(task_id, opinion='合成审核意见', confirm_write=True)['status'] == 'submitted'
+    assert api.posts == [('101', '合成审核意见')]
+
+
+def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path, monkeypatch, delivery):
+    app, api = service(tmp_path)
+    task_id = task(app, 'tpm_small_marketing_fee')
+    def unexpected(*args, **kwargs):
+        pytest.fail('excluded workflow must not load finance policy, predict, or transfer')
+    monkeypatch.setattr(finance_precheck, 'load_policy', unexpected)
+    monkeypatch.setattr(prediction, 'predict', unexpected)
+    monkeypatch.setattr(api, 'prepare_transfer', unexpected, raising=False)
+    monkeypatch.setattr(api, 'transfer_and_verify', unexpected, raising=False)
+    preview = app.submit(task_id, opinion='合成审核意见')
+    assert preview['status'] == 'preview' and 'delivery' not in preview
+    assert api.posts == []
+    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    assert result['status'] == 'submitted' and 'delivery' not in result
     assert api.posts == [('101', '合成审核意见')]
