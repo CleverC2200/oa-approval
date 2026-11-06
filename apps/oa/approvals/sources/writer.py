@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from apps.oa.approvals import receipts
 from apps.oa.approvals.sources import auth
+from apps.oa.approvals.sources import transfer
 from apps.oa.approvals.sources import http as safe_http
 from apps.oa.approvals.sources.oa import OaApi
 from apps.oa.approvals.sources.oa import TIMEOUT
@@ -48,6 +49,40 @@ def _format_remark(remark: str) -> str:
 
 
 class FrozenWriterApi(OaApi):
+    def prepare_transfer(self, request_id, delivery):
+        return transfer.prepare(self, request_id, delivery)
+
+    def transfer_and_verify(self, request_id, remark, delivery):
+        started_at = datetime.now(timezone.utc).isoformat()
+        try:
+            request = urllib.request.Request(
+                self.base_url + transfer.ENDPOINT,
+                data=urllib.parse.urlencode({'requestId': request_id, 'forwardFlag': 3,
+                    'forwardResourceIds': delivery['recipient_id'], 'userId': delivery['operator_id'],
+                    'remark': _format_remark(remark)}).encode(),
+                headers={**self._headers(), 'Content-Type': 'application/x-www-form-urlencoded'}, method='POST')
+            with safe_http.urlopen(request, timeout=TIMEOUT) as response:
+                payload = _decode_json(response.read().decode('utf-8'))
+        except Exception:
+            return {**receipts.verification_result(False, False, submit_ok=False),
+                    'failure_code': receipts.TRANSPORT_UNKNOWN}
+        code = payload.get('code')
+        if code != 'SUCCESS':
+            rejected = code in {'PARAM_ERROR', 'NO_PERMISSION'}
+            return {**receipts.verification_result(False, False, submit_ok=False),
+                    'failure_code': receipts.SUBMIT_REJECTED if rejected else receipts.TRANSPORT_UNKNOWN}
+        for attempt in range(POSTCHECK_ATTEMPTS):
+            try:
+                result = transfer.verify(self, request_id, remark, started_at, delivery, submit_ok=True)
+            except Exception:
+                break
+            if result['postcheck_done_hit']:
+                return result
+            if attempt + 1 < POSTCHECK_ATTEMPTS:
+                time.sleep(POSTCHECK_INTERVAL_SECONDS)
+        return {**receipts.verification_result(False, False, submit_ok=True),
+                'failure_code': receipts.POSTCHECK_TIMEOUT}
+
     def _post_submit(self, request_id: str, remark: str) -> dict[str, Any]:
         request = urllib.request.Request(
             f"{self.base_url}{SUBMIT_ENDPOINT}",

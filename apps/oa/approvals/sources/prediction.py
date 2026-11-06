@@ -173,6 +173,7 @@ def predict(request_id, *, timeout=60, refresh=False):
         'initiator': initiator,
     }
     result['finance_precheck'] = finance_precheck.assess(result, policy)
+    result['delivery'] = finance_precheck.delivery_plan(result, policy)
     return result
 
 
@@ -210,5 +211,11 @@ def render_text(result):
                          f"{reason['approver_name']} ({reason['approver_id']})。")
     if assessment['uncertainties']:
         lines.append('判断缺口：' + '、'.join(assessment['uncertainties']))
+    delivery = result['delivery']
+    if delivery['action'] == 'transfer':
+        lines.append(f"建议审核后转办：{delivery['recipient_name']} ({delivery['recipient_id']})，"
+                     f"来源为第 {delivery['finance_node_sequence']} 项 {delivery['finance_node_name']}。")
+    elif delivery['action'] == 'blocked':
+        lines.append('处理动作待确认：' + delivery['reason'])
     lines.append('预测路径可能随表单和人员变化；未提交审批。')
     return '\n'.join(lines)

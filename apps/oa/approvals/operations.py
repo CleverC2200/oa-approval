@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals import receipts, retention
+from apps.oa.approvals import finance_precheck, receipts, retention
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
@@ -236,10 +236,20 @@ class Approval:
             if not isinstance(opinion,str) or not opinion.strip():
                 raise ValueError("opinion_required")
             review = self.store.review(task_id,opinion,recognition,observations)
+            delivery = None
+            if task['workflow_key'] in finance_precheck.WORKFLOWS and finance_precheck.load_policy() is not None:
+                from apps.oa.approvals.sources.prediction import predict
+                forecast = predict(task['request_id'], refresh=True)
+                delivery = forecast['delivery']
+                if forecast['finance_precheck']['status'] == 'not_configured':
+                    raise ValueError('finance_precheck_configuration_changed')
             if not confirm_write:
                 self.store.set_status(task_id,"preview")
                 return {"task_id":task_id,"status":"preview","review_id":review["id"],"opinion":opinion,
+                        **({'delivery': delivery} if delivery is not None else {}),
                         **({"field_plan":plan} if plan is not None else {})}
+            if delivery is not None and delivery['action'] == 'blocked':
+                raise ValueError(delivery['reason'])
             current = self._api().pending_rows()
             matches = [row for row in current if occurrence_key(row) == task["occurrence"]]
             if len(matches) != 1:
@@ -247,7 +257,14 @@ class Approval:
             if task['workflow_key'] == 'dealer_closure':
                 from apps.oa.approvals.sources import dealer_closure
                 dealer_closure.validate_submission(self._api(), material)
-            submission = self.store.begin_submission(task_id,review["id"])
+            writer = self.writer
+            if plan is None and writer is None:
+                from apps.oa.approvals.sources.writer import build_writer_api
+                writer = build_writer_api(source_policy=self.source_policy)
+            if delivery is not None and delivery['action'] == 'transfer':
+                delivery = writer.prepare_transfer(task['request_id'], delivery)
+            submission = self.store.begin_submission(task_id,review["id"],
+                result={'delivery': delivery} if delivery is not None else None)
             try:
                 if plan is not None:
                     if self.api is None and self.writer is None:
@@ -257,11 +274,9 @@ class Approval:
                         read_api = self._api()
                         write_api = self.writer if self.writer is not None else self.api
                     result = submit_overseas(read_api,write_api,task["request_id"],material,plan,origins=self.source_policy.attachments)
+                elif delivery is not None and delivery['action'] == 'transfer':
+                    result = writer.transfer_and_verify(task['request_id'], opinion, delivery)
                 else:
-                    writer = self.writer
-                    if writer is None:
-                        from apps.oa.approvals.sources.writer import build_writer_api
-                        writer = build_writer_api(source_policy=self.source_policy)
                     options = {}
                     if (task['workflow_key'] == 'dealer_closure'
                             and material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment'):
@@ -269,6 +284,8 @@ class Approval:
                     result = writer.submit_and_verify(task["request_id"],opinion, **options)
             except Exception:
                 result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            if delivery is not None:
+                result['delivery'] = delivery
             status = receipts.submission_status(result)
             self.store.finish_submission(submission,status,result)
             if status == "submitted":
@@ -293,6 +310,19 @@ class Approval:
             from apps.oa.approvals.sources.writer import handled_since
             details = self.store.details(task_id)
             submission = details["submissions"][-1]
+            delivery = json.loads(submission['result_json']).get('delivery')
+            if delivery is not None and delivery['action'] == 'transfer':
+                if confirmation_note is not None:
+                    raise ValueError('transfer_confirmation_not_supported')
+                from apps.oa.approvals.sources.transfer import verify
+                sent_review = next(review for review in details['reviews'] if review['id'] == submission['review_id'])
+                result = verify(self._api(), task['request_id'], sent_review['opinion'],
+                    submission['started_at'], delivery)
+                status = receipts.submission_status(result)
+                self.store.finish_submission(submission['id'], status, result)
+                if status == 'submitted':
+                    result['cleanup'] = retention.cleanup(self.store, execute=True, task_id=task_id)
+                return {'task_id': task_id, 'status': status, **result}
             if confirmation_note is not None and submission['id'] != expected_submission_id:
                 raise ValueError('confirmation_submission_changed')
             pending_rows = self._api().pending_rows()
