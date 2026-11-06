@@ -1,6 +1,6 @@
 ---
 name: oa-finance-preaudit
-description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使用当前任务的完整冻结材料形成六类财务和包装预审意见。财务只给意见，包装只校对文字。
+description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使用当前冻结材料形成财务、经销商关户和包装审核意见。关户按独立业务 Skill，包装只校对文字。
 ---
 
 # OA 财务预审
@@ -20,8 +20,9 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 | `tpm_small_marketing_fee` | [TPM 小额市场费](references/flows/tpm-small-marketing-fee.md) |
 | `general_expense` | [通用费用报销](references/flows/general-expense.md) |
 | `packaging_layout_approval` | [包装版面](references/flows/packaging-layout-approval.md) |
+| `dealer_closure` | [经销商关户](../oa-dealer-closure/SKILL.md) |
 
-六类财务同时完整读取[对公付款免支付截图](references/payment-screenshot-exemption.md)，先核对已有支付截图，仅在缺少有效截图时按共用规则核验豁免及相关补充材料。包装只读取自己的规则包。
+六类财务同时完整读取[对公付款免支付截图](references/payment-screenshot-exemption.md)，先核对已有支付截图，仅在缺少有效截图时按共用规则核验豁免及相关补充材料。包装只读取自己的规则包。关户完整读取本次冻结的关户Skill及其结果和数据入口参考，不加载费用报销的意见格式或付款截图条件。
 
 不在表中的 `workflow_key` 属于技术失败，停止当前单据，不猜测相近流程。
 
@@ -30,7 +31,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 
 审核者以 collect 返回的 `rule_file` 和 `rules_root` 为当前规则入口，完整读取本单冻结规则；六类财务同时完整读取本单冻结的共享付款与证据规则。
 
-读取冻结表单、所有相关明细、关联发票原件、资源清单和准备页。差旅完整读取 `authority_facts` 中的商旅页面正文、住宿订单详情及酒店地址，逐笔核对住宿、交通和其他行程；采集未取得必要详情时先补齐读取或记录具体读取失败。附件数量为 0 只表示没有可下载附件，页面资料仍须完整审核。文件名、顺序及相似金额不能代替资源归属和费用对应关系。财务图片使用 [DeepSeek 附件识别](../../../docs/agents/attachment-recognition.md) 的逐页文本及来源；高影响原值不稳定时定向复读。包装调用[中文图片校对](../audit-chinese-image-text/SKILL.md)直接观察原图，有 Excel 时逐字符对照。
+读取冻结表单、所有相关明细、关联发票原件、资源清单和准备页。差旅完整读取 `authority_facts` 中的商旅页面正文、住宿订单详情及酒店地址，逐笔核对住宿、交通和其他行程；采集未取得必要详情时先补齐读取或记录具体读取失败。表单附件数量为 0 时，仍按本次资源清单读取原件并完整审核页面资料。文件名、顺序及相似金额不能代替资源归属和费用对应关系。财务图片使用 [DeepSeek 附件识别](../../../docs/agents/attachment-recognition.md) 的逐页文本及来源；高影响原值不稳定时定向复读。包装调用[中文图片校对](../audit-chinese-image-text/SKILL.md)直接观察原图，有 Excel 时逐字符对照。
 
 结构化内容已足够或页面字节完全相同时可复用读取结果，仍分别保留每个逻辑资源和页面的归属。视频和不支持格式明确未读取。官方附件来源已完整取得且明确没有可下载附件时，识别工具返回 `status=skipped`，仅跳过附件识别，继续完整审核表单、明细及页面业务资料。读取结果按[执行接口的失败分类](references/execution-contract.md#读取结果与未完成审核)处理，保留实际失败阶段及适用流程分支。
 
@@ -39,6 +40,8 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 ## 形成并交回意见
 
 按匹配规则完成全部审核项和明细覆盖，再按[共享结果格式](references/result-contract.md)写签字意见。业务判定、项目名、顺序和状态继续采用当前冻结规则。
+
+关户意见采用其独立结果合同的✅/❗简版格式；审核者读取`dealer_closure_evidence`中的本轮BI、SAP、DMS及提交上下文，不用历史截图替代当前冻结事实。转发批注与正常审批的动作由已核提交上下文决定。
 
 将最终意见保存为本单独立文本文件。附件识别报告保留真实资源、页码/区域/单元格位置及来源；人工复读、配对和验算依据按[执行接口](references/execution-contract.md)记录为附件观察，与意见一并交回主 Agent，使用适用的 `--recognition-file`、`--observations-file` 送入现有 `submit`，两者可同时提供。仅表单或商旅页面的事实保留冻结来源与本次核对记录，不虚构附件归属。主 Agent 按批次执行规则保存意见及适用的识别、观察文件，按当前授权提交或预览。
 

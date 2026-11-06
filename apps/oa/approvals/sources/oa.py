@@ -124,6 +124,10 @@ def _pending_case(row: dict[str, Any]) -> dict[str, str]:
         ).strip(),
         **({"task_instance_id": str(row.get("taskId") or row.get("taskid") or row.get("workitemId"))}
            if row.get("taskId") or row.get("taskid") or row.get("workitemId") else {}),
+        **({"task_instance_id": str(row["cid"]), "operator_node_id": str(row.get("nodeid") or ""),
+            "delivery_kind": "comment" if str(row.get("isremark")) == "1" else "approval",
+            "view_type": str(row.get("viewtype") or "")}
+           if workflow["workflow_id"] == "195127" and row.get("cid") else {}),
     }
 
 
@@ -274,6 +278,8 @@ class OaApi:
                 raise RuntimeError("pending_queue_incomplete")
             for row in page:
                 case = _pending_case(row)
+                if case.get("delivery_kind") == "comment" and case.get("view_type") == "-2":
+                    continue
                 request_id = case["request_id"]
                 if not request_id or request_id in seen_request_ids:
                     continue

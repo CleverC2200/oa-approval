@@ -12,6 +12,10 @@ import socket
 import subprocess
 import sys
 import threading
+import time
+from uuid import uuid4
+
+from apps.oa.runtime import collection_budget, control
 
 from apps.oa.runtime.paths import PROJECT_ROOT
 from apps.oa.approvals.client import emit, failure, socket_path
@@ -20,6 +24,8 @@ from apps.oa.approvals.status import closeout_blockers, submission_acceptance
 
 
 _STDIN_EOF = object()
+COLLECTION_TIMEOUT_SECONDS = 900
+COLLECTION_STOP_SECONDS = 2
 
 
 @contextmanager
@@ -72,7 +78,7 @@ def postcheck_without_owner(root, task_id, *, confirmation_note=None, expected_s
             approval.store.connection.close()
 
 
-def finish_orphaned(root, run_id):
+def finish_orphaned(root, run_id, *, collection_stopped_note=None):
     from apps.oa.approvals.store import Store
 
     database = root / 'approval.sqlite3'
@@ -89,13 +95,13 @@ def finish_orphaned(root, run_id):
             if latest['status'] not in {'running', 'blocked'}:
                 raise ValueError('run_not_active')
             tasks = store.tasks(run_id)
-            if any(task['status'] == 'preparing' for task in tasks):
+            if any(task['status'] == 'preparing' for task in tasks) and not (collection_stopped_note and collection_stopped_note.strip()):
                 raise ValueError('collection_unresolved')
             acceptance = submission_acceptance(store, run_id, tasks)
             if any(task['status'] in {'submitting', 'unknown'} for task in tasks) or any(
                     not submission['resolved'] for task in acceptance['tasks'] for submission in task['submissions']):
                 raise ValueError('submission_unresolved')
-            result = store.close(run_id)
+            result = store.close(run_id, collection_stopped_note=collection_stopped_note)
             server_path.unlink(missing_ok=True)
             return {**result, 'reason': 'owner_missing'}
         finally:
@@ -107,7 +113,9 @@ def dispatch(approval, run_id, request):
     if operation == 'collect':
         return approval.collect(run_id, workflow_key=request.get('workflow_key'), agent_id=request.get('agent_id'),
                                 expected_task_id=request.get('expected_task_id'),
-                                agent_workflow_key=request.get('agent_workflow_key'))
+                                agent_workflow_key=request.get('agent_workflow_key'),
+                                **({'travel_read_exception': request['travel_read_exception']}
+                                   if request.get('travel_read_exception') is not None else {}))
     if operation == 'status':
         return {'run_id': run_id, 'status': approval.store.run(run_id)['status']}
     if operation in {'submit', 'preview'}:
@@ -122,9 +130,10 @@ def dispatch(approval, run_id, request):
         return approval.fail(run_id, request['task_id'], request['reason'])
     raise ValueError('unknown_operation')
 
-def collect_process(root, demo, run_id, request, output, source_policy):
+def collect_process(root, demo, run_id, request, output, source_policy, phase_file=None):
     from apps.oa.approvals.operations import Approval
 
+    os.setsid()
     approval = None
     try:
         if demo:
@@ -132,7 +141,8 @@ def collect_process(root, demo, run_id, request, output, source_policy):
             approval = create_demo(root)
         else:
             approval = Approval(root, source_policy=source_policy)
-        result = dispatch(approval, run_id, request)
+        with collection_budget.tracking(phase_file):
+            result = dispatch(approval, run_id, request)
     except Exception as error:
         result = failure(error)
     finally:
@@ -152,18 +162,73 @@ def reply(client, result):
         client.close()
 
 class _Collection:
-    def __init__(self, process, incoming, respond, store, run_id):
+    def __init__(self, process, incoming, respond, store, run_id, phase_file=None):
         self.process = process
         self.incoming = incoming
         self._respond = respond
         self._store = store
         self._run_id = run_id
+        self.started = time.monotonic()
+        self.timed_out = False
+        self.phase_file = phase_file
+
+    def phase(self):
+        raw = control.read_control_bytes(self.phase_file) if self.phase_file is not None else None
+        return json.loads(raw) if raw is not None else None
+
+    def status(self):
+        elapsed = time.monotonic() - self.started
+        state = self.phase()
+        if state is not None:
+            state = {**state, "remaining_seconds": round(max(0, state["deadline"] - time.monotonic()), 1)}
+        return {"pid": self.process.pid, "elapsed_seconds": round(elapsed, 1),
+                "timeout_seconds": COLLECTION_TIMEOUT_SECONDS,
+                "deadline_exceeded": self.expired(), "phase": state}
+
+    def stop(self):
+        stopped = set()
+        pending = {self.process.pid}
+        try:
+            while pending:
+                for pid in pending:
+                    try:
+                        os.kill(pid, signal.SIGSTOP)
+                    except ProcessLookupError:
+                        pass
+                stopped.update(pending)
+                snapshot = subprocess.run(['ps', '-axo', 'pid=,ppid=,pgid='], capture_output=True,
+                                          text=True, check=True, timeout=2)
+                parents = [tuple(map(int, row.split())) for row in snapshot.stdout.splitlines()]
+                pending = {pid for pid, parent, group in parents
+                           if (parent in stopped or group == self.process.pid) and pid not in stopped}
+        finally:
+            try:
+                if os.getpgid(self.process.pid) == self.process.pid:
+                    os.killpg(self.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            for pid in reversed(sorted(stopped)):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            self.process.join(COLLECTION_STOP_SECONDS)
+
+    def expired(self):
+        state = self.phase()
+        deadline = self.started + COLLECTION_TIMEOUT_SECONDS
+        if state is not None:
+            deadline = min(deadline, state["deadline"])
+        return time.monotonic() >= deadline
 
     @classmethod
     def start(cls, root, demo, run_id, request, respond, store, source_policy):
         context = multiprocessing.get_context('spawn')
         receiver, output = context.Pipe(duplex=False)
-        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy))
+        directory = root / 'collection-states'
+        directory.mkdir(exist_ok=True, mode=0o700)
+        phase_file = directory / f'{uuid4().hex}.json'
+        process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy, phase_file))
         try:
             process.start()
         except Exception:
@@ -172,18 +237,40 @@ class _Collection:
             process.close()
             raise
         output.close()
-        return cls(process, receiver, respond, store, run_id)
+        return cls(process, receiver, respond, store, run_id, phase_file)
 
     def complete(self):
+        received = []
+
+        def receive():
+            try:
+                received.append(self.incoming.recv())
+            except (EOFError, OSError):
+                pass
+
+        reader = threading.Thread(target=receive, daemon=True)
+        reader.start()
         try:
-            result = self.incoming.recv()
-        except EOFError:
-            for task in self._store.tasks(self._run_id):
-                if task['status'] == 'preparing':
-                    self._store.fail_collection(task['id'], 'collection_process_failed')
-            result = {'status': 'failed', 'error': 'collection_process_failed'}
+            while reader.is_alive() and not self.expired():
+                reader.join(0.1)
+            if reader.is_alive():
+                self.timed_out = True
+                self.stop()
+                reader.join(COLLECTION_STOP_SECONDS)
+            if not received:
+                stage = self.phase()
+                reason = "collection_deadline" if self.timed_out else "collection_process_failed"
+                if self.timed_out and stage is not None:
+                    reason += ":" + stage["phase"]
+                for task in self._store.tasks(self._run_id):
+                    if task['status'] == 'preparing':
+                        self._store.fail_collection(task['id'], reason)
+                result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
+            else:
+                result = received[0]
         finally:
-            self.process.join()
+            self.process.join(COLLECTION_STOP_SECONDS)
+            self.stop()
             self.incoming.close()
             self.process.close()
         self._respond(result)
@@ -226,9 +313,9 @@ class _RoundSession:
                     raise ValueError('run_mismatch')
                 if request.get('require_drained'):
                     store = self._approval.store
-                    blockers = closeout_blockers(submission_acceptance(store, self._run_id, store.tasks(self._run_id)))
-                    if self._collection is not None and 'tasks_inflight' not in blockers:
-                        blockers.insert(0, 'tasks_inflight')
+                    blockers = closeout_blockers(
+                        submission_acceptance(store, self._run_id, store.tasks(self._run_id)),
+                        collection_active=self._collection is not None)
                     if blockers:
                         respond({'run_id': self._run_id, 'status': 'refused',
                                  'reason': 'run_not_drained', 'blockers': blockers})
@@ -237,6 +324,10 @@ class _RoundSession:
                 self._handoff = request.get('handoff', False)
                 if source == 'socket':
                     self._finish_responders.append(respond)
+            elif request.get('operation') == 'status':
+                respond({**dispatch(self._approval, self._run_id, request),
+                         'phase': 'finishing' if self._finishing else 'running',
+                         'collection': self._collection.status() if self._collection is not None else None})
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
             else:
@@ -264,6 +355,12 @@ class _RoundSession:
     def _close_if_drained(self):
         if self._finishing and self._collection is None:
             self.shutdown()
+
+    def check_deadline(self):
+        if self._collection is not None and self._collection.expired():
+            self._collection.timed_out = True
+            self._collection.stop()
+            self.collection_ready()
 
     def collection_ready(self):
         self._drain_collection()
@@ -324,7 +421,7 @@ def require_production_main(project=None):
         raise ValueError('production_main_not_synced')
 
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None,
-          continue_from=None):
+          continue_from=None, retry_failed=False):
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
@@ -339,7 +436,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
         else:
             approval = Approval(root, source_policy=source_policy)
         started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
-                                   continue_from=continue_from)
+                                   continue_from=continue_from, retry_failed=retry_failed)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
         server = None
@@ -382,6 +479,17 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                     while not session.closed:
                         if stopping.is_set():
                             return 130
+                        session.check_deadline()
+                        if session.closed:
+                            return 0
+                        incoming = session.collection_pipe
+                        current_pipe = incoming.fileno() if incoming is not None else None
+                        if current_pipe != watched_pipe:
+                            if watched_pipe is not None:
+                                selector.unregister(watched_pipe)
+                            if current_pipe is not None:
+                                selector.register(current_pipe, selectors.EVENT_READ, 'collection')
+                            watched_pipe = current_pipe
                         for selected, _events in selector.select(timeout=0.5):
                             if stopping.is_set():
                                 return 130
@@ -399,13 +507,6 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                                                respond=lambda result, client=client: reply(client, result))
                             if session.closed:
                                 return 0
-                            incoming = session.collection_pipe
-                            current_pipe = incoming.fileno() if incoming is not None else None
-                            if current_pipe != watched_pipe:
-                                if watched_pipe is not None:
-                                    selector.unregister(watched_pipe)
-                                if current_pipe is not None:
-                                    selector.register(current_pipe, selectors.EVENT_READ, 'collection')
-                                watched_pipe = current_pipe
+
         finally:
             session.shutdown()

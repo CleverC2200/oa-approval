@@ -38,7 +38,7 @@ def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict
         if not paths:
             raise RuntimeError('resource_ownership_untrusted')
         result.append({
-            'id': file_id, 'name': f'invoice-original-{file_id}.pdf',
+            'id': file_id, 'name': f'invoice-original-{file_id}.{source.get("file_type", "pdf")}',
             'downloadUrl': base_url + '/weaver/weaver.file.FileDownload?fileid=' + file_id,
             '_trusted_source_field_path': paths[0],
             '_trusted_source_field_name': '关联发票原件',
@@ -105,9 +105,16 @@ def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial)
     resource_id = source['native_file_id']
     resource = [item for item in resource_rows if item.get('resource_id') == resource_id]
     coverage = prepared.coverage(resource_id)
-    if (len(resource) != 1 or resource[0].get('media_type') != 'application/pdf'
-            or coverage is None or coverage.manifest_count != 1 or coverage.status != 'pdf_rendered'
-            or not coverage.direct_image_count or coverage.declared_page_count != coverage.direct_image_count
+    file_type = source.get('file_type', 'pdf')
+    if file_type not in {'pdf', 'jpg'} or coverage is None:
+        raise RuntimeError('attachment_content_incomplete')
+    image = file_type == 'jpg'
+    media_type = 'image/jpeg' if image else 'application/pdf'
+    statuses = {'image', 'image_converted'} if image else {'pdf_rendered'}
+    page_count = 1 if image else coverage.declared_page_count
+    if (len(resource) != 1 or resource[0].get('media_type') != media_type
+            or coverage.manifest_count != 1 or coverage.status not in statuses
+            or not coverage.direct_image_count or page_count != coverage.direct_image_count
             or coverage.declared_image_count != coverage.direct_image_count
             or coverage.direct_source_sha256 is None):
         raise RuntimeError('attachment_content_incomplete')

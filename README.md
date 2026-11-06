@@ -25,6 +25,19 @@ bash .codex/python.sh -m apps.oa.references --help
 
 审批负责轮次、任务、材料冻结、预览、提交与回查；材料负责完整准备、读取、识别和阅读副本；参考资料负责当前 TPM 报价导入。具体参数、副作用和结果见各操作 `--help`。能力内部直接组合函数，正常使用无需临时 Python 或 SQL。
 
+## 流程智能预测
+
+无需启动审批轮次，直接查询 OA 原生的后续流转预测：
+
+```bash
+bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID"
+bash .codex/python.sh -m apps.oa approvals predict --request-id "$OA_REQUEST_ID" --format json
+```
+
+使用私有配置中既有应用的 OA API 认证，核对当前账号后，返回全部节点及办理人的姓名和 ID，区分已经过、当前、预测和未知状态。JSON 同时保留完整原始响应，字段含义见[接口合同](docs/agents/oa-api.md#流程智能预测)。无需浏览器、Cookie 或页面操作；不另行注册应用。预测可能生成或更新 OA 的预测缓存，不提交审批或保存表单。等待时限和重新预测参数见 `predict --help`。
+
+财务前置判断读取 OA 私有认证文件同目录的 `prediction-finance-precheck.json`，使用指定审批人和固定发起人名单。`predict` 只输出命中原因及建议处理动作，不写审批。六类财务预审在显式授权写入时重新预测，命中后携带签字意见转办给后续首个人工财务节点的唯一办理人；路径或人员不明确时暂停。规则、配置格式及转办验收边界见[接口合同](docs/agents/oa-api.md#财务前置标记)。真实名单保留在私有配置，不提交源码仓库。
+
 ## 审批运行
 
 开发分支可启动合成轮次：
@@ -48,9 +61,11 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 变量取本次工具返回的实际 Agent、任务、流程和轮次身份。真实 start 仅允许干净、已发布且与 origin/main 一致的 main，启动前 fetch 核对；运行中的 checkout 不自动更新。真实运行将 root 设为本项目 runtime 的绝对路径。默认目录不受启动 cwd 影响，锁与账本按所选 root 协调。
 
-提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
+提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --require-drained --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
 
 批次范围、FIFO、在途数量、Agent 轮换和审核规则统一见[财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)。海外规则见[海外 Skill](.agents/skills/oa-overseas-invoice/SKILL.md)。Python 不替 Agent 形成财务业务结论。
+
+经销商关户使用`dealer_closure`进入同一批次与提交入口，按[关户 Skill](.agents/skills/oa-dealer-closure/SKILL.md)核对本轮冻结BI、正式SAP、DMS及表单，输出✅/❗简版意见。正常审批与未阅转发批注分别核对提交上下文，后者反馈意见并核验原流程未推进；已阅记录不重复列入。私有连接配置见Skill数据入口说明。
 
 ## 材料与参考资料
 

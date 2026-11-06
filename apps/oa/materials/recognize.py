@@ -262,6 +262,16 @@ def _png_crop(image, box) -> bytes:
     return encoded.getvalue()
 
 
+def _split_image_box(box):
+    x0, y0, x1, y1 = box
+    width, height = x1 - x0, y1 - y0
+    if width >= height:
+        middle, overlap = (x0 + x1) // 2, min(64, width // 4)
+        return (x0, y0, middle + overlap, y1), (middle - overlap, y0, x1, y1)
+    middle, overlap = (y0 + y1) // 2, min(64, height // 4)
+    return (x0, y0, x1, middle + overlap), (x0, middle - overlap, x1, y1)
+
+
 def _image_tiles(raw: bytes, *, rotate: int = 0):
     image = _open_image(raw)
     with image:
@@ -294,16 +304,8 @@ def _image_tiles(raw: bytes, *, rotate: int = 0):
                 else:
                     yield box, block
                     return
-            if width >= height:
-                middle = (x0 + x1) // 2
-                overlap = min(64, width // 4)
-                yield from split((x0, y0, middle + overlap, y1))
-                yield from split((middle - overlap, y0, x1, y1))
-            else:
-                middle = (y0 + y1) // 2
-                overlap = min(64, height // 4)
-                yield from split((x0, y0, x1, middle + overlap))
-                yield from split((x0, middle - overlap, x1, y1))
+            for region in _split_image_box(box):
+                yield from split(region)
 
         yield from split((0, 0, image.width, image.height))
 
@@ -586,6 +588,8 @@ class _RecognitionSession:
             result = {**current, 'answer': previous['answer'], 'reused_from': previous['part_id']}
             if 'image_tiles' in previous:
                 result['image_tiles'] = previous['image_tiles']
+            if 'truncated_responses' in previous:
+                result['truncated_responses'] = previous['truncated_responses']
             return result
         answer, usage = self._request_image(blocks, key)
         result = {**current, 'answer': answer, 'usage': usage}
@@ -604,7 +608,9 @@ class _RecognitionSession:
 
     def _request_image(self, blocks, key: str) -> tuple[str, dict]:
         tiles = []
-        for box, block in blocks:
+        usages = []
+
+        def read_block(box, block, depth=0, png_sha256=None):
             if box is not None:
                 self._current['image_tiles'] = tiles
                 self._current['failed_tile_box'] = list(box)
@@ -616,25 +622,52 @@ class _RecognitionSession:
                                      {'type': 'text', 'text': self._question(box)}, block]}]}
             timeout = min(self.options.timeout_seconds, max(.1, self.deadline - self._monotonic()))
             response = self._post(body, key=key, timeout=timeout)
+            diagnostic = _response_diagnostic(response)
+            usages.append(diagnostic['usage'])
             try:
                 answer, usage = _answer(response)
             except ValueError:
-                self.report['failed_response'] = _response_diagnostic(response)
+                self.report['failed_response'] = diagnostic
+                if diagnostic['finish_reason'] == 'length' and depth < 3:
+                    raw = _read(Path(self._current['source_image_path']))
+                    if _digest(raw) != self._current['content_sha256']:
+                        raise ValueError('attachment_page_changed')
+                    with _open_image(_png_reading_copy(raw)) as image:
+                        bounds = box if box is not None else (0, 0, *image.size)
+                        x0, y0, x1, y1 = bounds
+                        width, height = x1 - x0, y1 - y0
+                        if getattr(image, 'n_frames', 1) == 1 and max(width, height) > 256:
+                            self._current.setdefault('truncated_responses', []).append(
+                                {'box': list(bounds), **diagnostic})
+                            self.report.pop('failed_response', None)
+                            for region in _split_image_box(bounds):
+                                cropped = _png_crop(image, region)
+                                for child, child_block in _image_tiles(cropped, rotate=self.options.selection.rotate):
+                                    absolute = region if child is None else (
+                                        region[0] + child[0], region[1] + child[1],
+                                        region[0] + child[2], region[1] + child[3])
+                                    read_block(absolute, child_block, depth + 1,
+                                               _digest(cropped if child is None else _png_crop(image, absolute)))
+                            return None, {}
                 raise
             if box is not None:
                 tile = {'box': list(box), 'answer': answer, 'usage': usage}
                 if self.options.selection.region is not None:
-                    tile['png_sha256'] = self._current['region_png_sha256']
+                    tile['png_sha256'] = png_sha256 or self._current['region_png_sha256']
                 tiles.append(tile)
+            return answer, usage
+
+        for box, block in blocks:
+            answer, usage = read_block(box, block)
         if tiles:
             self._current.pop('failed_tile_box', None)
             answer = ('以下回答仅覆盖指定区域，不代表整图或整单读取完成。\n\n'
                       if self.options.selection.region is not None else
                       '以下分区属于同一原图，重叠内容不代表多笔或多份证据。\n\n')
             answer += '\n\n'.join(f'分区 {tile["box"]}：\n{tile["answer"]}' for tile in tiles)
-            usage = {name: sum(tile['usage'][name] for tile in tiles)
+            usage = {name: sum(item[name] for item in usages)
                      for name in ('prompt_tokens', 'completion_tokens', 'total_tokens')
-                     if all(type(tile['usage'].get(name)) is int for tile in tiles)}
+                     if all(type(item.get(name)) is int for item in usages)}
         return answer, usage
 
     def _write_observations(self) -> None:

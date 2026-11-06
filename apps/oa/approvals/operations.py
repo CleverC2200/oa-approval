@@ -13,7 +13,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals import receipts, retention
+from apps.oa.approvals import finance_precheck, receipts, retention
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
@@ -98,12 +98,14 @@ class Approval:
         self.configs = self.configs if self.configs is not None else flow.load_all_configs()
         return api.build_api(self.configs[0],source_policy=self.source_policy)
 
-    def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None):
+    def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None, retry_failed=False):
         continuation = self.store.continuation_options(continue_from)
         if continuation is not None:
-            if any(value is not None for value in (workflows, batch_size, request_ids)):
+            if retry_failed or any(value is not None for value in (workflows, batch_size, request_ids)):
                 raise ValueError('continuation_selection_changed')
             workflows, batch_size, request_ids = (continuation[key] for key in ('workflows', 'batch_size', 'request_ids'))
+        if retry_failed and not request_ids:
+            raise ValueError("retry_failed_requires_request_ids")
         rows = []
         for raw in self._api().pending_rows():
             item = dict(raw)
@@ -126,7 +128,7 @@ class Approval:
                 continue
             item["workflow_key"] = key
             rows.append(item)
-        run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from,
+        run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from, retry_failed=retry_failed,
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids})
         cleanup = retention.cleanup(self.store, execute=True)
         result = {"run_id":run,"tasks":self.store.tasks(run)}
@@ -136,7 +138,15 @@ class Approval:
             result["batch"] = json.loads(self.store.run(run)["summary_json"])["batch"]
         return result
 
-    def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
+    def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None, travel_read_exception=None):
+        if travel_read_exception is not None:
+            task = self.store.get_task(expected_task_id)
+            if (not isinstance(travel_read_exception, dict)
+                    or task["workflow_key"] != "travel_expense"
+                    or travel_read_exception.get("request_id") != task["request_id"]
+                    or not isinstance(travel_read_exception.get("authorization_note"), str)
+                    or not travel_read_exception["authorization_note"].strip()):
+                raise ValueError("travel_read_exception_invalid")
         decision = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
             agent_workflow_key=agent_workflow_key)
         if decision["status"] != "claimed":
@@ -154,7 +164,8 @@ class Approval:
                         from apps.oa.approvals.collection.case import collect_case
                         self.collector = partial(collect_case, source_policy=self.source_policy)
                     material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
-                        allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared")
+                        allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared",
+                        **({"travel_read_exception": travel_read_exception} if travel_read_exception is not None else {}))
                     if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
                         raise ValueError("material_identity_changed")
                     if task["workflow_key"] == "tpm_small_marketing_fee":
@@ -225,15 +236,35 @@ class Approval:
             if not isinstance(opinion,str) or not opinion.strip():
                 raise ValueError("opinion_required")
             review = self.store.review(task_id,opinion,recognition,observations)
+            delivery = None
+            if task['workflow_key'] in finance_precheck.WORKFLOWS and finance_precheck.load_policy() is not None:
+                from apps.oa.approvals.sources.prediction import predict
+                forecast = predict(task['request_id'], refresh=True)
+                delivery = forecast['delivery']
+                if forecast['finance_precheck']['status'] == 'not_configured':
+                    raise ValueError('finance_precheck_configuration_changed')
             if not confirm_write:
                 self.store.set_status(task_id,"preview")
                 return {"task_id":task_id,"status":"preview","review_id":review["id"],"opinion":opinion,
+                        **({'delivery': delivery} if delivery is not None else {}),
                         **({"field_plan":plan} if plan is not None else {})}
+            if delivery is not None and delivery['action'] == 'blocked':
+                raise ValueError(delivery['reason'])
             current = self._api().pending_rows()
             matches = [row for row in current if occurrence_key(row) == task["occurrence"]]
             if len(matches) != 1:
                 raise ValueError("submission_target_changed")
-            submission = self.store.begin_submission(task_id,review["id"])
+            if task['workflow_key'] == 'dealer_closure':
+                from apps.oa.approvals.sources import dealer_closure
+                dealer_closure.validate_submission(self._api(), material)
+            writer = self.writer
+            if plan is None and writer is None:
+                from apps.oa.approvals.sources.writer import build_writer_api
+                writer = build_writer_api(source_policy=self.source_policy)
+            if delivery is not None and delivery['action'] == 'transfer':
+                delivery = writer.prepare_transfer(task['request_id'], delivery)
+            submission = self.store.begin_submission(task_id,review["id"],
+                result={'delivery': delivery} if delivery is not None else None)
             try:
                 if plan is not None:
                     if self.api is None and self.writer is None:
@@ -243,14 +274,18 @@ class Approval:
                         read_api = self._api()
                         write_api = self.writer if self.writer is not None else self.api
                     result = submit_overseas(read_api,write_api,task["request_id"],material,plan,origins=self.source_policy.attachments)
+                elif delivery is not None and delivery['action'] == 'transfer':
+                    result = writer.transfer_and_verify(task['request_id'], opinion, delivery)
                 else:
-                    writer = self.writer
-                    if writer is None:
-                        from apps.oa.approvals.sources.writer import build_writer_api
-                        writer = build_writer_api(source_policy=self.source_policy)
-                    result = writer.submit_and_verify(task["request_id"],opinion)
+                    options = {}
+                    if (task['workflow_key'] == 'dealer_closure'
+                            and material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment'):
+                        options['dealer_material'] = material
+                    result = writer.submit_and_verify(task["request_id"],opinion, **options)
             except Exception:
                 result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
+            if delivery is not None:
+                result['delivery'] = delivery
             status = receipts.submission_status(result)
             self.store.finish_submission(submission,status,result)
             if status == "submitted":
@@ -275,11 +310,32 @@ class Approval:
             from apps.oa.approvals.sources.writer import handled_since
             details = self.store.details(task_id)
             submission = details["submissions"][-1]
+            delivery = json.loads(submission['result_json']).get('delivery')
+            if delivery is not None and delivery['action'] == 'transfer':
+                if confirmation_note is not None:
+                    raise ValueError('transfer_confirmation_not_supported')
+                from apps.oa.approvals.sources.transfer import verify
+                sent_review = next(review for review in details['reviews'] if review['id'] == submission['review_id'])
+                result = verify(self._api(), task['request_id'], sent_review['opinion'],
+                    submission['started_at'], delivery)
+                status = receipts.submission_status(result)
+                self.store.finish_submission(submission['id'], status, result)
+                if status == 'submitted':
+                    result['cleanup'] = retention.cleanup(self.store, execute=True, task_id=task_id)
+                return {'task_id': task_id, 'status': status, **result}
             if confirmation_note is not None and submission['id'] != expected_submission_id:
                 raise ValueError('confirmation_submission_changed')
             pending_rows = self._api().pending_rows()
             pending = any(str(row.get("request_id")) == task["request_id"] for row in pending_rows)
-            handled = handled_since(self._api().handled_rows(),task["request_id"],submission["started_at"])
+            handled = None
+            if task['workflow_key'] == 'dealer_closure':
+                material = json.loads(task['material_json'])
+                if material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment':
+                    from apps.oa.approvals.sources import dealer_closure
+                    handled = dealer_closure.feedback_verified(self._api(), material,
+                        details['reviews'][-1]['opinion'], submission['started_at'])
+            if handled is None:
+                handled = handled_since(self._api().handled_rows(),task['request_id'],submission['started_at'])
             fields_match = None
             if task["workflow_key"] == "overseas_invoice":
                 review = details["reviews"][-1]

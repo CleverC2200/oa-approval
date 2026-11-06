@@ -6,12 +6,24 @@ from typing import Any
 import re
 import urllib.parse
 
-from apps.oa.approvals.sources import travel_hotel
+from apps.oa.approvals.sources import travel_hotel, travel_invoices
 
 
 DISCOVERY_FAILED = "travel_attachment_discovery_failed"
 PENDING_TEXT_MARKERS = ("系统正在处理中，请稍后", "正在处理中，请稍后")
 ATTACHMENT_ID_RE = re.compile(r"/opera/(?:getFile|share/open)/(\d+)/", re.IGNORECASE)
+
+
+def sso_rejection(url: str, origin: str) -> str:
+    parsed = urllib.parse.urlsplit(url)
+    if (parsed.hostname != urllib.parse.urlsplit(origin).hostname
+            or parsed.path != "/fcc/default/login/ssoError.html"):
+        return ""
+    message = urllib.parse.parse_qs(parsed.query).get("errorMsg", [""])[0]
+    return {
+        "非单点登录场景，请联系管理员": "travel_sso_account_missing",
+        "未绑定法人公司，请联系管理员": "travel_sso_company_missing",
+    }.get(message, "travel_sso_rejected")
 
 
 def attachment_id(url: str) -> str:
@@ -65,6 +77,7 @@ class CandidateObservation:
     browser: str = ""
     diagnostics: tuple[dict, ...] = ()
     source_facts: tuple[dict, ...] = ()
+    order_invoices: tuple[dict, ...] = ()
 
     @classmethod
     def failure(
@@ -206,6 +219,24 @@ class TravelEvidence:
                         "discovery_ref": f"travel_platform:{flow_mark}",
                     }
                 )
+        manual_targets = list(targets)
+        try:
+            invoice_targets, invoice_facts = travel_invoices.project(
+                [record for observation in valid for record in observation.order_invoices], fields
+            )
+        except ValueError as error:
+            return cls(errors=(TravelReadError(str(error), "商旅订单发票未能完成读取或归属核对",
+                diagnostics=tuple(diagnostic for observation in valid
+                    for record in observation.order_invoices
+                    for diagnostic in record.get("diagnostics", []))),))
+        for item in invoice_targets:
+            resource_id = "travel_platform:" + item["id"]
+            if resource_id not in seen_ids:
+                seen_ids.add(resource_id)
+                targets.append({**item, "id": resource_id, "allowExtraDownloadHost": True,
+                                "source": "travel_platform", "source_request_id": str(request_id),
+                                "discovery_ref": f"travel_platform:{flow_mark}"})
+        page_fields.extend(invoice_facts)
         page_fields.extend(
             travel_hotel.fields_for_details(
                 fields,
@@ -246,10 +277,10 @@ class TravelEvidence:
         if (
             inventory
             or any(item.scan_status == "empty" for item in valid)
-            and not targets
+            and not manual_targets
         ):
             scan = {
-                "status": "resources_found" if targets else "empty",
+                "status": "resources_found" if manual_targets else "empty",
                 "source": "travel_platform",
                 "source_request_id": str(request_id),
                 "discovery_ref": f"travel_platform:{flow_mark}",

@@ -25,9 +25,14 @@ def batch_status(store, run, tasks, owner):
     occupied = sum(task['status'] in INFLIGHT_STATUSES for task in tasks)
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
-    blockers = closeout_blockers(all_acceptance)
-    owner_released = (not owner['reachable'] and owner.get('reason') != 'response_timeout'
-                      or owner['reachable'] and owner['run_id'] != run['id'])
+    owner_matches = owner.get('reachable') is True and owner.get('run_id') == run['id']
+    blockers = closeout_blockers(all_acceptance,
+        collection_active=owner_matches and owner.get('collection') is not None)
+    if owner_state_unconfirmed(owner):
+        blockers.append('owner_state_unconfirmed')
+    owner_released = (owner.get('reachable') is False
+                      or owner.get('reachable') is True and owner.get('run_id') is not None
+                      and owner['run_id'] != run['id'])
     complete = run['status'] == 'closed' and owner_released
     return {
         'acceptance': acceptance,
@@ -51,10 +56,10 @@ def batch_status(store, run, tasks, owner):
     }
 
 
-def closeout_blockers(acceptance):
+def closeout_blockers(acceptance, *, collection_active=False):
     facts = acceptance['tasks']
     blockers = []
-    if any(task['status'] in INFLIGHT_STATUSES for task in facts):
+    if collection_active or any(task['status'] in INFLIGHT_STATUSES for task in facts):
         blockers.append('tasks_inflight')
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] for attempt in task['submissions'])
            for task in facts):
@@ -65,25 +70,31 @@ def closeout_blockers(acceptance):
     return blockers
 
 
+def owner_state_unconfirmed(owner):
+    return (owner.get('reachable') is None
+            or owner.get('reachable') is True and owner.get('run_id') is None)
+
+
 def status_alerts(run, owner, acceptance, blockers, summary):
-    codes = [code for code in blockers if code not in {'tasks_inflight', 'submission_unresolved'}]
-    owner_running = run['status'] == 'running' and owner['reachable'] and owner['run_id'] == run['id']
-    owner_busy = run['status'] == 'running' and owner.get('reason') == 'response_timeout'
+    codes = [code for code in blockers if code not in {
+        'tasks_inflight', 'submission_unresolved', 'owner_state_unconfirmed'}]
+    owner_running = run['status'] == 'running' and owner.get('reachable') is True and owner.get('run_id') == run['id']
+    owner_busy = run['status'] == 'running' and owner_state_unconfirmed(owner)
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] and not (
             (owner_running or owner_busy) and task['status'] == 'submitting' and attempt['status'] == 'started')
             for attempt in task['submissions']) for task in acceptance['tasks']):
         codes.append('submission_unresolved')
     if run['status'] in {'running', 'blocked'}:
-        if not owner['reachable'] and owner.get('reason') != 'response_timeout':
+        if owner.get('reachable') is False:
             codes.append('owner_unreachable')
-        elif owner['reachable'] and owner['run_id'] != run['id']:
+        elif owner.get('reachable') is True and owner.get('run_id') is not None and owner['run_id'] != run['id']:
             codes.append('owner_mismatch')
         if run['status'] == 'blocked':
             codes.append('run_blocked')
     elif 'tasks_inflight' in blockers:
         codes.append('run_closed_with_inflight')
     alerts = [{'code': code, 'severity': 'blocked'} for code in codes]
-    if owner.get('reason') == 'response_timeout':
+    if owner_state_unconfirmed(owner):
         alerts.append({'code': 'owner_unresponsive', 'severity': 'warning'})
     if summary.get('failed'):
         alerts.append({'code': 'technical_failures', 'severity': 'warning', 'count': summary['failed']})

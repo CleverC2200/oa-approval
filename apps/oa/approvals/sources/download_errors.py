@@ -9,6 +9,7 @@ from typing import Any, TypeAlias
 class DownloadError:
     code: str
     message: str
+    diagnostics: tuple[dict, ...] = ()
 
     def to_record(self) -> dict:
         return {"code": self.code, "message": self.message}

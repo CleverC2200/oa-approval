@@ -107,7 +107,7 @@ class Store:
             raise ValueError('continuation_not_available')
         return stored['selection']
 
-    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None):
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -135,6 +135,10 @@ class Store:
                     raise ValueError("pending_identity_missing")
                 occurrence = occurrence_key(row)
                 if occurrence in processed:
+                    continue
+                previous_task = self.connection.execute(
+                    "SELECT status FROM tasks WHERE occurrence=?", (occurrence,)).fetchone()
+                if previous_task and previous_task['status'] == 'failed' and not retry_failed:
                     continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",
@@ -288,13 +292,13 @@ class Store:
         return dict(self.connection.execute("SELECT * FROM reviews WHERE task_id=? AND opinion=? AND recognition_json=? AND material_sha256=?",
             (task_id,opinion,recognized,task["material_sha256"])).fetchone())
 
-    def begin_submission(self, task_id, review_id):
+    def begin_submission(self, task_id, review_id, *, result=None):
         task = self.get_task(task_id)
         with self.connection:
             if task["status"] in {"submitting","submitted","unknown"}:
                 raise ValueError("submission_already_started")
-            cursor = self.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status) VALUES (?,?,?,?,'started')",
-                (task_id,review_id,task["last_run_id"],now()))
+            cursor = self.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status,result_json) VALUES (?,?,?,?,'started',?)",
+                (task_id,review_id,task["last_run_id"],now(),encoded(result or {})))
             self.connection.execute("UPDATE tasks SET status='submitting' WHERE id=?", (task_id,))
         return cursor.lastrowid
 
@@ -338,13 +342,18 @@ class Store:
         processed.update(task['occurrence'] for task in tasks if task['status'] in {'preview','failed','submitted'})
         return {'status':'ready', 'remaining':remaining, 'processed_occurrences':sorted(processed)}
 
-    def close(self, run_id, *, handoff=False):
+    def close(self, run_id, *, handoff=False, collection_stopped_note=None):
         with self.connection:
             self.connection.execute('BEGIN IMMEDIATE')
             run = self.run(run_id)
             tasks = self.tasks(run_id)
             summary = dict(Counter(task['status'] for task in tasks))
             stored = json.loads(run['summary_json'])
+            if collection_stopped_note:
+                stored['orphaned_collection'] = {
+                    'confirmation_note': collection_stopped_note,
+                    'task_ids': [task['id'] for task in tasks if task['status'] == 'preparing'],
+                }
             if handoff:
                 stored.setdefault('selection', {'workflows':None, 'request_ids':None,
                                                 'batch_size':stored.get('batch', {}).get('size')})

@@ -103,10 +103,16 @@ def test_image_encoding_policy_is_applied_at_collection(tmp_path, monkeypatch, c
     monkeypatch.setattr(case_bundle.invoice_buyers, "read_invoice_buyers", lambda *_a, **_k: {
         "read_status": "not_applicable", "invoices": [],
     })
-    collect_case("recorded-request", oa_api=RecordedOaApi(config["workflow_id"], config["workflow_name"]),
+    material = collect_case("recorded-request", oa_api=RecordedOaApi(config["workflow_id"], config["workflow_name"]),
                  configs=FLOW_CONFIGS, allow_browser_download=False,
                  attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared", source_policy=POLICY)
     assert captured == [(config['flow_key'] == 'general_expense', config['flow_key'] == 'tpm_small_marketing_fee')]
+    if config['flow_key'] == 'packaging_layout_approval':
+        assert 'invoice_title_reference' not in material
+    else:
+        from tests.approvals.invoice_title_fakes import ROWS
+
+        assert material['invoice_title_reference']['rows'] == ROWS
 
 
 class RecordedOaApi:

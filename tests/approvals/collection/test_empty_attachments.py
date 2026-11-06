@@ -478,3 +478,52 @@ def test_official_empty_material_does_not_hide_missing_selected_attachment(
     assert report['selection']['resource_id'] == 'missing'
     assert json.loads(Path(report['observations_file']).read_text()) == []
     assert report['parts'] == requests == []
+
+
+def test_explicit_travel_login_exception_preserves_unknown_coverage(travel_source):
+    workflow, scan, oa_api = travel_source
+    scan['text'] = '账号登录'
+    exception = {'request_id': '12', 'authorization_note': '用户仅允许本单受限审核'}
+    material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
+                            allow_browser_download=True, source_policy=POLICY,
+                            travel_read_exception=exception)
+    assert material['travel_read_exception']['request_id'] == '12'
+    assert material['travel_read_exception']['authorization_note'] == exception['authorization_note']
+    assert material['travel_read_exception']['error'] == 'travel_attachment_discovery_failed'
+    assert material['travel_read_exception']['diagnostics'][0]['reason'] == 'login_required'
+    assert 'attachment_presence' not in material
+    assert material['resources'] == []
+    with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
+                     allow_browser_download=True, source_policy=POLICY)
+
+
+def test_travel_login_exception_does_not_waive_other_read_failures(travel_source):
+    workflow, scan, oa_api = travel_source
+    scan['text'] = 'SYNTHETIC-OTHER-REQUEST'
+    with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
+                     allow_browser_download=True, source_policy=POLICY,
+                     travel_read_exception={'request_id': '12', 'authorization_note': '本单受限审核'})
+
+
+def test_travel_login_exception_still_reads_known_trip_links(travel_source, monkeypatch):
+    from apps.oa.approvals.collection import case
+
+    workflow, scan, oa_api = travel_source
+    scan['text'] = '账号登录'
+    url = POLICY.travel_origin + '/fcfile/fcc/opera/getFile/7/known.png'
+    workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].append(
+        {'fieldName': 'fj', 'fieldShowName': '附件', 'fieldValue': url})
+    calls = []
+
+    def download(targets, **options):
+        calls.extend(targets)
+        raise RuntimeError('known_attachment_read_attempted')
+
+    monkeypatch.setattr(case.attachments, 'download_resources', download)
+    with pytest.raises(RuntimeError, match='known_attachment_read_attempted'):
+        collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
+                     allow_browser_download=True, source_policy=POLICY,
+                     travel_read_exception={'request_id': '12', 'authorization_note': '本单受限审核'})
+    assert [item['downloadUrl'] for item in calls] == [url]

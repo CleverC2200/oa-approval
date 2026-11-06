@@ -30,7 +30,7 @@
 
 名额已满且没有可处理结果时，等待原生完成通知，每次等待 30 至 60 秒。只传新增事实或阻断，不以轮询意见文件判断完成，也不催稿。
 
-审核 Agent 连续 10 分钟没有新工具事件或阶段结果时，只读核对其原生状态和最后事件时间。明确 `failed` / `interrupted` 等终态时，保存实际错误并按下文登记技术失败；仍为 `running` 时报告审核停滞及精确 Agent、任务和事件时间，保持 owner 与原工具会话并继续接管。等待时长只触发告警，不构成失败依据。相同停滞只报告一次，后续仅报告新增事实；告警格式见[小时反馈](hourly-dispatch.md#结束与反馈)。
+原生工具能够提供最后事件时间时，审核 Agent 连续 10 分钟没有新工具事件或阶段结果，主 Agent 只读核对其当前原生状态和最后事件。明确失败或中断终态时保存实际错误，按下文登记技术失败；仍为 running 时在当前对话报告审核停滞、实际 Agent、任务及最后事件时间，保留 owner 和原工具会话继续接管。无法取得精确事件时间时如实说明，不估造停滞时长。等待时长只触发告警，不构成失败依据；相同原因只报告一次，新事实再更新。
 
 `collect` 未领到任务时只使用紧凑的 `status`、`reason` 和可用的 `summary` 状态计数判断。`waiting` 表示采集占用、仍有排队或在途任务，先处理结果或等待；`done` 表示本批排队和在途均耗尽；`blocked` 停止本轮补位和写入。`refused` 表示保护校验未通过，核对预期任务和 Agent 代次后再决定下一步。不能把 `waiting` 当作批次完成。
 
@@ -64,17 +64,17 @@
 
 ## 正常完成与关闭轮次
 
-使用本轮保存的 `batch.task_ids` 逐单验收，未设置 `--batch-size` 时以本轮完整队列为范围。以公开 `status --run-id <本轮ID> --view batch` 的 `closeout` 验收：`drained=true` 表示全部已领取任务结束且提交尝试已核实，`batch_complete=true` 还要求本批没有未领取单。范围外的 `queued` 不计入本批完成条件。停止排空或提前轮换只核对已领取单，未领取单保留待办；未知提交单独报告阻断及回查结果。
+使用本轮保存的 `batch.task_ids` 逐单验收，未设置 `--batch-size` 时以本轮完整队列为范围。公开 `status --run-id <本轮ID> --view batch` 的 `closeout.drained=true` 表示没有活动采集、在途审核或未核实提交；`batch_complete=true` 还要求本批没有未领取单。范围外的 `queued` 不计入本批完成条件。停止排空只核对已领取单，未领取单保留待办；未知提交单独报告阻断及回查结果。执行者忙碌或探测结果不明时，`owner_state_unconfirmed` 表示暂不能确认排空或退出，先按小时反馈规则复查。
 
-沿用本轮固定的绝对 `OA_RUNTIME_ROOT` 和实际 `run_id`，`OA_RUN_ID` 取本轮启动结果。先用公开 status 核对逐单验收，再选择下表中的一个关闭分支，只发送一次 finish。
+沿用本轮固定的绝对 `OA_RUNTIME_ROOT` 和实际 `run_id`，`OA_RUN_ID` 取本轮启动结果。先用公开 status 核对逐单验收，再选择下表中的一个关闭分支；不并发发送或在结果不明时重复发送 finish。保护拒绝后先处理阻断，有新事实再重新验收并收尾。
 
 | 当前分支 | 关闭命令 |
 | --- | --- |
-| 小时任务或其接续对话，当前任务已明确授权通过独立对话接续，计划仍为 ACTIVE，且没有停止指令或未知提交 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --require-drained --handoff`，随后按[接续结果](hourly-dispatch.md#排空后立即接续)处理 |
-| 已排空的人工单批、暂停或停止收尾，或当前没有独立对话接续授权 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --require-drained` |
-| 未知提交或用户要求立即停止，保留尚未完成任务并关闭 owner | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"`，报告未完成范围，不能报告批次完成 |
+| 小时任务或其接续对话，当前任务已明确授权通过后续小时对话接续，计划仍为 ACTIVE，且没有停止指令或未知提交 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --require-drained --handoff`，随后按[接续结果](hourly-dispatch.md#保存接续并结束)处理 |
+| 已排空的人工单批、暂停或停止收尾，或当前没有后续小时接续授权 | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}" --require-drained` |
+| 未知提交或用户要求立即停止，保留未完成任务并关闭 owner | `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "${OA_RUN_ID:?}"`，报告未完成范围，不声称批次完成 |
 
-`--require-drained` 拒绝时返回 `run_not_drained` 和实际 `blockers`，owner 保持运行。主 Agent 接管未完成审核或只读回查，保留原工具会话；拒绝不能触发无参数重试关闭。正常收尾在 owner 退出验收前保持当前轮，不以最终回复结束仍有在途任务的主对话。
+`--require-drained` 返回 `run_not_drained` 时保留 owner，按实际 `blockers` 接管未完成审核或只读回查。不能因拒绝而改用无保护参数重试。正常收尾在 owner 工具会话退出前保持当前主对话。
 
 关闭前后均使用同一查询入口，分别核对验收事实及关闭结果：
 
@@ -82,4 +82,4 @@
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --run-id "${OA_RUN_ID:?}" --view batch
 ```
 
-`finish` 等待当前采集完成并落盘，再关闭本轮、socket 并释放 `approval.lock`；正常批次先完成逐单验收再调用它。保留关闭回执，等待原 owner 工具会话退出，最后确认指定轮次 `run.status=closed`、`owner.reachable=false`；整批完成还须 `closeout.complete=true`。提前轮换或停止排空时验收 `closeout.drained=true` 并明确未领取数。`finish` 返回 `closed` 只证明轮次关闭。使用上述公开查询收尾，无需临时读库。EOF 同样触发安全关闭；采集客户端断开仍保留已取得材料，采集进程异常登记技术失败，不生成业务意见。
+`finish` 等待当前采集完成并落盘，再关闭本轮、socket 并释放 `approval.lock`；正常批次先完成逐单验收再调用它。保留关闭回执，等待原 owner 工具会话退出，最后确认指定轮次 `run.status=closed`、`owner.reachable=false`；整批完成还须 `closeout.complete=true`。提前轮换或停止排空时核对 `closeout.drained=true` 并说明未领取数。`finish` 返回 `closed` 只证明轮次关闭。使用上述公开查询收尾，无需临时读库。EOF 同样触发安全关闭；采集客户端断开仍保留已取得材料，采集进程异常登记技术失败，不生成业务意见。

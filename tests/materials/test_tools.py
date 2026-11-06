@@ -291,3 +291,15 @@ def test_deepseek_does_not_report_complete_when_input_changes(tmp_path, monkeypa
     result = attachment_recognition.recognize(material_file=material, output_dir=tmp_path / 'report')
     assert result['status'] == 'failed'
     assert result['error_code'] == ('frozen_material_changed' if changed == 'material' else 'attachment_page_changed')
+
+
+def test_archive_ignores_finder_metadata_but_keeps_business_files(tmp_path):
+    from apps.oa.materials import archives
+    archive = tmp_path / 'evidence.zip'
+    with zipfile.ZipFile(archive, 'w') as source:
+        source.writestr('photos/.DS_Store', b'Finder metadata')
+        source.writestr('__MACOSX/._photo.png', b'AppleDouble')
+        source.writestr('photos/receipt.txt', b'business evidence')
+    children, error = archives.extract_zip_safely(archive, dest_dir=tmp_path / 'downloads', resource={'id': 'archive', 'name': archive.name})
+    assert not error
+    assert [child['archive_path'] for child in children] == ['photos/receipt.txt']

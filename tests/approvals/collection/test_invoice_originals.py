@@ -47,7 +47,7 @@ def original_transport(monkeypatch, tmp_path):
     state = SimpleNamespace(
         client=client, workflow=workflow, initialized=False, requests=[], actor='77',
         main_file='202', still_denied=False, pdf=document.tobytes(), cloud_pdf=None,
-        after_cloud_download=None, cloud_failure=None, cloud_headers={},
+        after_cloud_download=None, cloud_failure=None, cloud_headers={}, content_type='application/pdf',
         detail={'id': '9001', 'fid': '9001', 'number': NUMBER,
                 'flist': [{'id': '8001', 'type': 'pdf', 'size': 0, 'del': 0}],
                 'modify_info': {'pdf': '8001', 'furl': '8001'},
@@ -65,7 +65,7 @@ def original_transport(monkeypatch, tmp_path):
         def __init__(self, body, url):
             super().__init__(body)
             self.url = url
-            self.headers = {'Content-Type': 'application/pdf', 'Content-Length': str(len(body))}
+            self.headers = {'Content-Type': state.content_type, 'Content-Length': str(len(body))}
 
         def geturl(self):
             return self.url
@@ -78,7 +78,7 @@ def original_transport(monkeypatch, tmp_path):
             body = {'actionMsg': {'code': '0'}, 'data': state.detail}
         elif path == '/invoiceApi/file/download':
             assert urlsplit(request.full_url).hostname == 'api.mypiaojia.com'
-            assert params == {'id': [state.detail['modify_info']['pdf']], 'fid': ['9001'], 'dataId': ['101'],
+            assert params == {'id': [state.detail['modify_info'].get('pdf') or state.detail['modify_info']['furl']], 'fid': ['9001'], 'dataId': ['101'],
                               'token': ['synthetic-token']}
             assert request.get_header('Cookie') is None
             if state.cloud_failure == 'http':
@@ -99,7 +99,8 @@ def original_transport(monkeypatch, tmp_path):
             if 'requestid' in params:
                 assert params['requestid'] == ['101'] and params['isrequest'] == ['1']
                 state.initialized = True
-            body = {'status': 1, 'mainimagefile': state.main_file}
+            body = {'status': 1, 'mainimagefile': state.main_file,
+                    'data': {'docMain': getattr(state, 'doc_main', '')}}
         else:
             assert path == '/weaver/weaver.file.FileDownload'
             assert params == {'fileid': ['202']}
@@ -132,6 +133,86 @@ def test_collect_reads_linked_original_body_via_native_context(original_transpor
     downloads = [r for r in state.requests if r[0] == '/weaver/weaver.file.FileDownload']
     assert len(downloads) == 2 and downloads[0] == downloads[1]
     assert 'session=fixed' not in json.dumps(material, default=str)
+
+
+@pytest.fixture
+def jpg_original(original_transport):
+    state = original_transport
+    with fitz.open(stream=state.pdf, filetype='pdf') as document:
+        state.pdf = document[0].get_pixmap().tobytes('jpeg')
+    state.content_type = 'image/jpeg'
+    state.detail['flist'][0]['type'] = 'jpg'
+    state.detail['modify_info']['pdf'] = ''
+    return state
+
+
+@pytest.mark.parametrize('cloud', [False, True])
+def test_collect_prepares_linked_jpg_original(jpg_original, tmp_path, cloud):
+    state = jpg_original
+    state.still_denied = cloud
+    state.cloud_pdf = state.pdf if cloud else None
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    assert invoice['body_read_status'] == 'content_read'
+    assert invoice['files'][0]['resource_id'] == '202'
+    assert material['resources'][0]['local_readonly_path'].endswith('.jpg')
+    assert material['prepared']['manifest'][0]['status'] == 'image'
+    assert len(material['prepared']['images']) == 1
+
+
+@pytest.mark.parametrize('cloud', [False, True])
+@pytest.mark.parametrize('body', ['truncated', 'pdf'])
+def test_unreadable_jpg_original_stops_collection(jpg_original, tmp_path, cloud, body):
+    state = jpg_original
+    if body == 'truncated':
+        state.pdf = state.pdf[:100]
+    else:
+        with fitz.open() as document:
+            document.new_page()
+            state.pdf = document.tobytes()
+    state.still_denied = cloud
+    state.cloud_pdf = state.pdf if cloud else None
+    with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+        collect_original(state, tmp_path)
+
+
+@pytest.mark.parametrize('change', ['furl', 'pdf', 'multiple'])
+def test_jpg_original_requires_unambiguous_matching_reference(jpg_original, tmp_path, change):
+    state = jpg_original
+    if change == 'multiple':
+        state.detail['flist'].append({'id': '8002', 'type': 'jpg', 'del': 0})
+    else:
+        state.detail['modify_info'][change] = '8002'
+    material = collect_original(state, tmp_path)
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'not_read'
+    assert not material['resources']
+    assert not any(r[0] in {'/weaver/weaver.file.FileDownload', '/invoiceApi/file/download'}
+                   for r in state.requests)
+
+
+@pytest.mark.parametrize('body', ['valid', 'truncated', 'pdf'])
+def test_browser_fallback_validates_jpg_original(jpg_original, tmp_path, monkeypatch, body):
+    state = jpg_original
+    if body == 'truncated':
+        state.pdf = state.pdf[:100]
+    elif body == 'pdf':
+        with fitz.open() as document:
+            document.new_page()
+            state.pdf = document.tobytes()
+
+    def browser(_resource, *, dest_dir, **_kwargs):
+        path = dest_dir / 'browser-original.jpg'
+        path.write_bytes(state.pdf)
+        return original_source.Downloaded(path)
+
+    monkeypatch.setattr(remote.DownloadTransfer, 'native', lambda *_a, **_kw: original_source.Unavailable())
+    monkeypatch.setattr(remote.DownloadTransfer, 'browser', staticmethod(browser))
+    if body == 'valid':
+        material = collect_original(state, tmp_path)
+        assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'content_read'
+    else:
+        with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+            collect_original(state, tmp_path)
 
 def test_collect_reads_cloud_original_when_native_document_remains_denied(original_transport, tmp_path):
     state = original_transport
@@ -248,9 +329,10 @@ def test_forged_original_hint_cannot_initialize_unlinked_document(original_trans
     assert not state.initialized
     assert not any(r[0] == '/api/doc/detail/basicInfo' for r in state.requests)
 
-def test_multiple_file_records_keep_partial_body_coverage(original_transport, tmp_path):
+@pytest.mark.parametrize('other_type', ['ofd', 'jpg'])
+def test_multiple_file_records_keep_partial_body_coverage(original_transport, tmp_path, other_type):
     state = original_transport
-    state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
+    state.detail['flist'].append({'id': '8002', 'type': other_type, 'del': 0})
     material = collect_original(state, tmp_path)
     invoice = material['invoice_evidence']['invoices'][0]
     assert invoice['body_read_status'] == 'partial_read'
@@ -656,3 +738,161 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     assert all(item['reused'] is False for item in files)
     assert files[0]['path'] == files[1]['path']
     assert b'session=fixed' not in b''.join(path.read_bytes() for path in destination.rglob('*') if path.is_file())
+
+@pytest.mark.parametrize('failure,reason', [
+    ('json', 'cloud_signature_mismatch'),
+    ('truncated', 'cloud_length_mismatch'),
+    ('oversized', 'cloud_content_too_large'),
+    ('invalid_length', 'cloud_content_length_invalid'),
+])
+def test_cloud_incomplete_original_preserves_safe_failure_diagnostics(
+        original_transport, tmp_path, monkeypatch, failure, reason):
+    from apps.oa.approvals.collection.case import CollectionFailure
+
+    state = original_transport
+    state.still_denied = True
+    state.cloud_pdf = b'{}' if failure == 'json' else state.pdf
+    if failure == 'truncated':
+        state.cloud_headers['Content-Length'] = str(len(state.pdf) + 1)
+    elif failure == 'oversized':
+        monkeypatch.setattr(original_source, '_MAX_ORIGINAL_BYTES', 16)
+    elif failure == 'invalid_length':
+        state.cloud_headers['Content-Length'] = 'invalid'
+    with pytest.raises(CollectionFailure, match='^attachment_content_incomplete$') as caught:
+        collect_original(state, tmp_path)
+    assert caught.value.diagnostics == [{
+        'stage': 'invoice_original_download', 'reason': reason, 'file_ref': '202',
+    }]
+    assert 'synthetic-token' not in json.dumps(caught.value.diagnostics)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_ofd_invoice_reads_its_explicit_official_pdf(original_transport, tmp_path, monkeypatch):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    monkeypatch.setattr(remote.DownloadTransfer, 'native',
+                        lambda *a, **kw: pytest.fail('native OFD must not be treated as PDF'))
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    pdf, = [file for file in invoice['files'] if file['media_type'] == 'pdf']
+    ofd, = [file for file in invoice['files'] if file['media_type'] == 'ofd']
+    assert pdf['body_read_status'] == 'content_read'
+    assert ofd['body_read_status'] == 'not_read'
+    assert pdf['original_source']['original_cloud_file_id'] == '8000'
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+
+
+@pytest.mark.parametrize('change', ['missing_ofd', 'wrong_pdf', 'multiple_ofd'])
+def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, change):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    if change == 'missing_ofd':
+        state.detail['modify_info']['furl'] = '7999'
+    elif change == 'wrong_pdf':
+        state.detail['modify_info']['pdf'] = '8999'
+    else:
+        state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
+    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
+
+
+@pytest.mark.parametrize('change,reason', [('pdf', 'resource_ownership_untrusted'),
+                                            ('ofd', 'resource_ownership_untrusted'),
+                                            ('actor', 'rpa_session_invalid')])
+def test_official_pdf_rechecks_ofd_pair_and_actor_after_download(original_transport, tmp_path, change, reason):
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.cloud_pdf = state.pdf
+    if change == 'actor':
+        state.after_cloud_download = lambda: setattr(state, 'actor', '78')
+    else:
+        state.after_cloud_download = lambda: state.detail['modify_info'].update(
+            **{'pdf' if change == 'pdf' else 'furl': '8999'})
+    with pytest.raises(RuntimeError, match=reason):
+        collect_original(state, tmp_path)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+@pytest.fixture
+def ofd_document_attachment(original_transport, monkeypatch):
+    from apps.oa.approvals.sources import sql_templates
+
+    state = original_transport
+    state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
+    state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
+    state.main_file = ''
+    state.doc_main = ''
+    state.cloud_pdf = state.pdf
+    state.document_rows = [{'docid': 303, 'imagefileid': 202, 'imagefilename': 'original.ofd',
+                            'doctype': 1, 'isextfile': '1', 'docfiletype': '2'}]
+    state.sql_calls = []
+
+    def query(name, params, *, require_connection=False):
+        assert name == 'document_ofd_attachment'
+        assert params == {'document_id': 303} and require_connection
+        rendered = sql_templates.render_query(name, params)
+        assert rendered.max_rows == 2 and rendered.timeout_sec == 5
+        state.sql_calls.append(name)
+        return state.document_rows
+
+    monkeypatch.setattr(official_sql, '_query_rows', query)
+    return state
+
+
+def test_official_pdf_can_verify_the_documents_sole_ofd_attachment(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    material = collect_original(state, tmp_path)
+    pdf, = [file for file in material['invoice_evidence']['invoices'][0]['files']
+            if file['media_type'] == 'pdf']
+    assert pdf['body_read_status'] == 'content_read'
+    assert len(state.sql_calls) >= 3
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+
+
+@pytest.mark.parametrize('change', ['missing', 'multiple', 'document', 'file', 'role',
+                                     'doctype', 'filetype', 'extension', 'doc_body', 'main', 'sql'])
+def test_ofd_attachment_requires_a_unique_current_binding(ofd_document_attachment, tmp_path, monkeypatch, change):
+    state = ofd_document_attachment
+    if change == 'missing':
+        state.document_rows = []
+    elif change == 'multiple':
+        state.document_rows *= 2
+    elif change == 'doc_body':
+        state.doc_main = 'Unexpected document body'
+    elif change == 'main':
+        state.main_file = '999'
+    elif change == 'sql':
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError('official_sql_unavailable')
+        monkeypatch.setattr(official_sql, '_query_rows', unavailable)
+    else:
+        field, value = {'document': ('docid', 999), 'file': ('imagefileid', 999),
+                        'role': ('isextfile', '0'), 'doctype': ('doctype', 2),
+                        'filetype': ('docfiletype', '1'), 'extension': ('imagefilename', 'other.pdf')}[change]
+        state.document_rows[0][field] = value
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert not any(row[0] == '/invoiceApi/file/download' for row in state.requests)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_ofd_attachment_binding_is_rechecked_after_cloud_download(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    state.after_cloud_download = lambda: state.document_rows[0].update(imagefileid=999)
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert sum(row[0] == '/invoiceApi/file/download' for row in state.requests) == 1
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_regular_pdf_still_requires_its_native_main_file(ofd_document_attachment, tmp_path):
+    state = ofd_document_attachment
+    state.detail['flist'] = [state.detail['flist'][1]]
+    state.detail['modify_info'].update(furl='8001', fileType='1')
+    with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+        collect_original(state, tmp_path)
+    assert state.sql_calls == []

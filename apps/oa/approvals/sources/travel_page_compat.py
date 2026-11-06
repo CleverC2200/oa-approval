@@ -9,11 +9,14 @@ from playwright.sync_api import Frame
 
 from apps.oa.approvals.sources.travel_browser import _CandidateSession, _browser_roots
 from apps.oa.approvals.sources import travel_hotel
+from apps.oa.approvals.sources.travel_invoices import TRAIN_DETAIL_PATH
+from apps.oa.approvals.sources.travel_evidence import sso_rejection
 
 BASE_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxdBaseInfoDetails"
 EXP_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
 SUMMARY_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxdJefo"
-HOTEL_PATHS = {
+ORDER_PATHS = {
+    TRAIN_DETAIL_PATH,
     "/hotel/fcc/hotel/order/b2ghotelzcd/getOrderDetail",
     "/fcecf/fcc/pcapi/COMM_B2G_bldDetail",
 }
@@ -209,6 +212,9 @@ class ReadPage:
                 if response.status in {401, 403}
                 else "travel_source_failed"
             )
+        rejection = sso_rejection(self.raw.url, self.owner.session.policy.travel_origin)
+        if rejection:
+            raise ReadFailure(rejection)
         previous = None
         stable = 0
         while time.monotonic() < self.owner.deadline:
@@ -313,8 +319,8 @@ class BrowserRequest:
             """async p=>{
             const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
             try{const headers={};for(const [k,v] of Object.entries(p.headers))if(k.toLowerCase()!=='referer')headers[k]=v;
-                const body=p.data===null?undefined:new URLSearchParams(p.data).toString();
-                if(body!==undefined)headers['Content-Type']='application/x-www-form-urlencoded';
+                const body=p.data===null?undefined:typeof p.data==='string'?p.data:new URLSearchParams(p.data).toString();
+                if(body!==undefined&&typeof p.data!=='string')headers['Content-Type']='application/x-www-form-urlencoded';
                 const r=await fetch(p.url,{method:'POST',headers,body,credentials:'include',redirect:'manual',signal:a.signal});
                 const text=await r.text();let value=null;try{value=JSON.parse(text)}catch{}
                 return {status:r.type==='opaqueredirect'?302:r.status,body:value};
@@ -414,9 +420,13 @@ class CompatibleCandidate(_CandidateSession):
                 {k: v for k, v in r.items() if k != "_ephemeral_cookie_header"}
                 for r in result.download_targets
             )
+            invoices = tuple({**record, "invoices": [
+                {**invoice, "resource": {k: v for k, v in invoice["resource"].items() if k != "_ephemeral_cookie_header"}}
+                if "resource" in invoice else invoice for invoice in record["invoices"]
+            ]} for record in result.order_invoices)
             self.context.session.page = self.page.raw
             return dataclasses.replace(
-                result, download_targets=targets, source_facts=tuple(facts)
+                result, download_targets=targets, source_facts=tuple(facts), order_invoices=invoices
             )
         except ReadFailure:
             raise

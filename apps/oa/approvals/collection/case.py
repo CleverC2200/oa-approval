@@ -13,10 +13,12 @@ from apps.oa.materials import resources
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
+from apps.oa.approvals.sources import invoice_titles
 from apps.oa.approvals.collection import invoice_originals
 from apps.oa.approvals.sources import official_sql
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources import travel as travel_orders
+from apps.oa.approvals.sources import travel_invoices
 from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 
 
@@ -133,7 +135,7 @@ def _authority_facts(
         if str(item.get("observed_at") or "").strip():
             fact["observed_at"] = str(item["observed_at"])
         facts.append(fact)
-    if str(config.get("flow_key") or "") == _PACKAGING_FLOW:
+    if str(config.get("flow_key") or "") in {_PACKAGING_FLOW, "dealer_closure"}:
         return facts
     workflow_key = str(config.get("flow_key") or "")
     invoice_result = invoice_buyers.read_invoice_buyers(
@@ -456,6 +458,7 @@ def collect_case(
     attachment_root: Path | None = None,
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
+    travel_read_exception: dict | None = None,
 ) -> dict[str, Any]:
     read_session = None
     if source_policy.travel_read.enabled:
@@ -465,7 +468,8 @@ def collect_case(
         return _collect_case(request_id, oa_api=oa_api, source_policy=source_policy,
             configs=configs, allow_browser_download=allow_browser_download,
             attachment_root=attachment_root, prepared_root=prepared_root,
-            attachment_timeout_sec=attachment_timeout_sec, read_session=read_session)
+            attachment_timeout_sec=attachment_timeout_sec, read_session=read_session,
+            travel_read_exception=travel_read_exception)
     finally:
         if read_session is not None:
             read_session.close()
@@ -482,7 +486,14 @@ def _collect_case(
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
     read_session=None,
+    travel_read_exception: dict | None = None,
 ) -> dict[str, Any]:
+    if travel_read_exception is not None and (
+            not isinstance(travel_read_exception, dict)
+            or travel_read_exception.get("request_id") != str(request_id)
+            or not isinstance(travel_read_exception.get("authorization_note"), str)
+            or not travel_read_exception["authorization_note"].strip()):
+        raise ValueError("travel_read_exception_invalid")
     download_sources = attachments.build_download_sources(source_policy)
     transfer = download_sources.transfer
     if read_session is not None:
@@ -499,6 +510,10 @@ def _collect_case(
     except (RuntimeError, SystemExit) as error:
         raise RuntimeError("workflow_ambiguous") from error
     identity = flow.workflow_identity(workflow)
+    closure_evidence = None
+    if config.get("flow_key") == "dealer_closure":
+        from apps.oa.approvals.sources import dealer_closure
+        closure_evidence = dealer_closure.read(oa_api, workflow, raw_resources)
     invoice_evidence: dict = {}
     authority_facts = _authority_facts(
         oa_api=oa_api,
@@ -511,14 +526,28 @@ def _collect_case(
         workflow,
         raw_resources, origins=source_policy.attachments,
     )
-    travel_evidence = _travel_resources(
-        config=config,
-        workflow=workflow,
-        request_id=str(request_id),
-        allow_browser_download=allow_browser_download,
-        attachment_timeout_sec=attachment_timeout_sec,
-        travel_source=travel_source,
-    )
+    read_exception = None
+    try:
+        travel_evidence = _travel_resources(
+            config=config,
+            workflow=workflow,
+            request_id=str(request_id),
+            allow_browser_download=allow_browser_download,
+            attachment_timeout_sec=attachment_timeout_sec,
+            travel_source=travel_source,
+        )
+    except CollectionFailure as error:
+        if (not travel_read_exception or config.get("flow_key") != "travel_expense"
+                or str(error) != "travel_attachment_discovery_failed"
+                or not error.diagnostics
+                or any(item.get("reason") != "login_required" for item in error.diagnostics)):
+            raise
+        read_exception = {"request_id": str(request_id),
+                          "authorization_note": travel_read_exception["authorization_note"],
+                          "error": str(error), "diagnostics": error.diagnostics,
+                          "declared_attachment_count": _declared_attachment_count(workflow),
+                          "unread_scope": "商旅页面及附件发现未完成；表单中已知附件仍按正常流程读取。"}
+        travel_evidence = TravelEvidence.empty()
     discovered_resources = list(travel_evidence.download_targets)
     travel_scan = travel_evidence.attachment_scan_record() or {}
     authority_facts.extend(travel_evidence.facts)
@@ -540,12 +569,12 @@ def _collect_case(
         )
     if str(config.get("flow_key") or "") == "travel_expense":
         declared_attachment_count = _declared_attachment_count(workflow)
-        source_resources = _merge_resources(form_resources, discovered_resources, origins=source_policy.attachments)
+        source_resources = _merge_resources(form_resources, [item for item in discovered_resources if not item.get("_travel_order_invoice")], origins=source_policy.attachments)
         coverage = travel_evidence.coverage(
             source_file_ids={_trip_content_id(item) for item in source_resources},
             source_resource_count=len(source_resources), declared_count=declared_attachment_count,
         )
-        if not coverage.complete:
+        if not coverage.complete and read_exception is None:
             raise CollectionFailure(
                 "travel_attachment_resources_incomplete",
                 {**coverage.counts,
@@ -560,6 +589,11 @@ def _collect_case(
         _resource_descriptor(item, request_id=str(request_id))
         for item in logical_resources
     ]
+    travel_invoices.bind_resources(authority_facts, {
+        "travel_platform:" + _trip_content_id(resource): descriptor["resource_id"]
+        for resource, descriptor in zip(logical_resources, descriptors)
+        if _trip_content_id(resource)
+    })
     prepared_result = attachment_extractors.PreparedMaterial({"images": [], "structured_contents": [], "manifest": []})
     if logical_resources:
         attachment_dir = Path(
@@ -587,7 +621,9 @@ def _collect_case(
                 if download_errors
                 else "attachment_download_incomplete"
             )
-            raise RuntimeError(code)
+            raise CollectionFailure(code, diagnostics=[
+                diagnostic for error in download_errors for diagnostic in error.diagnostics
+            ])
         descriptors_by_raw_id = {
             str(item["raw_resource_id"]): item for item in descriptors
         }
@@ -645,6 +681,9 @@ def _collect_case(
         "source_resource_id": source["resource_id"],
         "message": "视频附件已跳过，画面及音频未读取；不得据此确认视频中的事实，需要视频证明的事项保留具体缺口并交人工核对。",
     } for source in attachment_extractors.skipped_video_sources(prepared["manifest"]))
+    if read_exception is not None:
+        warnings.append({"code": "travel_read_user_exception",
+                         "message": "本单按用户明确授权受限审核，商旅页面及未取得附件仍未读取，不代表核验通过。"})
     empty_fields = {}
     if (config.get("flow_key") in {"general_expense", "tpm_small_marketing_fee"} and not logical_resources
             and not authority_facts and not invoice_evidence.get("invoices")):
@@ -669,7 +708,8 @@ def _collect_case(
             or field["name"] == "发票号码"
         )
     )
-    if (not logical_resources and not warnings and not invoice_evidence.get("invoices")
+    if (config.get('flow_key') != 'dealer_closure'
+            and not logical_resources and not warnings and not invoice_evidence.get("invoices")
             and _declared_attachment_count(workflow) in {None, 0}
             and (travel_empty_placeholders if config.get("flow_key") == "travel_expense"
                  else all(field["read_status"] == "empty" for field in declared_fields
@@ -689,7 +729,22 @@ def _collect_case(
         for descriptor in descriptors
     ]
 
+    closure_attachment_fields = [field for field in declared_fields if field['code'] in {'fjsc1', 'fjsc2', 'tksqs'}]
+    if (closure_evidence is not None and not logical_resources
+            and closure_evidence['resource_inventory']['resource_count'] == 0
+            and {field['code'] for field in closure_attachment_fields} == {'fjsc1', 'fjsc2', 'tksqs'}
+            and all(field['read_status'] == 'empty' for field in closure_attachment_fields)):
+        empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
+
+    invoice_title_reference = None
+    if config.get('flow_key') in invoice_titles.WORKFLOWS:
+        try:
+            invoice_title_reference = invoice_titles.snapshot()
+        except invoice_titles.InvoiceTitleReadError:
+            raise CollectionFailure('invoice_title_reference_read_failed') from None
+
     return {
+        **({"travel_read_exception": read_exception} if read_exception is not None else {}),
         "schema_version": 1,
         "kind": "preaudit_material",
         "request_id": str(request_id),
@@ -700,6 +755,8 @@ def _collect_case(
         "attachment_deduplication": attachment_deduplication,
         "prepared": prepared,
         "authority_facts": authority_facts,
+        **({'invoice_title_reference': invoice_title_reference} if invoice_title_reference is not None else {}),
+        **({"dealer_closure_evidence": closure_evidence} if closure_evidence is not None else {}),
         **({"attachment_scan": travel_scan} if travel_scan else {}),
         **({"invoice_evidence": invoice_evidence} if invoice_evidence else {}),
         "warnings": warnings,

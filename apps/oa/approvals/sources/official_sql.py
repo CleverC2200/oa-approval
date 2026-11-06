@@ -280,6 +280,22 @@ def workflow_attachment_document(request_id: str, file_id: str) -> str:
     return doc_id if re.fullmatch(r"[1-9][0-9]*", doc_id) else ""
 
 
+def document_ofd_attachment_matches(document_id: str, file_id: str) -> bool:
+    if not all(re.fullmatch(r"[1-9][0-9]*", value) for value in (document_id, file_id)):
+        return False
+    rows = _query_rows("document_ofd_attachment", {"document_id": int(document_id)},
+                       require_connection=True)
+    if len(rows) != 1:
+        return False
+    row = rows[0]
+    return (str(row.get("docid")) == document_id
+            and str(row.get("imagefileid")) == file_id
+            and str(row.get("doctype")) == "1"
+            and str(row.get("isextfile")) == "1"
+            and str(row.get("docfiletype")) == "2"
+            and str(row.get("imagefilename") or "").lower().endswith(".ofd"))
+
+
 def resolve_request_id(flow_number: str) -> str:
     request_mark = str(flow_number or "").strip()
     if not request_mark:

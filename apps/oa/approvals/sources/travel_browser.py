@@ -1,5 +1,7 @@
 from __future__ import annotations
-from contextlib import contextmanager
+
+from apps.oa.runtime import collection_budget
+from contextlib import ExitStack, contextmanager
 import html
 from html.parser import HTMLParser
 import os
@@ -12,13 +14,14 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List
 from apps.oa.approvals.source_policy import SourcePolicy
-from apps.oa.approvals.sources import downloads as attachments, travel_hotel
+from apps.oa.approvals.sources import downloads as attachments, travel_hotel, travel_invoices
 from apps.oa.approvals.sources.travel_evidence import (
     ATTACHMENT_ID_RE as TRIP_ATTACHMENT_ID_RE,
     CandidateObservation,
     attachment_id as _attachment_id_from_url,
     merge_inventory as _merge_attachment_inventory,
     page_pending as _trip_page_pending,
+    sso_rejection,
 )
 from apps.oa.runtime import slots as resource_slots
 
@@ -30,6 +33,7 @@ TRIP_ATTACHMENT_API_PATHS = {
 TRIP_EXPENSE_API_PATH = "/fcecf/fcc/pcapi/COMM_B2G_LoadBxmxList"
 DEFAULT_TRAVEL_BROWSER_CAPACITY = 2
 MAX_TRAVEL_BROWSER_CAPACITY = 8
+BROWSER_CLEANUP_SECONDS = 15
 
 
 def _travel_browser_capacity() -> int:
@@ -171,6 +175,7 @@ class _CandidateCapture:
         self.resources = []
         self.inventory = []
         self.hotel_orders = []
+        self.expenses = None
         self.diagnostics = []
 
     def observe(self, response):
@@ -381,9 +386,16 @@ class _CandidateCapture:
         trip_host = urllib.parse.urlparse(self.policy.travel_origin).hostname or ""
         if parsed.hostname != trip_host or parsed.path != TRIP_EXPENSE_API_PATH:
             return
+        self.expenses = None
         try:
             payload = response.json()
             discovered = travel_hotel.orders_from_expenses(payload)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            rows = result.get("bxmxList") if isinstance(result, dict) else result
+            if getattr(response, "status", 200) == 200 and payload.get("success") is True and isinstance(rows, list) and all(isinstance(row, dict) for row in rows):
+                self.expenses = rows
+            else:
+                self.expenses = None
             if isinstance(payload, dict) and payload.get("success") is False:
                 diagnostics.append(
                     {
@@ -419,6 +431,7 @@ class _CandidateSession:
         budget,
         headless,
         expected_resource_count,
+        expected_marker="",
     ):
         (self.context, self.policy, self.url) = (context, policy, url)
         (self.deadline, self.budget) = (deadline, budget)
@@ -430,6 +443,7 @@ class _CandidateSession:
         self.capture = _CandidateCapture(policy)
         self.page.on("response", self.capture.observe)
         self.stage = "navigation"
+        self.expected_marker = expected_marker
 
     def __enter__(self):
         return self
@@ -453,6 +467,9 @@ class _CandidateSession:
                     http_status=status,
                 )
             self.page.wait_for_timeout(200)
+            rejection = sso_rejection(self.page.url, self.policy.travel_origin)
+            if rejection:
+                return CandidateObservation.failure("session", rejection, headless=self.headless)
             self.stage = "page"
             initial_text = _read_stable_body_text(
                 self.page, timeout_sec=max(1, int(self.deadline - time.monotonic()))
@@ -469,17 +486,27 @@ class _CandidateSession:
             )
             return self._observation(initial_text, details, snapshot)
         except Exception as error:
+            from playwright.sync_api import TimeoutError as BrowserTimeout
+
             return CandidateObservation.failure(
-                self.stage, f"{self.stage}_failed", headless=self.headless, error=error
+                self.stage, "browser_deadline" if isinstance(error, BrowserTimeout) else f"{self.stage}_failed",
+                headless=self.headless, error=error
             )
 
     def _observation(self, initial_text, details, snapshot):
+        invoices = travel_invoices.read_invoices(
+            self.context.request, self.capture.expenses,
+            marker=self.expected_marker,
+            origin=self.policy.travel_origin,
+            timeout_sec=max(0.1, self.deadline - time.monotonic()),
+        )
         text = str(snapshot.get("text") or initial_text)
         if initial_text and initial_text not in text:
             text = f"{initial_text}\n{text}".strip()
         observed = list(snapshot.get("resources") or [])
         resources = observed if snapshot.get("resource_scan_stable") else []
-        if resources:
+        invoice_resources = [invoice["resource"] for record in invoices for invoice in record["invoices"] if "resource" in invoice]
+        if resources or invoice_resources:
             try:
                 cookie = self._ephemeral_trip_cookie_header(
                     self.context.cookies([self.policy.travel_origin])
@@ -487,7 +514,7 @@ class _CandidateSession:
             except Exception:
                 cookie = ""
             if cookie:
-                for resource in resources:
+                for resource in resources + invoice_resources:
                     resource["_ephemeral_cookie_header"] = cookie
         status = "resources_found" if resources else "read_failed"
         if (
@@ -511,6 +538,7 @@ class _CandidateSession:
             tuple(details),
             mode,
             tuple(({**item, "browser": mode} for item in self.capture.diagnostics)),
+            order_invoices=tuple(invoices),
         )
 
     def _ephemeral_trip_cookie_header(self, cookies: List[Dict[str, Any]]) -> str:
@@ -678,11 +706,15 @@ class _BrowserAttempt:
                 )
             ]
         try:
-            with sync_playwright() as playwright:
-                with _wall_clock_timeout(max(1, self.timeout_sec) + 5):
+            stack = ExitStack()
+            browser = None
+            try:
+                with collection_budget.phase("travel_browser", max(1, self.timeout_sec)):
+                    self.deadline = time.monotonic() + max(1, self.timeout_sec)
+                    playwright = stack.enter_context(sync_playwright())
                     launch = {
                         "headless": self.headless,
-                        "timeout": max(1000, self.timeout_sec * 1000),
+                        "timeout": max(1, int((self.deadline - time.monotonic()) * 1000)),
                     }
                     if Path(str(self.policy.browser.chrome_binary)).exists():
                         launch["executable_path"] = str(
@@ -691,6 +723,13 @@ class _BrowserAttempt:
                     browser = playwright.chromium.launch(**launch)
                     context = browser.new_context(storage_state=self.storage_state)
                     self._read_candidates(context)
+            finally:
+                with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
+                    try:
+                        if browser is not None:
+                            browser.close()
+                    finally:
+                        stack.close()
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
                 CandidateObservation.failure(
@@ -705,7 +744,7 @@ class _BrowserAttempt:
         return self.results
 
     def _read_candidates(self, context):
-        deadline = time.monotonic() + max(1, self.timeout_sec)
+        deadline = self.deadline
         for index, url in enumerate(self.urls):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -724,10 +763,12 @@ class _BrowserAttempt:
                 budget=budget,
                 headless=self.headless,
                 expected_resource_count=self.expected_resource_count,
+                expected_marker=self.expected_marker,
             ) as candidate:
                 observation = candidate.read()
                 self.results.append(observation)
-                if observation.assess(
+                if any(item.get("reason", "").startswith("travel_sso_")
+                       for item in observation.diagnostics) or observation.assess(
                     expected_marker=self.expected_marker,
                     expected_resource_count=self.expected_resource_count,
                 ).attempt_complete:

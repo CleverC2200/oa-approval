@@ -6,6 +6,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from PIL import Image
+
 from apps.oa.approvals.sources import browser_session, native_documents
 from apps.oa.approvals.sources.download_errors import (
     Downloaded,
@@ -27,6 +29,19 @@ _CLOUD_DOWNLOAD_URL = "https://api.mypiaojia.com/invoiceApi/file/download"
 class OriginalContext:
     client: object
     sources: dict
+
+
+def valid_original_file(resource: dict, path: Path) -> bool:
+    if resource.get('_invoice_original', {}).get('file_type') != 'jpg':
+        return True
+    try:
+        with Image.open(path) as image:
+            if image.format != 'JPEG':
+                return False
+            image.load()
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+    return True
 
 
 class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
@@ -77,6 +92,7 @@ class OriginalSources:
             document_id=source["document_id"],
             timeout_sec=timeout_sec,
             initialize=initialize,
+            allow_ofd_attachment=source.get("representation") == "official_pdf",
         )
 
     def read(
@@ -98,6 +114,15 @@ class OriginalSources:
     def _read(self, context, resource, *, dest_dir, timeout_sec) -> TransferOutcome:
         checked = self._checked_resource(resource)
         url = checked["downloadUrl"]
+        if checked.get('_invoice_original', {}).get('representation') == 'official_pdf':
+            try:
+                verified = self._verify(context, checked, timeout_sec=timeout_sec, initialize=True)
+            except browser_session.RpaSessionError as error:
+                return Failed(DownloadError(error.code, error.code))
+            if not verified:
+                return Failed(DownloadError('resource_ownership_untrusted', 'resource_ownership_untrusted'))
+            return self._cloud(context, checked, dest=dest_dir / deterministic_filename(resource),
+                               timeout_sec=timeout_sec)
         first = self._transfer.native(
             checked, url, dest_dir=dest_dir, timeout_sec=timeout_sec
         )
@@ -134,6 +159,7 @@ class OriginalSources:
                     DownloadError(
                         outcome.error.code,
                         f"{outcome.error.code}: 关联发票原件读取失败",
+                        outcome.error.diagnostics,
                     )
                 )
             return outcome
@@ -188,23 +214,34 @@ class OriginalSources:
                 if length is not None and (
                     not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES
                 ):
+                    reason = ('cloud_content_length_invalid' if not length.isdecimal()
+                              else 'cloud_content_too_large')
                     return Failed(
                         DownloadError(
                             "attachment_content_incomplete",
                             "attachment_content_incomplete",
+                            ({'stage': 'invoice_original_download',
+                              'reason': reason,
+                              'file_ref': native_file_id},),
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
-                if (
-                    len(body) > _MAX_ORIGINAL_BYTES
-                    or not body.startswith(b"%PDF-")
-                    or length is not None
-                    and len(body) != int(length)
-                ):
+                signature = b'\xff\xd8\xff' if source.get('file_type') == 'jpg' else b'%PDF-'
+                reason = ''
+                if len(body) > _MAX_ORIGINAL_BYTES:
+                    reason = 'cloud_content_too_large'
+                elif not body.startswith(signature):
+                    reason = 'cloud_signature_mismatch'
+                elif length is not None and len(body) != int(length):
+                    reason = 'cloud_length_mismatch'
+                if reason:
                     return Failed(
                         DownloadError(
                             "attachment_content_incomplete",
                             "attachment_content_incomplete",
+                            ({'stage': 'invoice_original_download',
+                              'reason': reason,
+                              'file_ref': native_file_id},),
                         )
                     )
             if not self._verify(context, resource, timeout_sec=timeout_sec):

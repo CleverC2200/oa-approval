@@ -17,6 +17,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description='单轮 SQLite 审批；默认预览，不写 OA。')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
     commands = parser.add_subparsers(dest='operation', required=True)
+    prediction = commands.add_parser('predict', help='直接调用 OA API 查询完整节点和流转预测；JSON 保留原始响应，不提交或保存表单',
+                                     description='通过 OA API 查询全部节点及办理人，保留完整原始响应，并按私有名单标记财务前置需求及原因。无需浏览器，会生成预测缓存，不提交审批或保存表单。')
+    prediction.add_argument('--request-id', required=True)
+    prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号及发起人核验、预测轮询和办理人读取的总等待秒数，1–300，默认60')
+    prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
+    prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
     cleanup.add_argument('--execute', action='store_true')
     pending = commands.add_parser('start', aliases=['pending'], help='重新拉取待办并保持前台owner；EOF或finish安全结束')
@@ -27,6 +33,7 @@ def main(argv=None):
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
     pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
+    pending.add_argument('--retry-failed', choices=['YES'], help='仅按本次明确授权重试 --request-id 指定的失败投递；小时任务默认排除历史失败')
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
@@ -37,21 +44,23 @@ def main(argv=None):
     finish = commands.add_parser('finish', help='结束指定轮次；等待当前采集落盘，不代表业务全部完成')
     finish.add_argument('--run-id', required=True)
     finish.add_argument('--handoff', action='store_true', help='排空后关闭并预留下一轮；返回原生独立对话接续信息')
-    finish.add_argument('--require-drained', action='store_true', help='正常收尾前拒绝在途审核或未核实提交；保留 owner 等待处理')
+    finish.add_argument('--require-drained', action='store_true', help='正常收尾前拒绝在途采集、审核或未核实提交，保留 owner')
     finish.add_argument('--orphaned', action='store_true', help='显式核对后关闭失联轮次；仅写本地事实，不恢复审核或创建接续')
+    finish.add_argument('--collection-stopped-note', help='仅与 --orphaned 使用，记录本次人工确认采集进程已停止的授权及核对依据')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
     collect.add_argument('--workflow-key')
     collect.add_argument('--agent-id', required=True)
     collect.add_argument('--expected-task-id', type=int, required=True)
     collect.add_argument('--agent-workflow-key', required=True)
-    submit = commands.add_parser('submit', help='保存意见，显式确认时提交并回查')
+    collect.add_argument('--travel-read-exception-file', type=Path, help='本单明确授权的商旅登录失败受限审核记录，含request_id及authorization_note；不继承到其他单据')
+    submit = commands.add_parser('submit', help='保存意见，显式确认时按计划提交或转办并回查')
     submit.add_argument('--task-id', type=int, required=True)
     submit.add_argument('--opinion-file', type=Path)
     submit.add_argument('--recognition-file', type=Path, help='海外识别结果或带附件来源的 DeepSeek 报告；可与意见一起保存')
     submit.add_argument('--observations-file', type=Path)
     submit.add_argument('--confirm-write', choices=['YES'])
     submit.add_argument('--allow-overseas', choices=['YES'])
-    preview = commands.add_parser('preview', help='保存本地审核并展示意见和限定字段计划，不写OA')
+    preview = commands.add_parser('preview', help='保存本地审核并展示意见、处理动作和限定字段计划，不写OA')
     preview.add_argument('--task-id', type=int, required=True)
     preview.add_argument('--opinion-file', type=Path)
     preview.add_argument('--recognition-file', type=Path)
@@ -72,6 +81,11 @@ def main(argv=None):
         parser.error('--confirm-not-written YES, a nonempty --confirmation-note and a positive --expected-submission-id must be supplied together')
     if args.operation == 'finish' and args.orphaned and (args.handoff or args.require_drained):
         parser.error('--orphaned cannot use --handoff or --require-drained')
+    if args.operation == 'finish' and args.collection_stopped_note is not None and (
+            not args.orphaned or not args.collection_stopped_note.strip()):
+        parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
+    if args.operation in {'pending', 'start'} and args.retry_failed and (not args.request_id or args.continue_from):
+        parser.error('--retry-failed YES requires --request-id and cannot change a continuation')
     if args.operation in {'pending', 'start'} and args.limit < 0:
         parser.error('--limit must be non-negative')
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
@@ -83,6 +97,15 @@ def main(argv=None):
         parser.error('submit requires --opinion-file or --recognition-file')
     root = args.root.expanduser().resolve()
     try:
+        if args.operation == 'predict':
+            from apps.oa.approvals.sources.prediction import predict, render_text
+
+            result = predict(args.request_id, timeout=args.timeout, refresh=args.refresh)
+            if args.format == 'json':
+                emit(result)
+            else:
+                print(render_text(result), flush=True)
+            return 0 if result['complete'] else 1
         if args.operation == 'cleanup':
             from apps.oa.approvals import retention
             from apps.oa.approvals.owner import round_lock
@@ -105,7 +128,7 @@ def main(argv=None):
 
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
-                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from)
+                             batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from, retry_failed=args.retry_failed == 'YES')
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0
@@ -117,12 +140,14 @@ def main(argv=None):
         if args.operation == 'finish' and args.orphaned:
             from apps.oa.approvals.owner import finish_orphaned
 
-            emit(finish_orphaned(root, args.run_id))
+            emit(finish_orphaned(root, args.run_id, collection_stopped_note=args.collection_stopped_note))
             return 0
         request = {'operation': args.operation}
         if args.operation == 'collect':
             request.update(workflow_key=args.workflow_key, agent_id=args.agent_id,
                            expected_task_id=args.expected_task_id, agent_workflow_key=args.agent_workflow_key)
+            if args.travel_read_exception_file:
+                request['travel_read_exception'] = json.loads(args.travel_read_exception_file.read_text())
         elif args.operation == 'finish':
             request['run_id'] = args.run_id
             request['handoff'] = args.handoff

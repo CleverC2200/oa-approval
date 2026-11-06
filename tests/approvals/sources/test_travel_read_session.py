@@ -115,6 +115,8 @@ def test_api_bootstrap_reuses_registration_keeps_cookie_private(
         ("travel_dom_not_ready", True, ["moli", "chromium"]),
         ("travel_session_identity_mismatch", False, ["moli"]),
         ("travel_upstream_access_denied", False, ["moli"]),
+        ("travel_sso_account_missing", False, ["moli"]),
+        ("travel_sso_company_missing", False, ["moli"]),
         ("travel_source_binding_mismatch", False, ["moli"]),
         ("travel_required_request_blocked", False, ["moli"]),
     ],
@@ -658,3 +660,78 @@ def test_collector_closes_read_session_even_on_pre_discovery_failure(monkeypatch
             allow_browser_download=True,
         )
     assert session.closed
+
+
+def test_browser_attempt_and_fallback_do_not_arm_process_signal(monkeypatch):
+    import signal
+
+    monkeypatch.setattr(sessions, "api_storage_state", lambda *a, **kw: {"cookies": []})
+    session = sessions.TravelReadSession(policy())
+    calls = []
+
+    def attempt(engine, state, urls, marker, count, deadline, **kwargs):
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        calls.append(engine)
+        if engine == "moli":
+            raise ReadFailure("travel_dom_not_ready", retryable=True)
+        return CandidateObservation(text="CASE-A", scan_status="empty")
+
+    monkeypatch.setattr(session, "_attempt", attempt)
+    try:
+        session.read_attempt(["https://oa.example.test/sn_slv_bxbz.jsp"], timeout_sec=10,
+                             expected_marker="CASE-A", expected_resource_count=0)
+        assert calls == ["moli", "chromium"]
+    finally:
+        session.close()
+
+
+def test_browser_phase_deadlines_are_reported_outside_browser_process(tmp_path, monkeypatch):
+    import json
+    import time
+
+    from apps.oa.runtime import collection_budget
+
+    marker = tmp_path / 'phase.json'
+    seen = []
+    monkeypatch.setattr(sessions, 'api_storage_state', lambda *a, **kw: {'cookies': []})
+    session = sessions.TravelReadSession(policy('chromium'))
+
+    def attempt(*args, **kwargs):
+        state = json.loads(marker.read_text())
+        assert state['phase'] == 'travel_read'
+        assert 0 < state['deadline'] - time.monotonic() <= 10
+        return CandidateObservation(text='CASE-A', scan_status='empty')
+
+    monkeypatch.setattr(session, '_attempt', attempt)
+    session.engine_stack.callback(lambda: seen.append(json.loads(marker.read_text())['phase']))
+    with collection_budget.tracking(marker):
+        session.read_attempt(['https://oa.example.test/sn_slv_bxbz.jsp'], timeout_sec=10,
+                             expected_marker='CASE-A', expected_resource_count=0)
+        assert json.loads(marker.read_text()) is None
+        session.close()
+        assert json.loads(marker.read_text()) is None
+    assert seen == ['browser_cleanup']
+
+
+@pytest.mark.parametrize('message,reason', [
+    ('非单点登录场景，请联系管理员', 'travel_sso_account_missing'),
+    ('未绑定法人公司，请联系管理员', 'travel_sso_company_missing'),
+])
+def test_readonly_navigation_rejects_sso_error_before_waiting_for_source(message, reason):
+    from urllib.parse import urlencode
+    from apps.oa.approvals.sources.travel_page_compat import ReadPage
+
+    selected = policy()
+    raw = SimpleNamespace(
+        url=selected.travel_origin + '/fcc/default/login/ssoError.html?' + urlencode(
+            {'errorMsg': message, 'traceId': 'synthetic-private-trace'}),
+        goto=lambda *_a, **_k: SimpleNamespace(status=200),
+    )
+    owner = SimpleNamespace(session=SimpleNamespace(policy=selected), deadline=0,
+                            payloads=[], marker="CASE-A")
+    page = ReadPage(raw, owner)
+    with pytest.raises(ReadFailure) as error:
+        page.goto(selected.attachments.oa_origin + '/sn_slv_bxbz.jsp')
+    assert error.value.code == reason
+    assert not error.value.retryable
+    assert 'synthetic-private-trace' not in str(error.value)

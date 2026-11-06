@@ -58,6 +58,75 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 SQL_TEMPLATES: dict[str, SqlTemplate] = {
+    "dealer_closure_history": SqlTemplate(
+        name="dealer_closure_history",
+        purpose="按关户申请读取历史意见并保留文本完整性依据",
+        sql="""
+            select l.logid, l.requestid, l.nodeid, l.logtype,
+                   l.operator as operator_id, l.operatedate, l.operatetime,
+                   length(l.remark) as remark_length,
+                   dbms_lob.substr(l.remark, 4000, 1) as remark
+            from ecology.workflow_requestlog l
+            join ecology.workflow_requestbase r on r.requestid=l.requestid
+            where r.workflowid=195127 and l.requestid=:request_id
+            order by l.logid
+        """,
+        params=("request_id",), max_rows=1001, timeout_sec=10,
+    ),
+    "dealer_closure_forward_log": SqlTemplate(
+        name="dealer_closure_forward_log",
+        purpose="按本次关户投递的节点和接收时点核对唯一原转发日志",
+        sql="""
+            select l.logid, l.operator as operator_id
+            from ecology.workflow_requestlog l
+            where l.requestid = :request_id and l.nodeid = :node_id
+              and l.operatedate = :received_date and l.operatetime = :received_time
+              and l.logtype = '7'
+        """,
+        params=("request_id", "node_id", "received_date", "received_time"), max_rows=2, timeout_sec=5,
+    ),
+    "dealer_closure_feedback_logs": SqlTemplate(
+        name="dealer_closure_feedback_logs",
+        purpose="按当前用户、节点和提交开始时点核对关户批注原文",
+        sql="""
+            select l.logid, l.operator as operator_id, l.nodeid,
+                   l.operatedate, l.operatetime, length(l.remark) as remark_length,
+                   dbms_lob.substr(l.remark, 4000, 1) as remark
+            from ecology.workflow_requestlog l
+            where l.requestid = :request_id and l.nodeid = :node_id
+              and l.operator = :operator_id
+              and (l.operatedate > :started_date or
+                   (l.operatedate = :started_date and l.operatetime >= :started_time))
+            order by l.logid desc
+        """,
+        params=("request_id", "node_id", "operator_id", "started_date", "started_time"), max_rows=20, timeout_sec=5,
+    ),
+    "dealer_closure_branch_fields": SqlTemplate(
+        name="dealer_closure_branch_fields",
+        purpose="按关户申请冻结当前实际节点的分支字段填写职责",
+        sql="""
+            select r.currentnodeid, b.fieldname, f.isedit, f.ismandatory
+            from ecology.workflow_requestbase r
+            join ecology.workflow_base w on w.id = r.workflowid
+            join ecology.workflow_billfield b on b.billid = w.formid
+            join ecology.workflow_nodeform f on f.nodeid = r.currentnodeid and f.fieldid = b.id
+            where r.requestid = :request_id and r.workflowid = '195127'
+              and b.fieldname in ('yetk', 'sftk') and b.viewtype = 0
+            order by b.fieldname
+        """,
+        params=("request_id",), max_rows=3, timeout_sec=5,
+    ),
+    "dealer_closure_current_node": SqlTemplate(
+        name="dealer_closure_current_node",
+        purpose="按关户申请精确读取实际流程节点",
+        sql="""
+            select r.requestid, r.currentnodeid, r.currentnodetype, n.nodename
+            from ecology.workflow_requestbase r
+            left join ecology.workflow_nodebase n on n.id = r.currentnodeid
+            where r.requestid = :request_id and r.workflowid = '195127'
+        """,
+        params=("request_id",), max_rows=2, timeout_sec=5,
+    ),
     "overseas_invoice_attachment_fields": SqlTemplate(
         name="overseas_invoice_attachment_fields",
         purpose="按当前海外采购流程与精确明细身份核对上传发票空值",
@@ -121,6 +190,21 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
             where rownum <= 2
         """,
         params=("request_id", "file_id"),
+        max_rows=2,
+        timeout_sec=5,
+    ),
+    "document_ofd_attachment": SqlTemplate(
+        name="document_ofd_attachment",
+        purpose="核对关联发票文档唯一的 OFD 附件身份",
+        sql="""
+            select d.docid, d.imagefileid, d.imagefilename, d.isextfile,
+                   d.docfiletype, m.doctype
+            from ecology.docimagefile d
+            join ecology.docdetail m on m.id = d.docid
+            where d.docid = :document_id
+              and rownum <= 2
+        """,
+        params=("document_id",),
         max_rows=2,
         timeout_sec=5,
     ),
