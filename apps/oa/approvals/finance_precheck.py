@@ -35,6 +35,11 @@ def load_policy():
     return data
 
 
+def unresolved_path(node):
+    return node['state'] in {'unknown', 'loading'} and not (
+        node['state'] == 'unknown' and node.get('resolution', {}).get('kind') == 'terminal_self_loop')
+
+
 def assess(result, policy):
     if policy is None:
         return {'status': 'not_configured', 'required': None, 'reasons': [], 'uncertainties': ['policy_missing']}
@@ -48,7 +53,7 @@ def assess(result, policy):
     if not result['complete']:
         uncertainties.add('prediction_incomplete')
     for node in result['nodes']:
-        if node['state'] in {'unknown', 'loading'}:
+        if unresolved_path(node):
             uncertainties.add('prediction_path_unknown')
         if node['state'] != 'predicted':
             continue
@@ -93,7 +98,7 @@ def delivery_plan(result, policy):
     source = current[0]
     future = [node for node in result['nodes'] if node['sequence'] > source['sequence']]
     if ((source['branch_count'] or 0) > 1
-            or any(node['state'] in {'unknown', 'loading'} or (node['branch_count'] or 0) > 1 for node in future)):
+            or any(unresolved_path(node) or (node['branch_count'] or 0) > 1 for node in future)):
         return {**plan, 'reason': 'finance_route_ambiguous'}
     for node in future:
         if node['state'] != 'predicted' or node['node_name'] not in FINANCE_NODE_NAMES:

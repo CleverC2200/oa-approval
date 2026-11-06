@@ -395,3 +395,43 @@ def test_public_cli_reports_transfer_target_without_writing(native, finance_rule
     assert output['raw_prediction'] == payload
     assert {row[0] for row in native.requests} <= {
         prediction.ACCOUNT_PATH, prediction.REQUEST_PATH, prediction.PREDICTION_PATH, prediction.OPERATOR_PATH}
+
+
+@pytest.mark.parametrize('topology', ['closed', 'extra_exit', 'missing_exit', 'wrong_request', 'subprocess', 'not_archive', 'unavailable', 'other_unknown'])
+def test_verified_terminal_loop_resolves_people_scope_without_hiding_native_unknown(native, finance_rule, monkeypatch, topology):
+    from apps.oa.approvals.sources import official_sql
+
+    payload = result()
+    payload['nodeInfo'][2]['branchNumber'] = 1
+    if topology == 'other_unknown':
+        payload['nodeInfo'].insert(1, {'nodeid': 99, 'nodeType': 2, 'nodeName': '另一未知段'})
+    payload['nodeInfo'].append({'nodeid': 30, 'nodeName': '归档', 'nodeType': 3, 'ntype': '3'})
+    native.operators[('30', '3')] = {'nodes': [{'operators': []}]}
+    native.replies.append(payload)
+    rows = [
+        {'requestid': 123, 'nodeid': 20, 'destnodeid': dest, 'isend': end, 'isreject': '0',
+         'customworkflowid': None, 'node_type': kind}
+        for dest, end, kind in [(20, '0', '1'), (30, '1', '3')]]
+    if topology == 'extra_exit':
+        rows.append({**rows[0], 'destnodeid': 40})
+    elif topology == 'missing_exit':
+        rows.pop()
+    elif topology == 'wrong_request':
+        rows[0]['requestid'] = 456
+    elif topology == 'subprocess':
+        rows[0]['customworkflowid'] = 99
+    elif topology == 'not_archive':
+        rows[1]['isend'] = '0'
+    def read(name, params, **kwargs):
+        assert name == 'prediction_terminal_loop_links'
+        assert params == {'request_id': 123, 'node_id': 20}
+        if topology == 'unavailable':
+            raise RuntimeError('official_sql_unavailable')
+        return rows
+    monkeypatch.setattr(official_sql, '_query_rows', read)
+    output = prediction.predict('123')
+    assert output['raw_prediction'] == payload
+    assert output['has_unknown_nodes'] is True
+    assert output['nodes'][-2]['state'] == 'unknown'
+    assert output['finance_precheck']['required'] is (False if topology == 'closed' else None)
+    assert output['delivery']['action'] == ('submit' if topology == 'closed' else 'blocked')

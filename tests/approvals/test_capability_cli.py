@@ -950,3 +950,53 @@ def test_batch_status_error_reply_cannot_prove_owner_exit(tmp_path, monkeypatch,
         assert status['closeout']['complete'] is False
     finally:
         app.store.connection.close()
+
+
+@pytest.mark.parametrize('change', ['none', 'wrong_run', 'wrong_review', 'preview', 'attempted', 'locked', 'owner'])
+def test_explicit_closed_prewrite_failure_preserves_review_and_never_releases_an_attempt(tmp_path, monkeypatch, capsys, change):
+    from apps.oa.approvals import owner
+
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path)
+    app = create_demo(tmp_path)
+    started = app.pending(batch_size=1)
+    task = started['tasks'][0]
+    app.collect(started['run_id'], agent_id='legacy', expected_task_id=task['id'],
+                agent_workflow_key=task['workflow_key'])
+    review = app.store.review(task['id'], 'Synthetic preserved review')
+    if change == 'attempted':
+        app.store.begin_submission(task['id'], review['id'])
+        app.store.set_status(task['id'], 'reviewed')
+    elif change == 'preview':
+        app.store.set_status(task['id'], 'preview')
+    app.close(started['run_id'])
+    original = app.inspect(task['id'])
+    args = ['--root', str(tmp_path), 'fail', '--task-id', str(task['id']),
+            '--closed-run-id', 'wrong' if change == 'wrong_run' else started['run_id'],
+            '--expected-review-id', str(review['id'] + (1 if change == 'wrong_review' else 0)),
+            '--reason', 'finance_prediction_incomplete']
+    from contextlib import ExitStack
+    import socket
+
+    with ExitStack() as stack:
+        if change == 'locked':
+            stack.enter_context(owner.round_lock(tmp_path, shared_root=tmp_path / 'runtime'))
+        elif change == 'owner':
+            endpoint = owner.socket_path(tmp_path)
+            endpoint.unlink(missing_ok=True)
+            stack.callback(endpoint.unlink, missing_ok=True)
+            server = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+            server.bind(str(endpoint))
+            server.listen(1)
+        assert cli.main(args) == (0 if change == 'none' else 1)
+    output = json.loads(capsys.readouterr().out)
+    after = app.inspect(task['id'])
+    assert after['reviews'] == original['reviews']
+    assert after['submissions'] == original['submissions']
+    if change == 'none':
+        assert output['status'] == 'failed'
+        assert after['task']['status'] == 'failed'
+        retry = app.pending(request_ids=[task['request_id']], retry_failed=True, batch_size=1)
+        assert retry['batch']['task_ids'] == [task['id']]
+    else:
+        assert after['task']['status'] == original['task']['status']

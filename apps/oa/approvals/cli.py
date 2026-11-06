@@ -73,6 +73,8 @@ def main(argv=None):
     failed = commands.add_parser('fail', help='登记当前轮活动审核的技术失败，不访问 OA')
     failed.add_argument('--task-id', type=int, required=True)
     failed.add_argument('--reason', required=True)
+    failed.add_argument('--closed-run-id', help='显式核对已关闭最新轮次的写前失败，不恢复审核或访问OA')
+    failed.add_argument('--expected-review-id', type=int, help='与--closed-run-id配套，精确核对无提交尝试的待提交意见')
     args = parser.parse_args(argv)
     if args.operation == 'postcheck' and (
             bool(args.confirm_not_written) != bool(args.confirmation_note and args.confirmation_note.strip())
@@ -95,6 +97,9 @@ def main(argv=None):
         parser.error('--continue-from preserves the original selection; omit --workflow, --request-id and --batch-size')
     if args.operation in {'submit', 'preview'} and not (args.opinion_file or args.recognition_file):
         parser.error('submit requires --opinion-file or --recognition-file')
+    if args.operation == 'fail' and (bool(args.closed_run_id) != (args.expected_review_id is not None)
+            or (args.expected_review_id is not None and args.expected_review_id <= 0)):
+        parser.error('--closed-run-id and positive --expected-review-id must be supplied together')
     root = args.root.expanduser().resolve()
     try:
         if args.operation == 'predict':
@@ -141,6 +146,11 @@ def main(argv=None):
             from apps.oa.approvals.owner import finish_orphaned
 
             emit(finish_orphaned(root, args.run_id, collection_stopped_note=args.collection_stopped_note))
+            return 0
+        if args.operation == 'fail' and args.closed_run_id:
+            from apps.oa.approvals.owner import fail_closed_review
+
+            emit(fail_closed_review(root, args.closed_run_id, args.task_id, args.expected_review_id, args.reason))
             return 0
         request = {'operation': args.operation}
         if args.operation == 'collect':

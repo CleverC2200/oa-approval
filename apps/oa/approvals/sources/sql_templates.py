@@ -58,6 +58,22 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 SQL_TEMPLATES: dict[str, SqlTemplate] = {
+    "prediction_terminal_loop_links": SqlTemplate(
+        name="prediction_terminal_loop_links",
+        purpose="核对同一申请末端重复节点的全部正常出口，仅证明重复或归档的拓扑范围",
+        sql="""
+            select r.requestid, l.nodeid, l.destnodeid, l.isreject, l.customworkflowid,
+                   n.isend, f.nodetype as node_type
+            from ecology.workflow_requestbase r
+            join ecology.workflow_nodelink l on l.workflowid=r.workflowid
+            left join ecology.workflow_nodebase n on n.id=l.destnodeid
+            left join ecology.workflow_flownode f on f.workflowid=r.workflowid and f.nodeid=l.destnodeid
+            where r.requestid=:request_id and l.nodeid=:node_id
+              and (l.isreject is null or l.isreject <> '1')
+            order by l.id
+        """,
+        params=("request_id", "node_id"), max_rows=3, timeout_sec=5,
+    ),
     "dealer_closure_history": SqlTemplate(
         name="dealer_closure_history",
         purpose="按关户申请读取历史意见并保留文本完整性依据",

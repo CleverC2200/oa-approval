@@ -241,6 +241,27 @@ class Store:
             self.connection.execute("UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1 WHERE id=?", (error,task_id))
         return self.get_task(task_id)
 
+    def fail_closed_review(self, run_id, task_id, review_id, reason):
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            latest = self.latest_run()
+            task = self.get_task(task_id)
+            if latest is None or latest['id'] != run_id or latest['status'] != 'closed':
+                raise ValueError('closed_run_mismatch')
+            if task['last_run_id'] != run_id or task['status'] != 'reviewed':
+                raise ValueError('task_not_unsubmitted_review')
+            review = self.connection.execute('SELECT id FROM reviews WHERE task_id=? ORDER BY id DESC LIMIT 1',
+                                             (task_id,)).fetchone()
+            if review is None or review['id'] != review_id:
+                raise ValueError('review_mismatch')
+            if self.connection.execute('SELECT 1 FROM submissions WHERE task_id=?', (task_id,)).fetchone():
+                raise ValueError('submission_already_started')
+            if not isinstance(reason, str) or not reason.strip():
+                raise ValueError('failure_reason_required')
+            self.connection.execute("UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1 WHERE id=?",
+                                    (reason.strip(), task_id))
+        return {'run_id': run_id, 'task_id': task_id, 'review_id': review_id, 'status': 'failed', 'reason': reason.strip()}
+
     def fail_collection(self, task_id, error):
         with self.connection:
             self.connection.execute("UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1 WHERE id=? AND status='preparing'", (error,task_id))
