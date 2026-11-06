@@ -454,3 +454,80 @@ def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verific
     assert result['status'] == 'submitted'
     assert result['fields_match'] is True
     assert len(posts) == 1
+
+
+def test_document_references_collect_and_preview_in_original_order(case, tmp_path, monkeypatch):
+    data, resources, files, _, _ = case()
+    fields = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']
+    fields[0]['fieldValue'] = '902,901'
+    chosen = next(field for field in fields if field['fieldName'] == 'chosen_po')
+    chosen.update(fieldShowName='采购订单号码', fieldValue='001234', fieldHtmlType='1')
+    chosen.pop('fieldShowValue')
+    original = deepcopy(data)
+    calls = []
+
+    def document(request_id, file_id):
+        calls.append((request_id, file_id))
+        return {'101': '901', '102': '902'}[file_id]
+
+    class Api:
+        def pending_rows(self):
+            return [{'request_id': '201', 'received_at': '2026-10-23 09:00:00',
+                     'operator_id': 'tester', 'workflow_key': 'overseas_invoice'}]
+
+        def request_context(self, request_id):
+            assert request_id == '201'
+            return data, resources
+
+        def submit_invoice(self, *args, **kwargs):
+            pytest.fail('preview must not write OA')
+
+    monkeypatch.setattr(overseas.official_sql, 'workflow_attachment_document', document)
+    monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
+    app = Approval(tmp_path / 'runtime', api=Api(), configs=[], source_policy=POLICY)
+    task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
+                       agent_workflow_key='overseas_invoice')
+    material = json.loads(Path(task['material_file']).read_text())
+    assert material['snapshot']['rows'][0]['resource_ids'] == ['102', '101']
+    assert material['snapshot']['rows'][0]['purchase_order'] == {'value': '001234', 'read_status': 'present'}
+    recognized = {'material_digest': invoice.digest(material), 'invoices': [
+        reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
+        for item in material['attachments']]}
+    preview = app.submit(task['task_id'], recognition=recognized)
+    assert preview['status'] == 'preview'
+    assert preview['field_plan']['updates'][0]['values']['fphm'] == 'INV-102,INV-101'
+    assert '❌' not in preview['opinion']
+    assert calls == [('201', '101'), ('201', '102')]
+    assert material['workflow'] == data
+    assert fields[0]['fieldValue'] == '902,901'
+    assert app.inspect(task['task_id'])['submissions'] == []
+    assert data == original
+
+
+@pytest.mark.parametrize('documents', [('', ''), ('901', '903'), ('901', '901')])
+def test_document_references_require_complete_unique_workflow_mapping(case, monkeypatch, documents):
+    data, resources, _, _, _ = case()
+    field = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
+    field['fieldValue'] = '901,902'
+    monkeypatch.setattr(overseas.official_sql, 'workflow_attachment_document',
+                        lambda request_id, file_id: dict(zip(('101', '102'), documents))[file_id])
+    with pytest.raises(ValueError, match='invoice_attachment_unbound'):
+        overseas.snapshot(data, resources, '201', origins=POLICY.attachments)
+
+
+def test_document_lookup_rejects_different_request_before_reading_sql(case, monkeypatch):
+    data, resources, _, _, _ = case()
+    monkeypatch.setattr(overseas.official_sql, 'workflow_attachment_document',
+                        lambda *_: pytest.fail('different request must not reach SQL'))
+    with pytest.raises(ValueError, match='invoice_identity_mismatch'):
+        overseas.snapshot(data, resources, '999', origins=POLICY.attachments)
+
+
+def test_purchase_order_aliases_with_multiple_candidates_remain_unresolved(case):
+    data, resources, _, material, recognized = case()
+    fields = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']
+    fields.append({'fieldName': 'other_po', 'fieldShowName': '采购订单号码', 'fieldValue': '009999'})
+    material['snapshot'] = invoice.snapshot(data, resources, origins=POLICY.attachments)
+    recognized['material_digest'] = invoice.digest(material)
+    assert material['snapshot']['rows'][0]['purchase_order']['read_status'] == 'unresolved'
+    assert '人工所选采购订单号未确认' in invoice.build_plan(material, recognized)['remark']
