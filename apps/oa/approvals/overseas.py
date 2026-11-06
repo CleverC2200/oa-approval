@@ -116,13 +116,15 @@ def snapshot(data: dict, resources: list[dict], *, writable: bool = True,
             _require((len(ids) == 1 or all(raw_ids)) and len(raw_ids) == len(set(raw_ids)) and len(ids) == len(raw_ids),
                      'invoice_attachment_unbound')
             if all(raw_ids):
-                matches = [[rid for rid in ids if reference == rid
-                            or (attachment_documents or {}).get(rid) == reference]
-                           for reference in raw_ids]
-                _require(all(len(group) == 1 for group in matches), 'invoice_attachment_unbound')
-                ordered_ids = [group[0] for group in matches]
-                _require(set(ordered_ids) == set(ids), 'invoice_attachment_unbound')
-                ids = ordered_ids
+                if set(ids) == set(raw_ids):
+                    ids = raw_ids
+                else:
+                    matches = [[rid for rid in ids if (attachment_documents or {}).get(rid) == reference]
+                               for reference in raw_ids]
+                    _require(all(len(group) == 1 for group in matches), 'invoice_attachment_unbound')
+                    ordered_ids = [group[0] for group in matches]
+                    _require(set(ordered_ids) == set(ids), 'invoice_attachment_unbound')
+                    ids = ordered_ids
             orders = [field for field in declared if field['table'] == f'detail_{ti}'
                         and field['row'] == ri and field['name'] in {'采购订单号', '采购订单号码'}]
             purchase_order = {'value': '', 'read_status': 'unresolved'}

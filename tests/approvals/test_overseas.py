@@ -504,11 +504,14 @@ def test_document_references_collect_and_preview_in_original_order(case, tmp_pat
     assert data == original
 
 
-@pytest.mark.parametrize('documents', [('', ''), ('901', '903'), ('901', '901')])
-def test_document_references_require_complete_unique_workflow_mapping(case, monkeypatch, documents):
+@pytest.mark.parametrize('references,documents', [
+    ('901,902', ('', '')), ('901,902', ('901', '903')), ('901,902', ('901', '901')),
+    ('901,102', ('901', '903')),
+])
+def test_document_references_require_complete_unique_workflow_mapping(case, monkeypatch, references, documents):
     data, resources, _, _, _ = case()
     field = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
-    field['fieldValue'] = '901,902'
+    field['fieldValue'] = references
     monkeypatch.setattr(overseas.official_sql, 'workflow_attachment_document',
                         lambda request_id, file_id: dict(zip(('101', '102'), documents))[file_id])
     with pytest.raises(ValueError, match='invoice_attachment_unbound'):

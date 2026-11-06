@@ -19,17 +19,17 @@ def snapshot(data, resources, request_id, *, origins, writable=True):
         if str(error) not in {"invoice_attachment_unbound","invoice_attachments_missing"}:
             raise
     empty = official_sql.confirmed_empty_attachment_fields(data,request_id=request_id,workflow_key="overseas_invoice")
-    fields = {field['path']: field for field in evidence_packet.extract_fields(data)
-              if field['field_name'] == 'scfp'}
+    logical = evidence_packet.logical_attachment_resources(data, resources, origins=origins)
     documents = {}
-    for resource in evidence_packet.logical_attachment_resources(data, resources, origins=origins):
-        field = fields.get(resource.get('_trusted_source_field_path'))
-        if field is None:
+    for field in evidence_packet.extract_fields(data):
+        if field['field_name'] != 'scfp':
             continue
         references = [value.strip() for value in field['raw_value'].split(',')]
-        file_id = str(resource.get('id') or '')
-        if all(references) and file_id not in references:
-            documents[file_id] = official_sql.workflow_attachment_document(request_id, file_id)
+        bound = [resource for resource in logical if resource.get('_trusted_source_field_path') == field['path']]
+        if all(references) and set(references) != {str(resource.get('id') or '') for resource in bound}:
+            for resource in bound:
+                file_id = str(resource.get('id') or '')
+                documents[file_id] = official_sql.workflow_attachment_document(request_id, file_id)
     return business.snapshot(data,resources,writable=writable,empty_fields=empty,
                              attachment_documents=documents,origins=origins)
 
