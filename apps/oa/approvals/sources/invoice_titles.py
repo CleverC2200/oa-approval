@@ -90,7 +90,8 @@ def snapshot():
             parser.feed(result['htmlTag'])
             return parser.cells
 
-        names = [cell for cell in report('REPORT1', None) if cell.endswith('公司')]
+        names = [cell for cell in report('REPORT1', None)
+                 if cell and cell != '开票人员开票时间节点要求']
         if not 1 <= len(names) <= 100 or len(set(names)) != len(names):
             raise ValueError('company_list')
         rows = []

@@ -8,7 +8,8 @@ from apps.oa.approvals.sources import invoice_titles
 
 ROWS = [
     {'company_name': '示例（杭州）食品有限公司', 'tax_id': 'A' * 18},
-    {'company_name': '另一(杭州)测试有限公司', 'tax_id': 'B' * 18},
+    {'company_name': '另一(杭州)测试有限公司 ', 'tax_id': 'B' * 18},
+    {'company_name': '示例企业（有限合伙）', 'tax_id': 'C' * 18},
 ]
 
 

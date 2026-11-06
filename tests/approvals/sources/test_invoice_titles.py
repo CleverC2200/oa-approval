@@ -20,7 +20,7 @@ def test_native_report_keeps_literal_names_and_only_required_reference_fields(mo
     assert reference['rows'] == ROWS
     assert reference['source_url'] == invoice_titles.SOURCE_URL
     assert datetime.fromisoformat(reference['observed_at']) <= datetime.fromisoformat(reference['completed_at'])
-    assert len(transport.requests) == 4
+    assert len(transport.requests) == 5
     assert all(response.closed for response in transport.responses)
     assert 'private' not in json.dumps(reference)
 
