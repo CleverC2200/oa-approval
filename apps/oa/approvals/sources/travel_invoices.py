@@ -52,7 +52,18 @@ def read_invoices(request, expenses, *, marker, origin, timeout_sec):
                 orders[order_no] = result
             result = orders[order_no]
             passengers, invoices = result.get("ckxxVOList"), result.get("invoiceList")
+            if (invoices is None and result.get("sfkp") == "0"
+                    and isinstance(passengers, list) and passengers
+                    and all(isinstance(item, dict) and item.get("kpzt") == "0" for item in passengers)):
+                invoices = []
+                record["invoice_status"] = "not_submitted"
             if not isinstance(passengers, list) or not isinstance(invoices, list) or any(not isinstance(item, dict) for item in passengers + invoices):
+                record["diagnostics"] = [
+                    {"stage": "travel_order_invoice", "source_path": key,
+                     "reason": "invalid_records", "result_type": type(result.get(key)).__name__}
+                    for key in ("ckxxVOList", "invoiceList")
+                    if not isinstance(result.get(key), list)
+                    or any(not isinstance(item, dict) for item in result[key])]
                 raise ValueError("travel_order_invoice_records_invalid")
             own_passengers = [p for p in passengers if p.get("cxrYgid") == record["employee_id"]]
             if not own_passengers:

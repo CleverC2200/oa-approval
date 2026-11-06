@@ -174,3 +174,32 @@ def test_failed_order_read_preserves_technical_failure(status):
     records = travel_invoices.read_invoices(request, [expense()], marker='SYNTHETIC-TRAVEL', origin='https://trip.example.test', timeout_sec=1)
     assert records[0]['reason'] == 'travel_order_invoice_http_failed'
     assert records[0]['invoices'] == []
+
+
+@pytest.mark.parametrize('missing', [True, False])
+def test_pending_invoice_without_list_remains_explicit_unissued_fact(missing):
+    payload = order()
+    result = payload['result']
+    result['sfkp'] = '0'
+    result['ckxxVOList'][0].update(kpzt='0', pkKpztmc='待提交')
+    if missing:
+        result.pop('invoiceList')
+    else:
+        result['invoiceList'] = None
+    request = SimpleNamespace(post=lambda *a, **kw: SimpleNamespace(status=200, json=lambda: payload))
+    records = travel_invoices.read_invoices(request, [expense()], marker='SYNTHETIC-TRAVEL', origin='https://trip.example.test', timeout_sec=1)
+    assert records[0]['read_status'] == 'read'
+    assert records[0]['invoice_status'] == 'not_submitted'
+    resources, facts = travel_invoices.project(records, [])
+    assert resources == []
+    assert json.loads(facts[0]['value'])['invoice_status'] == 'not_submitted'
+
+
+def test_missing_invoice_list_with_issued_status_still_fails():
+    payload = order()
+    payload['result'].pop('invoiceList')
+    payload['result']['sfkp'] = '0'
+    payload['result']['ckxxVOList'][0]['kpzt'] = '3'
+    request = SimpleNamespace(post=lambda *a, **kw: SimpleNamespace(status=200, json=lambda: payload))
+    records = travel_invoices.read_invoices(request, [expense()], marker='SYNTHETIC-TRAVEL', origin='https://trip.example.test', timeout_sec=1)
+    assert records[0]['reason'] == 'travel_order_invoice_records_invalid'

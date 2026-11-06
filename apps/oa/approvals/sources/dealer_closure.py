@@ -144,8 +144,13 @@ def read(api, workflow, resources):
     company, customer = str(fields.get('gsdm') or ''), str(fields.get('jxsdm') or '')
     if not re.fullmatch(r'[A-Za-z0-9]{4}', company) or not re.fullmatch(r'[0-9]{1,10}', customer):
         raise RuntimeError('dealer_closure_customer_identity_invalid')
-    if fields.get('yetk') not in {'0', '1'} or fields.get('sftk') not in {'0', '1'}:
-        raise RuntimeError('dealer_closure_branch_invalid')
+    invalid_branch = [code for code in ('yetk', 'sftk') if fields.get(code) not in {'0', '1'}]
+    if invalid_branch:
+        from apps.oa.approvals.collection.case import CollectionFailure
+        raise CollectionFailure('dealer_closure_branch_invalid', diagnostics=[
+            {'stage': 'dealer_closure_branch', 'source_path': code,
+             'reason': 'missing_value' if fields.get(code) in (None, '') else 'invalid_value'}
+            for code in invalid_branch])
     config = settings()
     now = datetime.now(ZoneInfo('Asia/Taipei'))
     payload = {'company_code': company, 'customer_code': customer, 'as_of': now.strftime('%Y%m%d')}

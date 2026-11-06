@@ -181,3 +181,17 @@ def test_incomplete_history_stops_before_financial_sources(monkeypatch, context,
     with pytest.raises(RuntimeError, match='dealer_closure_history_incomplete'):
         source.read(api, workflow(), [])
     worker.assert_not_called()
+
+
+def test_missing_branch_is_diagnosed_without_external_account_reads(monkeypatch, context):
+    from apps.oa.approvals.collection.case import CollectionFailure
+    data = workflow()
+    for field in data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']:
+        if field['fieldName'] in {'yetk', 'sftk'}:
+            field['fieldValue'] = ''
+    monkeypatch.setattr(source, '_worker', lambda *a: pytest.fail('must not read accounts'))
+    with pytest.raises(CollectionFailure, match='dealer_closure_branch_invalid') as captured:
+        source.read(SimpleNamespace(pending_rows=lambda: [delivery()]), data, [])
+    assert captured.value.diagnostics == [
+        {'stage': 'dealer_closure_branch', 'source_path': code, 'reason': 'missing_value'}
+        for code in ('yetk', 'sftk')]
