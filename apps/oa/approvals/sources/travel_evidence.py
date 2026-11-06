@@ -225,7 +225,10 @@ class TravelEvidence:
                 [record for observation in valid for record in observation.order_invoices], fields
             )
         except ValueError as error:
-            return cls(errors=(TravelReadError(str(error), "商旅订单发票未能完成读取或归属核对"),))
+            return cls(errors=(TravelReadError(str(error), "商旅订单发票未能完成读取或归属核对",
+                diagnostics=tuple(diagnostic for observation in valid
+                    for record in observation.order_invoices
+                    for diagnostic in record.get("diagnostics", []))),))
         for item in invoice_targets:
             resource_id = "travel_platform:" + item["id"]
             if resource_id not in seen_ids:

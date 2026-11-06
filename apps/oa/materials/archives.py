@@ -39,7 +39,7 @@ def _is_zip_symlink(info: zipfile.ZipInfo) -> bool:
 
 def _is_archive_metadata(member_name: str) -> bool:
     parts = [part for part in str(member_name or "").split("/") if part]
-    return "__MACOSX" in parts or any(part.startswith("._") for part in parts)
+    return "__MACOSX" in parts or ".DS_Store" in parts or any(part.startswith("._") for part in parts)
 
 
 def _safe_archive_target(root: Path, member_name: str) -> Path | None:
