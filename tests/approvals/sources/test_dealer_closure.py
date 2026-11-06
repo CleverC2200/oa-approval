@@ -195,3 +195,28 @@ def test_missing_branch_is_diagnosed_without_external_account_reads(monkeypatch,
     assert captured.value.diagnostics == [
         {'stage': 'dealer_closure_branch', 'source_path': code, 'reason': 'missing_value'}
         for code in ('yetk', 'sftk')]
+
+
+@pytest.mark.parametrize('fault,code', [
+    ('invalid_value', 'dealer_closure_branch_invalid'),
+    ('required_at_ai', 'dealer_closure_branch_invalid'),
+    ('wrong_node', 'dealer_closure_branch_stage_invalid'),
+])
+def test_ai_stage_does_not_relax_invalid_or_currently_required_fields(monkeypatch, context, fault, code):
+    context.update(currentnodeid=224785, currentnodetype='1', nodename='AI预审')
+    original_query = source.official_sql._query_rows
+    def query(name, *a, **kw):
+        if name != 'dealer_closure_branch_fields':
+            return original_query(name, *a, **kw)
+        return [{'currentnodeid': 999 if fault == 'wrong_node' else 224785,
+                 'fieldname': field, 'isedit': None,
+                 'ismandatory': '1' if fault == 'required_at_ai' else None}
+                for field in ('yetk', 'sftk')]
+    monkeypatch.setattr(source.official_sql, '_query_rows', query)
+    data = workflow()
+    for field in data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']:
+        if field['fieldName'] in {'yetk', 'sftk'}:
+            field['fieldValue'] = '2' if fault == 'invalid_value' else ''
+    monkeypatch.setattr(source, '_worker', lambda *a: pytest.fail('must not read accounts'))
+    with pytest.raises(RuntimeError, match=code):
+        source.read(SimpleNamespace(pending_rows=lambda: [delivery()]), data, [])

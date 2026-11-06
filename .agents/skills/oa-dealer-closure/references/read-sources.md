@@ -8,6 +8,8 @@ Python入口、环境和参数以项目README及`--help`为准。复用`apps.oa.
 
 已核字段：`lcbh`流程编号、`gsdm`公司、`jxsdm`客户编码、`jxsmc`客户名称、`je`金额、`yetk`余额分支、`sftk`是否退款。当前选项为`yetk=0`有余额、`yetk=1`无余额，`sftk=0`是、`sftk=1`否；使用前核当前表单定义。当前余额0不自动将历史有余额退款单改成无余额单。
 
+`dealer_closure_evidence.branch_context`冻结当前实际节点的字段填写职责及延期字段清单，原值仍在`form_snapshot.fields`中保留。按Skill第1节解释阶段性未知。
+
 公开流程键为`dealer_closure`。collect将本次来源及提交上下文冻结到`dealer_closure_evidence`，审核Agent以此为准。正常审批与未阅转发批注分开：转发需唯一投递ID、原转发日志、批注按钮及实际节点；已阅转发不重复处理。写入前重新核对上下文，批注反馈回查原节点保持不变。
 
 连接设置位于私有OA认证文件同目录的`dealer-closure.json`，要求普通文件、权限600。包含Doris解释器/连接模块路径，SAP解释器/SDK路径、正式环境标识和钥匙串服务，DMS正式基址。口令通过已有钥匙串取出，仅在子进程标准输入中传递，不保存到材料或命令行。配置缺失或读取失败不形成已完成意见。

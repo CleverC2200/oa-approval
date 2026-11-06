@@ -101,6 +101,21 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
         """,
         params=("request_id", "node_id", "operator_id", "started_date", "started_time"), max_rows=20, timeout_sec=5,
     ),
+    "dealer_closure_branch_fields": SqlTemplate(
+        name="dealer_closure_branch_fields",
+        purpose="按关户申请冻结当前实际节点的分支字段填写职责",
+        sql="""
+            select r.currentnodeid, b.fieldname, f.isedit, f.ismandatory
+            from ecology.workflow_requestbase r
+            join ecology.workflow_base w on w.id = r.workflowid
+            join ecology.workflow_billfield b on b.billid = w.formid
+            join ecology.workflow_nodeform f on f.nodeid = r.currentnodeid and f.fieldid = b.id
+            where r.requestid = :request_id and r.workflowid = '195127'
+              and b.fieldname in ('yetk', 'sftk') and b.viewtype = 0
+            order by b.fieldname
+        """,
+        params=("request_id",), max_rows=3, timeout_sec=5,
+    ),
     "dealer_closure_current_node": SqlTemplate(
         name="dealer_closure_current_node",
         purpose="按关户申请精确读取实际流程节点",

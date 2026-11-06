@@ -131,6 +131,31 @@ def _dms(customer, tag, config):
         raise RuntimeError('dealer_closure_dms_read_failed') from None
 
 
+def _branch_context(fields, context):
+    invalid = [code for code in ('yetk', 'sftk') if fields.get(code) not in {'0', '1'}]
+    missing = [code for code in invalid if fields.get(code) in (None, '')]
+    node_fields, deferred = [], []
+    actual = context['actual_node']
+    if missing == invalid and missing and actual.get('nodename') == 'AI预审' and str(actual.get('currentnodetype')) == '1':
+        node_fields = official_sql._query_rows('dealer_closure_branch_fields',
+            {'request_id': int(context['request_id'])}, require_connection=True)
+        if (len(node_fields) != 2 or {r.get('fieldname') for r in node_fields} != {'yetk', 'sftk'}
+                or any(str(r.get('currentnodeid')) != str(actual['currentnodeid'])
+                    or r.get('isedit') not in {None, '0', '1'}
+                    or r.get('ismandatory') not in {None, '0', '1'} for r in node_fields)):
+            raise RuntimeError('dealer_closure_branch_stage_invalid')
+        deferred = [code for code in missing if any(r['fieldname'] == code
+            and r['isedit'] != '1' and r['ismandatory'] != '1' for r in node_fields)]
+    remaining = [code for code in invalid if code not in deferred]
+    if remaining:
+        from apps.oa.approvals.collection.case import CollectionFailure
+        raise CollectionFailure('dealer_closure_branch_invalid', diagnostics=[
+            {'stage': 'dealer_closure_branch', 'source_path': code,
+             'reason': 'missing_value' if code in missing else 'invalid_value'}
+            for code in remaining])
+    return {'deferred_fields': deferred, 'node_fields': node_fields}
+
+
 def read(api, workflow, resources):
     context = snapshot_context(api, workflow)
     history = official_sql._query_rows('dealer_closure_history',
@@ -144,13 +169,7 @@ def read(api, workflow, resources):
     company, customer = str(fields.get('gsdm') or ''), str(fields.get('jxsdm') or '')
     if not re.fullmatch(r'[A-Za-z0-9]{4}', company) or not re.fullmatch(r'[0-9]{1,10}', customer):
         raise RuntimeError('dealer_closure_customer_identity_invalid')
-    invalid_branch = [code for code in ('yetk', 'sftk') if fields.get(code) not in {'0', '1'}]
-    if invalid_branch:
-        from apps.oa.approvals.collection.case import CollectionFailure
-        raise CollectionFailure('dealer_closure_branch_invalid', diagnostics=[
-            {'stage': 'dealer_closure_branch', 'source_path': code,
-             'reason': 'missing_value' if fields.get(code) in (None, '') else 'invalid_value'}
-            for code in invalid_branch])
+    branch_context = _branch_context(fields, context)
     config = settings()
     now = datetime.now(ZoneInfo('Asia/Taipei'))
     payload = {'company_code': company, 'customer_code': customer, 'as_of': now.strftime('%Y%m%d')}
@@ -165,7 +184,7 @@ def read(api, workflow, resources):
     if sap.get('customer_code') != customer or sap.get('company_code') != company:
         raise RuntimeError('dealer_closure_sap_identity_invalid')
     tags = ['querySignedOneAddNContractByCustomerCode']
-    if fields['yetk'] == '0' and fields['sftk'] == '0':
+    if branch_context['deferred_fields'] or (fields.get('yetk') == '0' and fields.get('sftk') == '0'):
         tags += [
         'queryLatestSignedBillByCustomerCode', 'queryLatestRefundApplyByCustomerCode',
         'queryPaymentAccountReportByCustomerCode']
@@ -174,7 +193,7 @@ def read(api, workflow, resources):
         and r.get('company_code') == company and r.get('customer_code') == customer]
     return {'observed_at': now.isoformat(), 'company_code': company, 'customer_code': customer,
             'form_snapshot': _form_snapshot(workflow, resources),
-            'submission_context': context, 'bi': bi, 'sap': sap,
+            'submission_context': context, 'branch_context': branch_context, 'bi': bi, 'sap': sap,
             'history': {'source': 'official_sql.dealer_closure_history', 'complete': True, 'rows': history},
             'dms': {tag: _dms(customer, tag, config) for tag in tags},
             'resource_inventory': {'source': 'getRequestResources', 'request_id': context['request_id'],
@@ -187,8 +206,13 @@ def validate_submission(api, material):
     workflow, resources = api.request_context(material['request_id'])
     if _form_snapshot(workflow, resources) != material['dealer_closure_evidence']['form_snapshot']:
         raise ValueError('dealer_closure_form_changed')
-    if snapshot_context(api, workflow) != expected:
+    context = snapshot_context(api, workflow)
+    if context != expected:
         raise ValueError('dealer_closure_submission_context_changed')
+    if material['dealer_closure_evidence'].get('branch_context', {}).get('deferred_fields'):
+        fields = _form_snapshot(workflow, resources)['fields']
+        if _branch_context(fields, context) != material['dealer_closure_evidence']['branch_context']:
+            raise ValueError('dealer_closure_branch_stage_changed')
 
 
 def feedback_verified(api, material, opinion, started_at):

@@ -35,10 +35,15 @@ class ClosureApi:
 
 
 @pytest.fixture
-def closure_app(tmp_path, monkeypatch):
+def closure_app(tmp_path, monkeypatch, request):
     actual = {'requestid': 101, 'currentnodeid': 30, 'currentnodetype': '3', 'nodename': '归档'}
+    ai_empty = getattr(request, 'param', None) == 'ai_empty'
+    if ai_empty:
+        actual.update(currentnodeid=224785, currentnodetype='1', nodename='AI预审')
     monkeypatch.setattr(dealer_closure.official_sql, '_query_rows',
-        lambda name, *_a, **_kw: ([{'operator_id': 9}] if name == 'dealer_closure_forward_log'
+        lambda name, *_a, **_kw: ([{'currentnodeid': 224785, 'fieldname': code, 'isedit': None, 'ismandatory': None}
+            for code in ('yetk', 'sftk')] if name == 'dealer_closure_branch_fields'
+            else [{'operator_id': 9}] if name == 'dealer_closure_forward_log'
             else [{'remark': '合成历史意见', 'remark_length': 6}] if name == 'dealer_closure_history' else [actual.copy()]))
     monkeypatch.setattr(dealer_closure, 'settings', lambda: {})
     def worker(mode, payload, _config):
@@ -50,6 +55,12 @@ def closure_app(tmp_path, monkeypatch):
     monkeypatch.setattr(dealer_closure, '_dms', lambda *_: {'response': {'success': True, 'result': None}})
     monkeypatch.setattr(invoices, 'read_invoice_buyers', lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError('expense source called')))
     api = ClosureApi()
+    if ai_empty:
+        api.form.update(currentNodeId='224785', submitButtonName='提交')
+        api.rows[0].update(operator_node_id='224785', delivery_kind='approval')
+        for field in api.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']:
+            if field['fieldName'] in {'yetk', 'sftk'}:
+                field['fieldValue'] = ''
     app = Approval(tmp_path / 'runtime', api=api, writer=api, configs=flows.load_all_configs(), source_policy=POLICY)
     started = app.pending(workflows=['dealer_closure'])
     task = started['tasks'][0]
@@ -110,3 +121,28 @@ def test_incomplete_closing_attachment_is_not_hidden_by_generic_zero_count(closu
     material = collect_case('101', oa_api=api, configs=flows.load_all_configs(), source_policy=POLICY,
         allow_browser_download=False, attachment_root=app.root / 'extra-attachments', prepared_root=app.root / 'extra-prepared')
     assert 'attachment_presence' not in material
+
+
+@pytest.mark.parametrize('closure_app', ['ai_empty'], indirect=True)
+def test_ai_preaudit_freezes_unknown_branches_and_previews_without_writing(closure_app, monkeypatch):
+    app, api, collected = closure_app
+    material = json.loads(Path(collected['material_file']).read_text())
+    evidence = material['dealer_closure_evidence']
+    assert evidence['branch_context']['deferred_fields'] == ['yetk', 'sftk']
+    assert evidence['form_snapshot']['fields']['yetk'] == ''
+    assert evidence['form_snapshot']['fields']['sftk'] == ''
+    assert evidence['bi']['rows'][0]['cust_balance'] == '0.00'
+    assert len(evidence['dms']) == 4
+    result = app.submit(collected['task_id'], opinion='❗ 余额及退款意向尚未填写，后续节点确认。', confirm_write=False)
+    assert result['status'] == 'preview'
+    assert api.posts == []
+    fields = {f['fieldName']: f['fieldValue'] for f in api.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']}
+    assert fields['yetk'] == fields['sftk'] == ''
+    original_query = dealer_closure.official_sql._query_rows
+    def changed_fields(name, *a, **kw):
+        rows = original_query(name, *a, **kw)
+        return [{**r, 'ismandatory': '1'} for r in rows] if name == 'dealer_closure_branch_fields' else rows
+    monkeypatch.setattr(dealer_closure.official_sql, '_query_rows', changed_fields)
+    with pytest.raises(RuntimeError, match='dealer_closure_branch_invalid'):
+        dealer_closure.validate_submission(api, material)
+    assert api.posts == []
