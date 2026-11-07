@@ -35,9 +35,14 @@ def load_policy():
     return data
 
 
-def unresolved_path(node):
-    return node['state'] in {'unknown', 'loading'} and not (
-        node['state'] == 'unknown' and node.get('resolution', {}).get('kind') == 'terminal_self_loop')
+def unresolved_path(node, *, leader_id=None):
+    if node['state'] not in {'unknown', 'loading'}:
+        return False
+    resolution = node.get('resolution', {})
+    return not (node['state'] == 'unknown' and (
+        resolution.get('kind') == 'terminal_self_loop'
+        or (leader_id is not None and resolution.get('kind') == 'finance_tail_excludes_leader'
+            and resolution.get('leader_id') == leader_id)))
 
 
 def assess(result, policy):
@@ -53,7 +58,7 @@ def assess(result, policy):
     if not result['complete']:
         uncertainties.add('prediction_incomplete')
     for node in result['nodes']:
-        if unresolved_path(node):
+        if unresolved_path(node, leader_id=policy['leader']['id']):
             uncertainties.add('prediction_path_unknown')
         if node['state'] != 'predicted':
             continue

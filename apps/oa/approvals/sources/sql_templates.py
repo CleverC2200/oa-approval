@@ -58,6 +58,28 @@ def validate_readonly_sql(sql: str) -> str:
 
 
 SQL_TEMPLATES: dict[str, SqlTemplate] = {
+    "prediction_finance_tail_links": SqlTemplate(
+        name="prediction_finance_tail_links",
+        purpose="绑定当前申请穷尽正常流程出口，核对未知末段的人员范围及子流程配置",
+        sql="""
+            select r.requestid, r.workflowid, l.id as linkid,
+                   l.nodeid, s.nodename as node_name, sf.nodetype as node_type, s.isend as node_isend,
+                   l.destnodeid, d.nodename as destnode_name,
+                   df.nodetype as destnode_type, d.isend as destnode_isend,
+                   l.isreject, l.customworkflowid,
+                   (select count(*) from ecology.workflow_subwfset w
+                    where w.mainworkflowid=r.workflowid) as subworkflow_count
+            from ecology.workflow_requestbase r
+            join ecology.workflow_nodelink l on l.workflowid=r.workflowid
+            left join ecology.workflow_nodebase s on s.id=l.nodeid
+            left join ecology.workflow_nodebase d on d.id=l.destnodeid
+            left join ecology.workflow_flownode sf on sf.workflowid=r.workflowid and sf.nodeid=l.nodeid
+            left join ecology.workflow_flownode df on df.workflowid=r.workflowid and df.nodeid=l.destnodeid
+            where r.requestid=:request_id and (l.isreject is null or l.isreject <> '1')
+            order by l.id
+        """,
+        params=("request_id",), max_rows=256, timeout_sec=5,
+    ),
     "prediction_terminal_loop_links": SqlTemplate(
         name="prediction_terminal_loop_links",
         purpose="核对同一申请末端重复节点的全部正常出口，仅证明重复或归档的拓扑范围",

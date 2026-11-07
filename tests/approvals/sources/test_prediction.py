@@ -423,6 +423,8 @@ def test_verified_terminal_loop_resolves_people_scope_without_hiding_native_unkn
     elif topology == 'not_archive':
         rows[1]['isend'] = '0'
     def read(name, params, **kwargs):
+        if name == 'prediction_finance_tail_links':
+            return []
         assert name == 'prediction_terminal_loop_links'
         assert params == {'request_id': 123, 'node_id': 20}
         if topology == 'unavailable':
@@ -435,3 +437,70 @@ def test_verified_terminal_loop_resolves_people_scope_without_hiding_native_unkn
     assert output['nodes'][-2]['state'] == 'unknown'
     assert output['finance_precheck']['required'] is (False if topology == 'closed' else None)
     assert output['delivery']['action'] == ('submit' if topology == 'closed' else 'blocked')
+
+
+@pytest.mark.parametrize('change', ['closed', 'leader', 'empty_people', 'unknown_person_type',
+                                  'dead_end', 'wrong_request', 'subprocess', 'custom_workflow',
+                                  'unknown_kind', 'row_limit', 'initiator'])
+def test_verified_finance_tail_only_proves_no_additional_leader_match(native, finance_rule, monkeypatch, change):
+    from apps.oa.approvals.sources import official_sql
+
+    payload = result()
+    payload['nodeInfo'] = payload['nodeInfo'][:3] + [
+        {'nodeid': -2, 'nodeName': '', 'nodeType': 3},
+        {'nodeid': 30, 'nodeName': '归档', 'nodeType': 3, 'ntype': '3'}]
+    payload['nodeInfo'][2]['branchNumber'] = 0
+    native.replies.append(payload)
+    native.operators[('30', '3')] = {'nodes': [{'operators': []}]}
+    native.operators[('50', '3')] = {'nodes': [{'operators': [{'id': 8, 'name': '后段办理', 'type': 1}]}]}
+    definitions = {20: ('已知财务', '1', '0'), 30: ('归档', '3', '1'),
+                   40: ('业务处理', '6', '0'), 50: ('后段办理', '2', '0')}
+    rows = []
+    for index, (source, dest) in enumerate([(20, 40), (40, 30), (40, 50), (50, 50), (50, 30)], 1):
+        name, kind, end = definitions[source]
+        dest_name, dest_kind, dest_end = definitions[dest]
+        rows.append({'requestid': 123, 'workflowid': 456, 'linkid': index, 'nodeid': source,
+                     'node_name': name, 'node_type': kind, 'node_isend': end,
+                     'destnodeid': dest, 'destnode_name': dest_name, 'destnode_type': dest_kind,
+                     'destnode_isend': dest_end, 'isreject': '0', 'customworkflowid': None,
+                     'subworkflow_count': 0})
+    if change == 'leader':
+        native.operators[('50', '3')]['nodes'][0]['operators'] = [{'id': 100, 'name': '测试高层', 'type': 0}]
+    elif change == 'empty_people':
+        native.operators[('50', '3')]['nodes'][0]['operators'] = []
+    elif change == 'unknown_person_type':
+        native.operators[('50', '3')]['nodes'][0]['operators'][0]['type'] = 99
+    elif change == 'dead_end':
+        rows.pop()
+    elif change == 'wrong_request':
+        rows[0]['requestid'] = 999
+    elif change == 'subprocess':
+        rows[0]['subworkflow_count'] = 1
+    elif change == 'custom_workflow':
+        rows[0]['customworkflowid'] = 999
+    elif change == 'unknown_kind':
+        rows[0]['destnode_type'] = '4'
+    elif change == 'row_limit':
+        rows *= 52
+    elif change == 'initiator':
+        native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
+    def read(name, params, **kwargs):
+        assert name == 'prediction_finance_tail_links'
+        assert params == {'request_id': 123}
+        return rows
+    monkeypatch.setattr(official_sql, '_query_rows', read)
+    output = prediction.predict('123')
+    assert output['complete'] is True and output['has_unknown_nodes'] is True
+    assert output['raw_prediction'] == payload
+    assert output['nodes'][-2]['state'] == 'unknown'
+    expected = False if change == 'closed' else True if change == 'initiator' else None
+    assert output['finance_precheck']['required'] is expected
+    assert output['delivery']['action'] == ('submit' if change == 'closed' else 'blocked')
+    if change == 'closed':
+        proof = output['nodes'][-2]['resolution']
+        assert proof['kind'] == 'finance_tail_excludes_leader'
+        assert {n['node_id'] for n in proof['nodes']} == {'20', '30', '40', '50'}
+        assert proof['leader_id'] == '100'
+        changed_policy = {**finance_rule, 'leader': {'id': '999', 'name': '新名单'}}
+        assert finance_precheck.assess(output, changed_policy)['required'] is None
+        assert finance_precheck.unresolved_path(output['nodes'][-2]) is True

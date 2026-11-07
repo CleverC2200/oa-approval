@@ -149,6 +149,89 @@ def _resolve_terminal_loop(request_id, nodes):
         'rows': rows}
 
 
+def _resolve_finance_tail(request_id, nodes, session, leader_id):
+    if len(nodes) < 3:
+        return
+    anchor, unknown, archive = nodes[-3:]
+    if (unknown['node_id'] != '-2' or unknown['state'] != 'unknown'
+            or [node for node in nodes if finance_precheck.unresolved_path(node)] != [unknown]
+            or anchor['state'] != 'predicted' or anchor['node_kind'] not in {'1', '2'}
+            or archive['state'] != 'predicted' or archive['node_kind'] != '3'):
+        return
+    from apps.oa.approvals.sources import official_sql
+
+    try:
+        rows = official_sql._query_rows('prediction_finance_tail_links',
+            {'request_id': int(request_id)}, require_connection=True)
+    except RuntimeError:
+        return
+    if (not rows or len(rows) >= 256 or len({str(row['workflowid']) for row in rows}) != 1
+            or len({str(row['linkid']) for row in rows}) != len(rows)
+            or any(str(row['requestid']) != request_id or str(row['subworkflow_count']) != '0'
+                   for row in rows)):
+        return
+    definitions, outgoing = {}, {}
+    for row in rows:
+        outgoing.setdefault(str(row['nodeid']), []).append(row)
+        for prefix in ('', 'dest'):
+            identity = str(row[prefix + 'nodeid'])
+            definition = (row[prefix + 'node_name'], str(row[prefix + 'node_type']),
+                          str(row[prefix + 'node_isend']))
+            if not re.fullmatch(r'[1-9][0-9]*', identity) or (
+                    identity in definitions and definitions[identity] != definition):
+                return
+            definitions[identity] = definition
+    if (definitions.get(anchor['node_id'], (None, None, None))[1:]
+            != (anchor['node_kind'], '0')):
+        return
+    pending, reached, links = [anchor['node_id']], set(), []
+    while pending:
+        identity = pending.pop()
+        if identity in reached:
+            continue
+        if identity not in definitions:
+            return
+        name, kind, end = definitions[identity]
+        terminal = identity == archive['node_id']
+        if (not name or (terminal and (kind, end) != ('3', '1'))
+                or (not terminal and (kind not in {'1', '2', '6'} or end != '0'))):
+            return
+        reached.add(identity)
+        edges = outgoing.get(identity, [])
+        if terminal:
+            if edges:
+                return
+            continue
+        if not edges or any(edge['customworkflowid'] not in (None, '', 0, '0')
+                            or edge['isreject'] not in (None, '0', 0) for edge in edges):
+            return
+        links.extend(edges)
+        pending.extend(str(edge['destnodeid']) for edge in edges)
+    can_finish, previous = {archive['node_id']}, set()
+    while previous != can_finish:
+        previous = can_finish.copy()
+        can_finish.update(str(edge['nodeid']) for edge in links if str(edge['destnodeid']) in previous)
+    if archive['node_id'] not in reached or not reached <= can_finish:
+        return
+    verified_nodes = []
+    for identity in sorted(reached):
+        name, kind, _ = definitions[identity]
+        people = []
+        if kind in {'1', '2'}:
+            try:
+                people = session.operators(request_id, identity, 3)
+            except (OSError, RuntimeError, ValueError, TimeoutError):
+                return
+            if not people or any(str(person['type']) not in {'0', '1', '2'}
+                    or not re.fullmatch(r'[1-9][0-9]*', person['id'])
+                    or (str(person['type']) == '0' and person['id'] == leader_id) for person in people):
+                return
+        verified_nodes.append({'node_id': identity, 'node_name': name, 'node_kind': kind, 'operators': people})
+    unknown['resolution'] = {'kind': 'finance_tail_excludes_leader', 'leader_id': leader_id,
+        'source': 'official_sql.prediction_finance_tail_links', 'anchor_node_id': anchor['node_id'],
+        'archive_node_id': archive['node_id'], 'nodes': verified_nodes, 'rows': rows}
+
+
 def predict(request_id, *, timeout=60, refresh=False):
     if not isinstance(request_id, str) or not re.fullmatch(r'[1-9][0-9]*', request_id):
         raise ValueError('prediction_request_id_invalid')
@@ -188,6 +271,7 @@ def predict(request_id, *, timeout=60, refresh=False):
                 node['operators_loaded'] = True
         if policy is not None:
             _resolve_terminal_loop(request_id, nodes)
+            _resolve_finance_tail(request_id, nodes, session, policy['leader']['id'])
         complete = True
     except TimeoutError:
         pass
