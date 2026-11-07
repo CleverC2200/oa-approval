@@ -107,7 +107,7 @@ class Store:
             raise ValueError('continuation_not_available')
         return stored['selection']
 
-    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False):
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -143,7 +143,7 @@ class Store:
                     FROM tasks WHERE occurrence=?""", (occurrence,)).fetchone()
                 if previous_task and previous_task['status'] == 'failed' and not retry_failed:
                     continue
-                if previous_task and (previous_task['status'] == 'preview' or
+                if previous_task and not retry_reviewed and (previous_task['status'] == 'preview' or
                         (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
                     continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)

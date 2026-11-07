@@ -36,9 +36,11 @@ def valid_original_file(resource: dict, path: Path) -> bool:
         return True
     try:
         with Image.open(path) as image:
-            if image.format != 'JPEG':
+            if image.format not in {'JPEG', 'MPO'}:
                 return False
-            image.load()
+            for index in range(getattr(image, 'n_frames', 1)):
+                image.seek(index)
+                image.load()
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return False
     return True

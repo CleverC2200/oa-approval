@@ -12,6 +12,49 @@ from apps.oa.approvals.demo import create_demo
 PROJECT = Path(__file__).resolve().parents[2]
 
 
+@pytest.mark.parametrize('held_status', ['preview', 'queued', 'reviewed'])
+def test_reviewed_delivery_requires_scoped_authorization_and_fresh_collection(tmp_path, held_status):
+    app = create_demo(tmp_path)
+    try:
+        first = app.pending(batch_size=1)
+        task = first['tasks'][0]
+        material = app.collect(first['run_id'], agent_id='first', expected_task_id=task['id'],
+                               agent_workflow_key=task['workflow_key'])
+        app.submit(task['id'], opinion='Original preview')
+        app.store.set_status(task['id'], held_status)
+        original_review = app.inspect(task['id'])['reviews']
+        app.close(first['run_id'])
+        with pytest.raises(ValueError, match='retry_reviewed_requires_request_ids'):
+            app.pending(retry_reviewed=True)
+        default = app.pending(request_ids=[task['request_id']], retry_failed=True)
+        assert default['tasks'] == []
+        app.close(default['run_id'])
+        retry = app.pending(request_ids=[task['request_id']], retry_reviewed=True, batch_size=1)
+        assert [item['id'] for item in retry['tasks']] == [task['id']]
+        assert retry['tasks'][0]['status'] == 'queued'
+        assert app.inspect(task['id'])['reviews'] == original_review
+        assert app.inspect(task['id'])['submissions'] == []
+        with pytest.raises(ValueError, match='task_not_reviewable'):
+            app.submit(task['id'], opinion='Must collect again', confirm_write=True)
+        fresh = app.collect(retry['run_id'], agent_id='retry', expected_task_id=task['id'],
+                            agent_workflow_key=task['workflow_key'])
+        assert fresh['material_file'] != material['material_file']
+        assert app.submit(task['id'], opinion='Fresh review', confirm_write=True)['status'] == 'submitted'
+        assert len(app.inspect(task['id'])['submissions']) == 1
+    finally:
+        app.store.connection.close()
+
+
+@pytest.mark.parametrize('arguments', [
+    ['--retry-reviewed', 'YES'],
+    ['--retry-reviewed', 'YES', '--request-id', '101', '--continue-from', 'old'],
+])
+def test_reviewed_retry_cli_requires_explicit_selection(arguments):
+    with pytest.raises(SystemExit) as error:
+        cli.main(['start', *arguments])
+    assert error.value.code == 2
+
+
 def test_status_and_show_do_not_create_a_missing_root(tmp_path, capsys):
     root = tmp_path / 'missing'
     for operation in (['status'], ['show', '--task-id', '1']):
