@@ -160,6 +160,39 @@ def test_collect_prepares_linked_jpg_original(jpg_original, tmp_path, cloud):
     assert len(material['prepared']['images']) == 1
 
 
+@pytest.mark.parametrize('truncated', [False, True])
+def test_collect_preserves_and_prepares_every_mpo_frame(jpg_original, tmp_path, truncated):
+    from PIL import Image
+
+    state = jpg_original
+    body = BytesIO()
+    first = Image.new('RGB', (48, 32), 'red')
+    second = Image.new('L', (24, 16), 180)
+    first.save(body, format='MPO', save_all=True, append_images=[second])
+    original = body.getvalue()
+    state.pdf = original[:-100] if truncated else original
+    if truncated:
+        with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+            collect_original(state, tmp_path)
+        return
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    assert invoice['body_read_status'] == 'content_read'
+    assert invoice['files'][0]['page_count'] == 2
+    assert material['prepared']['manifest'][0]['page_count'] == 2
+    images = material['prepared']['images']
+    assert len(images) == 2
+    assert {image['resource_id'] for image in images} == {'202'}
+    from pathlib import Path
+
+    assert Path(material['resources'][0]['local_readonly_path']).read_bytes() == original
+    for image, size in zip(images, [(48, 32), (24, 16)]):
+        with Image.open(image['path']) as prepared:
+            assert prepared.format == 'PNG'
+            assert prepared.size == size
+            prepared.load()
+
+
 @pytest.mark.parametrize('cloud', [False, True])
 @pytest.mark.parametrize('body', ['truncated', 'pdf'])
 def test_unreadable_jpg_original_stops_collection(jpg_original, tmp_path, cloud, body):

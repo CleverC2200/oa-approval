@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import date, datetime
 import hashlib
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -781,7 +782,22 @@ def _convert_image(source: _ConversionSource, *, out_dir: Path) -> _ConversionRe
         image_path = _convert_heic_to_png(source.path, out_dir=out_dir,
                                         resource_id=source.resource_id or source.path.stem)
         status, digest = 'image_converted', _file_sha256(image_path)
-    elif source.parent_resource_id or not source.path.suffix:
+    elif source.suffix in {'.jpg', '.jpeg'}:
+        with Image.open(source.path) as image:
+            if image.format == 'MPO':
+                images = []
+                for index in range(image.n_frames):
+                    image.seek(index)
+                    image.load()
+                    frame = out_dir / f'{safe_name(source.resource_id, source.path.stem)}_frame{index + 1}.png'
+                    output = BytesIO()
+                    image.save(output, format='PNG')
+                    material_store.write_bytes(frame, output.getvalue(),
+                        source={'resource_id': source.resource_id, 'kind': 'mpo_frame'})
+                    images.append(source.image(frame, f'image_frame_{index + 1}', _file_sha256(frame)))
+                return source.result('image_converted', images=images,
+                                     image_count=len(images), page_count=len(images))
+    if status == 'image' and (source.parent_resource_id or not source.path.suffix):
         image_path = out_dir / f'{safe_name(source.resource_id, source.path.stem)}_archive{source.suffix}'
         with source.path.open('rb') as original:
             material_store.copy_stream(image_path, original, expected_bytes=source.path.stat().st_size,

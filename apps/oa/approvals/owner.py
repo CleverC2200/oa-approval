@@ -446,7 +446,7 @@ def require_production_main(project=None):
         raise ValueError('production_main_not_synced')
 
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None,
-          continue_from=None, retry_failed=False):
+          continue_from=None, retry_failed=False, retry_reviewed=False):
     from apps.oa.approvals.operations import Approval
 
     server_path = socket_path(root)
@@ -461,7 +461,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
         else:
             approval = Approval(root, source_policy=source_policy)
         started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
-                                   continue_from=continue_from, retry_failed=retry_failed)
+                                   continue_from=continue_from, retry_failed=retry_failed, retry_reviewed=retry_reviewed)
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
         server = None

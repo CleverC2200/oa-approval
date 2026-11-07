@@ -111,7 +111,7 @@ def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial)
     image = file_type == 'jpg'
     media_type = 'image/jpeg' if image else 'application/pdf'
     statuses = {'image', 'image_converted'} if image else {'pdf_rendered'}
-    page_count = 1 if image else coverage.declared_page_count
+    page_count = (coverage.declared_page_count or 1) if image else coverage.declared_page_count
     if (len(resource) != 1 or resource[0].get('media_type') != media_type
             or coverage.manifest_count != 1 or coverage.status not in statuses
             or not coverage.direct_image_count or page_count != coverage.direct_image_count
