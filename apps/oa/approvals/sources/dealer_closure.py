@@ -174,8 +174,8 @@ def read(api, workflow, resources):
     now = datetime.now(ZoneInfo('Asia/Taipei'))
     payload = {'company_code': company, 'customer_code': customer, 'as_of': now.strftime('%Y%m%d')}
     bi = _worker('doris', payload, config)
-    if not bi['rows'] or any(str(r.get('company_code')) != company or str(r.get('cust_code')) != customer
-                            for r in bi['rows']):
+    if any(str(r.get('company_code')) != company or str(r.get('cust_code')) != customer
+           for r in bi['rows']):
         raise RuntimeError('dealer_closure_bi_identity_invalid')
     preaccrual = [r for r in bi['rows'] if r.get('ledger_account_control') and r.get('pre_end_balance') is not None]
     payload['preaccrual_accounts'] = (sorted({r['ledger_account_control'] for r in preaccrual})

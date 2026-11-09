@@ -28,8 +28,9 @@ class ClosureApi:
     def request_context(self, request_id):
         return deepcopy(self.form), []
 
-    def submit_and_verify(self, request_id, opinion, *, dealer_material):
-        self.posts.append((request_id, opinion, dealer_material['dealer_closure_evidence']['submission_context']['delivery_kind']))
+    def submit_and_verify(self, request_id, opinion, *, dealer_material=None):
+        kind = dealer_material['dealer_closure_evidence']['submission_context']['delivery_kind'] if dealer_material else 'approval'
+        self.posts.append((request_id, opinion, kind))
         self.rows = []
         return {'submit_ok': True, 'done_hit': True, 'postcheck_done_hit': True}
 
@@ -37,7 +38,8 @@ class ClosureApi:
 @pytest.fixture
 def closure_app(tmp_path, monkeypatch, request):
     actual = {'requestid': 101, 'currentnodeid': 30, 'currentnodetype': '3', 'nodename': '归档'}
-    ai_empty = getattr(request, 'param', None) == 'ai_empty'
+    case = getattr(request, 'param', None)
+    ai_empty = case in {'ai_empty', 'ai_empty_bi_empty'}
     if ai_empty:
         actual.update(currentnodeid=224785, currentnodetype='1', nodename='AI预审')
     monkeypatch.setattr(dealer_closure.official_sql, '_query_rows',
@@ -48,6 +50,8 @@ def closure_app(tmp_path, monkeypatch, request):
     monkeypatch.setattr(dealer_closure, 'settings', lambda: {})
     def worker(mode, payload, _config):
         if mode == 'doris':
+            if case == 'ai_empty_bi_empty':
+                return {'rows': []}
             return {'rows': [{'company_code': 'D001', 'cust_code': '99000001', 'cust_balance': '0.00',
                               'freezers_qty': None, 'ledger_account_control': None, 'pre_end_balance': '0.00'}]}
         return {'company_code': payload['company_code'], 'customer_code': payload['customer_code']}
@@ -86,6 +90,22 @@ def test_public_collect_freezes_closure_facts_and_uses_registered_feedback_write
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
     assert api.posts == [('101', '✅ 无余额，不退款。❗ 冰柜待核。', 'comment')]
     assert len(app.inspect(collected['task_id'])['submissions']) == 1
+
+
+@pytest.mark.parametrize('closure_app', ['ai_empty_bi_empty'], indirect=True)
+def test_empty_bi_preserves_unknowns_and_continues_ai_preaudit(closure_app):
+    app, api, collected = closure_app
+    material = json.loads(Path(collected['material_file']).read_text())
+    evidence = material['dealer_closure_evidence']
+    assert evidence['bi']['rows'] == []
+    assert evidence['sap'] == {'company_code': 'D001', 'customer_code': '99000001'}
+    assert len(evidence['dms']) == 4
+    assert evidence['branch_context']['deferred_fields'] == ['yetk', 'sftk']
+    opinion = '❗ BI无客户记录，余额、预提、冰柜、融资及补贴待核；余额分支及退款意向由后续节点确认。'
+    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True)
+    assert result['status'] == 'submitted'
+    assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
+    assert api.posts == [('101', opinion, 'approval')]
 
 
 def test_changed_feedback_button_stops_before_submission_attempt(closure_app):
