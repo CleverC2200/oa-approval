@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import fcntl
 import hashlib
 import json
+import re
 from pathlib import Path
 from uuid import uuid4
 
@@ -56,9 +57,13 @@ def expected_overseas_snapshot(material, plan):
         row["values"].update(update["values"])
     return expected
 
-def check_overseas_fields(api, request_id, material, plan, *, origins):
+def check_overseas_fields(api, request_id, material, plan, *, origins, confirm_pending_node=False):
     data,resources = api.request_context(request_id)
     after = overseas_snapshot(data,resources,request_id,writable=False,origins=origins)
+    if confirm_pending_node:
+        business._require(after['node_id'] == material['snapshot']['node_id'] == business.RPA_NODE_ID
+                          and data.get('canEdit') is True, 'confirmation_target_changed')
+        business._require(after['main'] == material['snapshot']['main'], 'confirmation_fields_unverified')
     return business.postcheck_fields_match(after,expected_overseas_snapshot(material,plan))
 
 def submit_overseas(api, writer, request_id, material, plan, *, origins):
@@ -74,6 +79,7 @@ def submit_overseas(api, writer, request_id, material, plan, *, origins):
     code = str(response.get("code") or "").upper()
     if code != "SUCCESS":
         return {**receipts.verification_result(False,False,submit_ok=False),
+            'response_code': code if re.fullmatch(r'[A-Z0-9_-]{1,64}', code) else 'unavailable',
             "failure_code":receipts.SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
     pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
     done = handled_since(api.handled_rows(),request_id,started_at)
@@ -304,8 +310,6 @@ class Approval:
             raise ValueError('confirmation_submission_required')
         with self._writer_lock():
             task = self.store.get_task(task_id)
-            if confirmation_note is not None and task['workflow_key'] == 'overseas_invoice':
-                raise ValueError('overseas_confirmation_not_supported')
             if task["status"] == "submitted":
                 return {"task_id":task_id,"status":"submitted","submissions":self.store.details(task_id)["submissions"]}
             if task["status"] not in {"unknown","submitting","submitted"}:
@@ -343,12 +347,19 @@ class Approval:
             if task["workflow_key"] == "overseas_invoice":
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
-                fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),origins=self.source_policy.attachments)
+                fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),
+                    origins=self.source_policy.attachments, confirm_pending_node=confirmation_note is not None and not handled)
             result = receipts.verification_result(handled,pending,fields_match=fields_match)
             if confirmation_note is not None and receipts.submission_status(result) != 'submitted':
                 if handled or sum(occurrence_key(row) == task['occurrence'] for row in pending_rows) != 1:
                     raise ValueError('confirmation_target_changed')
-                result.update(failure_code=receipts.USER_CONFIRMED_NOT_WRITTEN,
+                if task['workflow_key'] == 'overseas_invoice':
+                    business._require(fields_match is True, 'confirmation_fields_unverified')
+                    result.update(failure_code=receipts.USER_CONFIRMED_NODE_NOT_SUBMITTED,
+                                  confirmation_scope='node_submission')
+                else:
+                    result['failure_code'] = receipts.USER_CONFIRMED_NOT_WRITTEN
+                result.update(
                     confirmation_note=confirmation_note.strip(), previous_result=json.loads(submission['result_json']))
             status = receipts.submission_status(result)
             self.store.finish_submission(submission["id"],status,result)
