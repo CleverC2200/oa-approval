@@ -60,7 +60,7 @@ class CollectionFailure(RuntimeError):
                 continue
             kept = {}
             for key, value in item.items():
-                if key in {"stage", "reason", "browser", "exception_type", "result_type"}:
+                if key in {"stage", "reason", "browser", "exception_type", "result_type", "cause_type"}:
                     if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
                         kept[key] = value
                 elif key == "request_id":
@@ -69,6 +69,10 @@ class CollectionFailure(RuntimeError):
                 elif key in {"http_status", "api_code"}:
                     if isinstance(value, int) and not isinstance(value, bool):
                         kept[key] = value
+                elif key == 'attempt' and type(value) is int and 1 <= value <= 3:
+                    kept[key] = value
+                elif key == 'elapsed_ms' and type(value) is int and 0 <= value <= 900_000:
+                    kept[key] = value
                 elif key in {"api_success", "identity_present", "identity_matches"} and isinstance(value, bool):
                     kept[key] = value
                 elif key in {"attachment_ref", "owner_ref", "file_ref"}:
@@ -742,8 +746,8 @@ def _collect_case(
     if config.get('flow_key') in invoice_titles.WORKFLOWS:
         try:
             invoice_title_reference = invoice_titles.snapshot()
-        except invoice_titles.InvoiceTitleReadError:
-            raise CollectionFailure('invoice_title_reference_read_failed') from None
+        except invoice_titles.InvoiceTitleReadError as error:
+            raise CollectionFailure('invoice_title_reference_read_failed', diagnostics=error.diagnostics) from None
 
     return {
         **({"travel_read_exception": read_exception} if read_exception is not None else {}),
