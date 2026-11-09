@@ -2,7 +2,9 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import re
-from time import monotonic
+import socket
+from time import monotonic, sleep
+from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request
 
@@ -19,7 +21,35 @@ MAX_RESPONSE_BYTES = 2_000_000
 
 
 class InvoiceTitleReadError(RuntimeError):
-    pass
+    def __init__(self, diagnostics):
+        super().__init__('invoice_title_reference_read_failed')
+        self.diagnostics = diagnostics
+
+
+def _retryable(error):
+    if isinstance(error, HTTPError):
+        return error.code in {429, 500, 502, 503, 504}
+    if isinstance(error, URLError):
+        error = error.reason
+    return (isinstance(error, (TimeoutError, ConnectionError))
+            or isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN)
+
+
+def _failure_reason(error):
+    if isinstance(error, HTTPError):
+        return 'http_error'
+    if isinstance(error, (TimeoutError, ConnectionError, URLError)):
+        return 'network_error'
+    if isinstance(error, json.JSONDecodeError):
+        return 'invalid_json'
+    if isinstance(error, UnicodeDecodeError):
+        return 'invalid_encoding'
+    reason = str(error)
+    return reason if reason in {
+        'deadline', 'response_size', 'session_missing', 'session_invalid', 'report_shape',
+        'company_list', 'duplicate_field', 'company_fields', 'duplicate_tax_id',
+        'http_redirect_refused', 'http_redirect_loop', 'http_redirect_limit', 'http_url_invalid',
+    } else 'unexpected_error'
 
 
 class _Cells(HTMLParser):
@@ -45,18 +75,52 @@ class _Cells(HTMLParser):
 def snapshot():
     started_at = datetime.now(timezone.utc).isoformat()
     deadline = monotonic() + 60
+    diagnostics = []
+    stage = 'bootstrap'
+    source_path = 'invoice_title_reference'
+    attempt = 0
+    http_status = None
+    request_started = monotonic()
+
+    def record(error):
+        item = {'stage': stage, 'source_path': source_path, 'attempt': attempt,
+                'reason': _failure_reason(error), 'exception_type': type(error).__name__,
+                'elapsed_ms': max(0, int((monotonic() - request_started) * 1000))}
+        status = error.code if isinstance(error, HTTPError) else http_status
+        if status is not None:
+            item['http_status'] = status
+        if isinstance(error, URLError) and isinstance(error.reason, BaseException):
+            item['cause_type'] = type(error.reason).__name__
+        diagnostics.append(item)
 
     def read(request):
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            raise ValueError('deadline')
-        with urlopen(request, timeout=min(15, remaining)) as response:
-            if response.getcode() != 200:
-                raise ValueError('response_status')
-            body = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(body) > MAX_RESPONSE_BYTES:
-            raise ValueError('response_size')
-        return body.decode('utf-8')
+        nonlocal attempt, request_started, http_status
+        for attempt in range(1, 4):
+            request_started = monotonic()
+            http_status = None
+            try:
+                remaining = deadline - request_started
+                if remaining <= 0:
+                    raise ValueError('deadline')
+                with urlopen(request, timeout=min(15, remaining)) as response:
+                    http_status = response.getcode()
+                    if http_status != 200:
+                        raise HTTPError(request.full_url, http_status, '', None, None)
+                    body = response.read(MAX_RESPONSE_BYTES + 1)
+                if len(body) > MAX_RESPONSE_BYTES:
+                    raise ValueError('response_size')
+                return body.decode('utf-8')
+            except Exception as error:
+                record(error)
+                if isinstance(error, HTTPError):
+                    error.close()
+                if not _retryable(error) or attempt == 3:
+                    raise InvoiceTitleReadError(diagnostics) from None
+                delay = 0.25 * 2 ** (attempt - 1)
+                if monotonic() + delay >= deadline:
+                    record(ValueError('deadline'))
+                    raise InvoiceTitleReadError(diagnostics) from None
+                sleep(delay)
 
     try:
         bootstrap = read(Request(SOURCE_URL))
@@ -73,6 +137,8 @@ def snapshot():
             raise ValueError('session_invalid')
 
         def report(widget, parameters):
+            nonlocal stage
+            stage = 'company_list' if widget == 'REPORT1' else 'company_details'
             data = urlencode({
                 'op': 'fr_form', 'cmd': 'load_report_content', 'widgetName': widget,
                 '__parameters__': json.dumps(parameters, ensure_ascii=False),
@@ -95,7 +161,8 @@ def snapshot():
         if not 1 <= len(names) <= 100 or len(set(names)) != len(names):
             raise ValueError('company_list')
         rows = []
-        for name in names:
+        for index, name in enumerate(names):
+            source_path = f'invoice_title_reference.rows[{index}]'
             encoded_name = ''.join(f'[{ord(char):04x}]' if ord(char) > 127 else char for char in name)
             cells = report('REPORT0', {'name': encoded_name, 'animateType': 'none'})
             fields = {}
@@ -115,6 +182,10 @@ def snapshot():
             'status': 'ready', 'source': 'feishu_workbench_invoice_info',
             'source_url': SOURCE_URL, 'observed_at': started_at,
             'completed_at': datetime.now(timezone.utc).isoformat(), 'rows': rows,
+            **({'diagnostics': diagnostics} if diagnostics else {}),
         }
-    except Exception:
-        raise InvoiceTitleReadError('invoice_title_reference_read_failed') from None
+    except InvoiceTitleReadError:
+        raise
+    except Exception as error:
+        record(error)
+        raise InvoiceTitleReadError(diagnostics) from None
