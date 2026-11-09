@@ -66,6 +66,109 @@ def reading(resource_id, sha256, amount, number):
             'invoice_date': field('2026-10-20'), 'invoice_purchase_order': field('001234')}
 
 
+@pytest.mark.parametrize('state', ['pending', 'fields_changed', 'node_changed', 'uneditable', 'delivery_changed',
+                                  'wrong_attempt', 'unconfirmed', 'handled_conflict', 'already_submitted',
+                                  'main_changed', 'resources_changed'])
+def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path, monkeypatch, capsys, state):
+    from apps.oa.approvals import cli, owner, receipts
+
+    data, resources, files, _, _ = case()
+    if state == 'main_changed':
+        data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].append(
+            {'fieldName': 'lcbh', 'fieldValue': ''})
+    pending = [{'request_id': '201', 'received_at': '2026-10-23 09:00:00',
+                'operator_id': 'tester', 'workflow_key': 'overseas_invoice'}]
+    posts = []
+    handled = []
+
+    class Api:
+        def pending_rows(self):
+            return pending
+
+        def handled_rows(self, **_options):
+            return handled
+
+        def request_context(self, _request_id):
+            return data, resources
+
+        def submit_invoice(self, _request_id, _remark, details, **_options):
+            posts.append(details)
+            fields = data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']
+            for change in details[0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']:
+                next(field for field in fields if field['fieldName'] == change['fieldName'])['fieldValue'] = change['fieldValue']
+            return {'code': 'UNKNOWN'}
+
+    api = Api()
+    monkeypatch.setattr(overseas, 'download_fresh', lambda *_a, **_k: files)
+    app = Approval(tmp_path / 'runtime', api=api, configs=[], source_policy=POLICY)
+    run = app.pending()['run_id']
+    task = app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    material = json.loads(Path(task['material_file']).read_text())
+    recognized = {'material_digest': invoice.digest(material), 'invoices': [
+        reading(part['resource_id'], part['sha256'], '10.10', 'INV-' + part['resource_id'])
+        for part in material['attachments']]}
+    original = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)
+    assert original['status'] == 'unknown' and original['response_code'] == 'UNKNOWN'
+    app.close(run)
+    if state == 'fields_changed':
+        data['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][1]['fieldValue'] = '99.00'
+    if state == 'node_changed':
+        data['currentNodeId'] = 'another-node'
+    if state == 'uneditable':
+        data['canEdit'] = False
+    if state == 'main_changed':
+        data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][-1]['fieldValue'] = 'UNPLANNED-NUMBER'
+    if state == 'resources_changed':
+        resources[0]['name'] = 'changed.pdf'
+    if state == 'delivery_changed':
+        pending[0]['received_at'] = '2026-10-24 09:00:00'
+    if state in {'handled_conflict', 'already_submitted'}:
+        handled.append({'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()})
+    if state == 'already_submitted':
+        pending.clear()
+        data['currentNodeId'] = 'next-node'
+        data['canEdit'] = False
+    before = app.inspect(task['task_id'])
+    values_before = deepcopy(data)
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner, 'load_source_policy', lambda: POLICY)
+    monkeypatch.setattr(Approval, '_api', lambda _self: api)
+    args = ['--root', str(app.root), 'postcheck', '--task-id', str(task['task_id'])]
+    if state != 'unconfirmed':
+        args += ['--confirm-not-written', 'YES', '--confirmation-note', '用户确认本次节点未提交，已回填字段保留',
+                 '--expected-submission-id', str(before['submissions'][0]['id'] + (state == 'wrong_attempt'))]
+    code = cli.main(args)
+    result = json.loads(capsys.readouterr().out)
+    after = app.inspect(task['task_id'])
+    assert len(posts) == 1
+    assert data == values_before
+    assert len(after['submissions']) == 1
+    if state in {'fields_changed', 'node_changed', 'uneditable', 'delivery_changed', 'wrong_attempt',
+                 'handled_conflict', 'main_changed', 'resources_changed'}:
+        assert code == 1
+        assert result['error'] == {'fields_changed': 'confirmation_fields_unverified',
+                                   'main_changed': 'confirmation_fields_unverified',
+                                   'resources_changed': 'confirmation_fields_unverified',
+                                   'wrong_attempt': 'confirmation_submission_changed'}.get(state, 'confirmation_target_changed')
+        assert after == before
+    elif state == 'unconfirmed':
+        assert code == 0 and result['status'] == 'unknown'
+    elif state == 'already_submitted':
+        assert code == 0 and result['status'] == 'submitted'
+        assert 'confirmation_scope' not in result
+    else:
+        assert code == 0 and result['status'] == 'failed'
+        assert result['failure_code'] == 'user_confirmed_node_not_submitted'
+        assert result['confirmation_scope'] == 'node_submission'
+        assert result['fields_match'] is True
+        assert result['previous_result']['failure_code'] == 'writer_result_unknown'
+        evidence = receipts.assess_submission(after['submissions'][0], workflow_key='overseas_invoice')
+        assert evidence.resolved is True and evidence.verified is False
+        assert after['reviews'] == before['reviews']
+    app.store.connection.close()
+
+
 def test_multiple_invoice_rows_sum_separately_and_preserve_human_selection(case):
     data, _, _, material, recognized = case((('101', '102'), ('103',)))
     plan = invoice.build_plan(material, recognized)

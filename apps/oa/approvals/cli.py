@@ -68,7 +68,7 @@ def main(argv=None):
     preview.add_argument('--observations-file', type=Path)
     check = commands.add_parser('postcheck', help='仅核对未知提交，不重发')
     check.add_argument('--task-id', type=int, required=True)
-    check.add_argument('--confirm-not-written', choices=['YES'], help='仅记录本次用户明确确认未提交成功，不重发；仍核对同一待办及已办事实')
+    check.add_argument('--confirm-not-written', choices=['YES'], help='记录本次用户明确确认未提交成功，不重发；海外仅确认节点，须核对回填字段一致')
     check.add_argument('--confirmation-note', help='保存本次人工确认的原文及依据；须与 --confirm-not-written YES 同时提供')
     check.add_argument('--expected-submission-id', type=int, help='本次人工确认针对的精确提交尝试ID')
     failed = commands.add_parser('fail', help='登记当前轮活动审核的技术失败，不访问 OA')
@@ -189,7 +189,8 @@ def main(argv=None):
             result = postcheck_without_owner(root, args.task_id, confirmation_note=request['confirmation_note'],
                                              expected_submission_id=request['expected_submission_id'])
         emit(result)
-        if args.operation == 'postcheck' and args.confirm_not_written == 'YES' and result.get('failure_code') == receipts.USER_CONFIRMED_NOT_WRITTEN:
+        if args.operation == 'postcheck' and args.confirm_not_written == 'YES' and result.get('failure_code') in {
+                receipts.USER_CONFIRMED_NOT_WRITTEN, receipts.USER_CONFIRMED_NODE_NOT_SUBMITTED}:
             return 0
         return 1 if result.get('status') == 'refused' or (result.get('status') == 'failed' and (args.operation != 'fail' or 'error' in result)) else 0
     except KeyboardInterrupt:

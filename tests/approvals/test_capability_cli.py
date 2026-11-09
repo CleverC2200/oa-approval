@@ -349,7 +349,7 @@ def test_postcheck_without_owner_requires_published_main_before_reading(tmp_path
     app.store.connection.close()
 
 
-@pytest.mark.parametrize('current_state', ['pending', 'changed', 'handled', 'conflicting', 'wrong_attempt', 'overseas'])
+@pytest.mark.parametrize('current_state', ['pending', 'changed', 'handled', 'conflicting', 'wrong_attempt'])
 def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(tmp_path, monkeypatch, capsys, current_state):
     from apps.oa.approvals import owner
     from apps.oa.approvals.operations import Approval
@@ -357,8 +357,6 @@ def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(
     monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
     monkeypatch.setattr(owner, 'require_production_main', lambda: None)
     app = create_demo(tmp_path / 'round')
-    if current_state == 'overseas':
-        app.api.rows[0]['workflow_key'] = 'overseas_invoice'
     started = app.pending()
     task = started['tasks'][0]
     record_submission(app.store, task['id'], status='unknown', result={'failure_code': 'writer_result_unknown'})
@@ -376,10 +374,9 @@ def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(
                      '--expected-submission-id', str(before['submissions'][0]['id'] + (current_state == 'wrong_attempt'))])
     result = json.loads(capsys.readouterr().out)
     after = app.store.details(task['id'])
-    if current_state in {'changed', 'conflicting', 'wrong_attempt', 'overseas'}:
+    if current_state in {'changed', 'conflicting', 'wrong_attempt'}:
         assert code == 1
-        assert result['error'] == {'wrong_attempt': 'confirmation_submission_changed',
-                                   'overseas': 'overseas_confirmation_not_supported'}.get(current_state, 'confirmation_target_changed')
+        assert result['error'] == {'wrong_attempt': 'confirmation_submission_changed'}.get(current_state, 'confirmation_target_changed')
         assert after == before
     else:
         assert code == 0
