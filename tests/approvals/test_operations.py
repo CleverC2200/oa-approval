@@ -20,7 +20,7 @@ class FakeOA:
     def pending_rows(self):
         return list(self.rows)
 
-    def handled_rows(self):
+    def handled_rows(self, **_options):
         return list(self.handled)
 
     def submit_and_verify(self, request_id, opinion):
@@ -281,6 +281,42 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch
     assert recovered["postcheck_done_hit"] is True
     assert app.submit(task["task_id"], opinion="意见", confirm_write=True)["status"] == "submitted"
     assert len(api.posts) == 1
+
+
+@pytest.mark.parametrize('incomplete', [False, True])
+def test_postcheck_reads_handled_history_beyond_five_pages(tmp_path, incomplete):
+    from apps.oa.approvals.sources.oa import OaApi
+
+    class HistoryApi(FakeOA):
+        handled_rows = OaApi.handled_rows
+
+        def _post_readonly(self, endpoint, body):
+            if endpoint.endswith('getHandledWorkflowRequestList'):
+                return {'data': []}
+            page = int(body['pageNo'])
+            if page == 6 and not incomplete:
+                return {'data': [{'requestId': '101', 'operateDate': '2099-01-01', 'operateTime': '12:00:00'}]}
+            if page == 6:
+                page = 5
+            return {'data': [{'requestId': str(page * 100 + index + 1000)} for index in range(100)]}
+
+    app, api = service(tmp_path, HistoryApi())
+    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1,
+                       agent_workflow_key='travel_expense')
+    app.writer = type('UnknownWriter', (), {'submit_and_verify': lambda *_a, **_k: {
+        'submit_ok': True, 'done_hit': False, 'postcheck_done_hit': False}})()
+    assert app.submit(task['task_id'], opinion='意见', confirm_write=True)['status'] == 'unknown'
+    api.rows = []
+    if incomplete:
+        with pytest.raises(ValueError, match='handled_pagination_incomplete'):
+            app.postcheck(task['task_id'])
+        assert app.inspect(task['task_id'])['task']['status'] == 'unknown'
+    else:
+        result = app.postcheck(task['task_id'])
+        assert result['status'] == 'submitted'
+        assert all(result[key] is True for key in ('submit_ok', 'done_hit', 'postcheck_done_hit'))
+    assert api.posts == []
+    assert len(app.inspect(task['task_id'])['submissions']) == 1
 
 
 def test_successful_occurrence_is_not_reset_when_pending_reappears(tmp_path):

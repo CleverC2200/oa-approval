@@ -263,7 +263,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
         def pending_rows(self):
             return pending
 
-        def handled_rows(self):
+        def handled_rows(self, **_options):
             return handled
 
         def request_context(self, request_id):
@@ -356,7 +356,7 @@ def test_overseas_submit_preserves_response_and_completion_evidence(case, respon
         def pending_rows(self):
             return [{'request_id': '201'}] if pending else []
 
-        def handled_rows(self):
+        def handled_rows(self, **_options):
             return [{'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()
                      if fresh else '2020-01-01T12:00:00+00:00'}]
 
@@ -419,7 +419,7 @@ def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verific
             self.require_current_token()
             return data, resources
 
-        def handled_rows(self):
+        def handled_rows(self, **_options):
             self.require_current_token()
             return [{'request_id': '201', 'handled_at': datetime.now(timezone.utc).isoformat()}] if posts else []
 
