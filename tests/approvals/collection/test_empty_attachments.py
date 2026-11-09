@@ -480,9 +480,14 @@ def test_official_empty_material_does_not_hide_missing_selected_attachment(
     assert report['parts'] == requests == []
 
 
-def test_explicit_travel_login_exception_preserves_unknown_coverage(travel_source):
+@pytest.mark.parametrize('reason', ['login_required', 'travel_sso_account_missing', 'travel_sso_company_missing'])
+def test_explicit_travel_login_exception_preserves_unknown_coverage(travel_source, reason):
     workflow, scan, oa_api = travel_source
-    scan['text'] = '账号登录'
+    if reason == 'login_required':
+        scan['text'] = '账号登录'
+    else:
+        scan.update(text='', diagnostics=[{'stage': stage, 'reason': reason}
+            for stage in ('readonly_session', 'engine')])
     exception = {'request_id': '12', 'authorization_note': '用户仅允许本单受限审核'}
     material = collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
                             allow_browser_download=True, source_policy=POLICY,
@@ -490,7 +495,7 @@ def test_explicit_travel_login_exception_preserves_unknown_coverage(travel_sourc
     assert material['travel_read_exception']['request_id'] == '12'
     assert material['travel_read_exception']['authorization_note'] == exception['authorization_note']
     assert material['travel_read_exception']['error'] == 'travel_attachment_discovery_failed'
-    assert material['travel_read_exception']['diagnostics'][0]['reason'] == 'login_required'
+    assert material['travel_read_exception']['diagnostics'][0]['reason'] == reason
     assert 'attachment_presence' not in material
     assert material['resources'] == []
     with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
@@ -498,9 +503,14 @@ def test_explicit_travel_login_exception_preserves_unknown_coverage(travel_sourc
                      allow_browser_download=True, source_policy=POLICY)
 
 
-def test_travel_login_exception_does_not_waive_other_read_failures(travel_source):
+@pytest.mark.parametrize('reason', [None, 'travel_sso_rejected', 'navigation_failed', 'timeout', 'resource_ownership_untrusted'])
+def test_travel_login_exception_does_not_waive_other_read_failures(travel_source, reason):
     workflow, scan, oa_api = travel_source
     scan['text'] = 'SYNTHETIC-OTHER-REQUEST'
+    if reason is not None:
+        scan.update(text='', diagnostics=[
+            {'stage': 'readonly_session', 'reason': 'travel_sso_account_missing'},
+            {'stage': 'browser', 'reason': reason}])
     with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
         collect_case('12', oa_api=oa_api, configs=[TRAVEL_CONFIG],
                      allow_browser_download=True, source_policy=POLICY,
