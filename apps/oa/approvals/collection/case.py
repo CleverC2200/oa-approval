@@ -540,7 +540,9 @@ def _collect_case(
         if (not travel_read_exception or config.get("flow_key") != "travel_expense"
                 or str(error) != "travel_attachment_discovery_failed"
                 or not error.diagnostics
-                or any(item.get("reason") != "login_required" for item in error.diagnostics)):
+                or any(item.get("reason") not in {
+                    "login_required", "travel_sso_account_missing", "travel_sso_company_missing"
+                } for item in error.diagnostics)):
             raise
         read_exception = {"request_id": str(request_id),
                           "authorization_note": travel_read_exception["authorization_note"],
