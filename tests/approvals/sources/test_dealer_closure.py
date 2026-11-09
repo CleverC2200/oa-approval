@@ -74,10 +74,14 @@ def test_no_balance_collection_skips_refund_and_keeps_raw_null_scoped_confirmati
     assert source.read(api, workflow(), [])['freezer_none_confirmation'] is None
 
 
-def test_wrong_customer_bi_is_rejected_before_other_sources(monkeypatch, context):
+@pytest.mark.parametrize('identity', [
+    {'company_code': 'D001', 'cust_code': '99000002'},
+    {'company_code': 'D002', 'cust_code': '99000001'},
+])
+def test_wrong_customer_or_company_bi_is_rejected_before_other_sources(monkeypatch, context, identity):
     api = SimpleNamespace(pending_rows=lambda: [delivery()])
     monkeypatch.setattr(source, 'settings', lambda: {})
-    worker = Mock(return_value={'rows': [{'company_code': 'D001', 'cust_code': '99000002'}]})
+    worker = Mock(return_value={'rows': [identity]})
     monkeypatch.setattr(source, '_worker', worker)
     with pytest.raises(RuntimeError, match='dealer_closure_bi_identity_invalid'):
         source.read(api, workflow(), [])
