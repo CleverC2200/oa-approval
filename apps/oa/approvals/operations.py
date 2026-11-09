@@ -338,7 +338,7 @@ class Approval:
                     handled = dealer_closure.feedback_verified(self._api(), material,
                         details['reviews'][-1]['opinion'], submission['started_at'])
             if handled is None:
-                handled = handled_since(self._api().handled_rows(),task['request_id'],submission['started_at'])
+                handled = handled_since(self._api().handled_rows(max_pages=None),task['request_id'],submission['started_at'])
             fields_match = None
             if task["workflow_key"] == "overseas_invoice":
                 review = details["reviews"][-1]
