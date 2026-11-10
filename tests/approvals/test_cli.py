@@ -130,8 +130,18 @@ def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_out
 
 
 @pytest.mark.parametrize('operation', ['submit', 'preview'])
-def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys, operation):
+@pytest.mark.parametrize('finance_policy', [False, True])
+def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys, operation, finance_policy):
     from apps.oa.approvals import cli, owner
+    from apps.oa.approvals import finance_precheck
+    from apps.oa.approvals.sources import auth, official_sql, prediction
+
+    monkeypatch.setattr(finance_precheck, 'load_policy', lambda: {'leader': {'id': '100'}} if finance_policy else None)
+    def unexpected(*args, **kwargs):
+        pytest.fail('demo must not create a real prediction session, authenticate, or query SQL')
+    monkeypatch.setattr(prediction, '_PredictionSession', unexpected)
+    monkeypatch.setattr(auth, 'credentials', unexpected)
+    monkeypatch.setattr(official_sql, '_query_rows', unexpected)
 
     monkeypatch.setattr(sys, 'stdin', io.StringIO(
         '{"operation":"collect","agent_id":"travel-reviewer","expected_task_id":1,"agent_workflow_key":"travel_expense"}\n'
@@ -143,6 +153,9 @@ def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pendi
     assert started['truncated'] is False
     assert collected['request_id'] == '90001'
     assert preview['status'] == 'preview'
+    assert preview.get('delivery', {}).get('action') == ('submit' if finance_policy else None)
+    with sqlite3.connect(tmp_path / 'approval.sqlite3') as database:
+        assert database.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 0
 
 
 def command(root, *arguments):

@@ -89,11 +89,12 @@ def submit_overseas(api, writer, request_id, material, plan, *, origins):
 
 
 class Approval:
-    def __init__(self, root, *, api=None, configs=None, collector=None, writer=None, source_policy=None):
+    def __init__(self, root, *, api=None, configs=None, collector=None, writer=None, predictor=None, source_policy=None):
         self.root = Path(root).expanduser().resolve()
         self.root.mkdir(parents=True, exist_ok=True)
         self.store = Store(self.root / "approval.sqlite3")
         self.api, self.configs, self.collector, self.writer = api, configs, collector, writer
+        self.predictor = predictor
         self.source_policy = source_policy
 
     def _api(self):
@@ -246,8 +247,11 @@ class Approval:
                 raise ValueError("opinion_required")
             delivery = None
             if task['workflow_key'] in finance_precheck.WORKFLOWS and finance_precheck.load_policy() is not None:
-                from apps.oa.approvals.sources.prediction import predict
-                forecast = predict(task['request_id'], refresh=True)
+                predictor = self.predictor
+                if predictor is None:
+                    from apps.oa.approvals.sources.prediction import predict
+                    predictor = partial(predict, oa_origin=self.source_policy.attachments.oa_origin)
+                forecast = predictor(task['request_id'], refresh=True)
                 delivery = forecast['delivery']
                 if forecast['finance_precheck']['status'] == 'not_configured':
                     raise ValueError('finance_precheck_configuration_changed')

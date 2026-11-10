@@ -39,7 +39,7 @@ def native(monkeypatch):
         monotonic=lambda: clock.now, sleep=lambda seconds: setattr(clock, 'now', clock.now + seconds)))
     values = {'OA_BASE_URL': POLICY.attachments.oa_origin, 'OA_UID': '1', 'OA_APP_ID': 'test-app'}
     monkeypatch.setattr(prediction.auth, 'env', lambda name: values.get(name, ''))
-    authentications, requests, replies = [], [], []
+    authentications, requests, replies, urls = [], [], [], []
     account = {'data': {'userid': '1'}}
     request_details = {'payload': {'code': 'SUCCESS', 'data': {
         'requestId': '123', 'creatorId': '9', 'creatorName': '名单外发起人', 'canView': True}}}
@@ -57,6 +57,7 @@ def native(monkeypatch):
         headers = {}
 
     def urlopen(request, *, timeout):
+        urls.append(request.full_url)
         path = urllib.parse.urlsplit(request.full_url).path
         params = urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query or (request.data or b'').decode())
         requests.append((path, params, dict(request.header_items()), timeout))
@@ -76,11 +77,48 @@ def native(monkeypatch):
 
     monkeypatch.setattr(prediction.auth, 'credentials', credentials)
     monkeypatch.setattr(prediction.http, 'urlopen', urlopen)
-    return SimpleNamespace(authentications=authentications, requests=requests, replies=replies,
+    return SimpleNamespace(authentications=authentications, requests=requests, replies=replies, urls=urls, env=values,
                            account=account, operators=operators, request_details=request_details)
 
 
-def test_public_cli_preserves_full_raw_responses_and_every_node(native, tmp_path, capsys):
+@pytest.mark.parametrize('identity_matches', [False, True])
+def test_explicit_origin_controls_authentication_and_every_prediction_read(native, identity_matches):
+    native.env['OA_BASE_URL'] = 'https://unused.example.test'
+    native.account['data']['userid'] = '1' if identity_matches else '2'
+    native.replies.append(result())
+    if identity_matches:
+        assert prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)['complete'] is True
+    else:
+        with pytest.raises(RuntimeError, match='prediction_session_identity_mismatch'):
+            prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
+        assert len(native.requests) == 1
+    assert native.authentications == [POLICY.attachments.oa_origin]
+    assert all(url.startswith(POLICY.attachments.oa_origin + '/') for url in native.urls)
+
+
+def test_approval_default_prediction_uses_its_source_policy(native, finance_rule, tmp_path):
+    from tests.approvals.test_operations import service
+
+    native.env['OA_BASE_URL'] = 'https://unused.example.test'
+    native.request_details['payload']['data']['requestId'] = '101'
+    native.replies.append(result())
+    app, api = service(tmp_path)
+    try:
+        task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
+                           agent_workflow_key='travel_expense')
+        preview = app.submit(task['task_id'], opinion='合成预览')
+        assert preview['status'] == 'preview'
+        assert native.authentications == [POLICY.attachments.oa_origin]
+        assert all(url.startswith(POLICY.attachments.oa_origin + '/') for url in native.urls)
+        assert native.requests[2][1] == {'requestid': ['101'], 'resetForecast': ['1']}
+        assert api.posts == [] and app.inspect(task['task_id'])['submissions'] == []
+    finally:
+        app.store.connection.close()
+
+
+def test_public_cli_preserves_full_raw_responses_and_every_node(native, tmp_path, capsys, monkeypatch):
+    monkeypatch.setenv('OA_TRAVEL_BROWSER_ENGINE', 'unused-browser')
+    monkeypatch.setenv('OA_TRAVEL_SESSION_SOURCE', 'unused-session')
     payload = result()
     native.replies.append(payload)
     assert main(['approvals', '--root', str(tmp_path), 'predict', '--request-id', '123', '--format', 'json']) == 0
@@ -143,7 +181,7 @@ def test_same_node_in_history_and_prediction_uses_its_own_operator_context(nativ
     payload['nodeInfo'][0]['nodeid'] = 20
     native.operators[('20', '0')] = {'nodes': [{'operators': [{'id': 8, 'name': '历史办理人', 'type': 0}]}]}
     native.replies.append(payload)
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['nodes'][0]['operators'][0]['id'] == '8'
     assert output['nodes'][2]['operators'][0]['id'] == '2'
     assert output['nodes'][3]['operators'] == output['nodes'][2]['operators']
@@ -159,7 +197,7 @@ def test_unrecognized_native_states_and_placeholders_remain_unknown_without_oper
         {'nodeid': -3, 'nodeName': '新增占位', 'nodeType': 3},
     ])
     native.replies.append(payload)
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['raw_prediction'] == payload
     assert [node['node_id'] for node in output['nodes'][-2:]] == ['99', '-3']
     assert all(node['state'] == 'unknown' and not node['operators_loaded'] for node in output['nodes'][-2:])
@@ -254,7 +292,7 @@ def test_http_failure_does_not_retry_or_expose_response(native, capsys, error):
                                               ('123', 0), ('123', 301)])
 def test_invalid_arguments_do_not_authenticate(native, request_id, timeout):
     with pytest.raises(ValueError):
-        prediction.predict(request_id, timeout=timeout)
+        prediction.predict(request_id, oa_origin=POLICY.attachments.oa_origin, timeout=timeout)
     assert not native.authentications and not native.requests
 
 
@@ -303,7 +341,7 @@ def test_finance_matches_only_future_human_approval_or_processing_nodes(native, 
     native.operators[('20', str(node_type))] = {'nodes': [{'operators': [
         {'id': 100, 'name': '测试高层', 'type': person_type}]}]}
     native.replies.append(payload)
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['finance_precheck']['required'] is expected
 
 
@@ -312,7 +350,7 @@ def test_unknown_route_is_not_false_but_initiator_match_still_requires_finance(n
     native.replies.append(result())
     if initiator_hit:
         native.request_details['payload']['data'].update(creatorId='4', creatorName='名单内发起人')
-    assessment = prediction.predict('123')['finance_precheck']
+    assessment = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)['finance_precheck']
     assert assessment['required'] is (True if initiator_hit else None)
     assert 'prediction_path_unknown' in assessment['uncertainties']
 
@@ -326,7 +364,7 @@ def test_initiator_read_failure_does_not_hide_independent_future_approver_match(
                                                               'private-server-message', {}, None)
     if route_hit:
         native.operators[('20', '3')]['nodes'][0]['operators'].append({'id': 100, 'name': '测试高层', 'type': 0})
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['complete'] is True and output['initiator']['read_status'] == 'unavailable'
     assert output['finance_precheck']['required'] is (True if route_hit else None)
     assert 'private-server-message' not in json.dumps(output)
@@ -347,7 +385,7 @@ def test_initiator_requires_valid_response_and_matching_request_identity(native,
     payload['nodeInfo'].pop()
     native.replies.append(payload)
     native.request_details['payload'] = details
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['finance_precheck']['required'] is None
     assert output['initiator']['read_status'] == 'unavailable'
 
@@ -365,7 +403,7 @@ def test_empty_future_people_is_unknown_not_negative(native, finance_rule):
     payload['nodeInfo'].pop()
     native.replies.append(payload)
     native.operators[('20', '3')]['nodes'][0]['operators'] = []
-    assessment = prediction.predict('123')['finance_precheck']
+    assessment = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)['finance_precheck']
     assert assessment['required'] is None
     assert 'future_operators_unavailable' in assessment['uncertainties']
 
@@ -375,7 +413,7 @@ def test_unknown_operator_namespace_cannot_prove_a_negative_match(native, financ
     payload['nodeInfo'].pop()
     native.replies.append(payload)
     native.operators[('20', '3')]['nodes'][0]['operators'] = [{'id': 200, 'name': '未知类型', 'type': 99}]
-    assessment = prediction.predict('123')['finance_precheck']
+    assessment = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)['finance_precheck']
     assert assessment['required'] is None
     assert 'operator_type_unknown' in assessment['uncertainties']
 
@@ -431,7 +469,7 @@ def test_verified_terminal_loop_resolves_people_scope_without_hiding_native_unkn
             raise RuntimeError('official_sql_unavailable')
         return rows
     monkeypatch.setattr(official_sql, '_query_rows', read)
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['raw_prediction'] == payload
     assert output['has_unknown_nodes'] is True
     assert output['nodes'][-2]['state'] == 'unknown'
@@ -489,7 +527,7 @@ def test_verified_finance_tail_only_proves_no_additional_leader_match(native, fi
         assert params == {'request_id': 123}
         return rows
     monkeypatch.setattr(official_sql, '_query_rows', read)
-    output = prediction.predict('123')
+    output = prediction.predict('123', oa_origin=POLICY.attachments.oa_origin)
     assert output['complete'] is True and output['has_unknown_nodes'] is True
     assert output['raw_prediction'] == payload
     assert output['nodes'][-2]['state'] == 'unknown'

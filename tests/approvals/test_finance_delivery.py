@@ -8,14 +8,14 @@ from tests.approvals.test_operations import service
 
 
 @pytest.fixture
-def delivery(monkeypatch):
+def finance_case(tmp_path, monkeypatch):
     value = {'action': 'transfer', 'recipient_id': '8', 'source_node_id': '20'}
     monkeypatch.setattr(finance_precheck, 'load_policy', lambda: {'leader': {'id': '100'}})
     def predict(request_id, *, refresh):
         assert request_id == '101' and refresh is True
         return {'finance_precheck': {'status': 'required'}, 'delivery': dict(value)}
-    monkeypatch.setattr(prediction, 'predict', predict)
-    return value
+    app, api = service(tmp_path, predictor=predict)
+    return app, api, value
 
 
 def task(app, workflow_key='travel_expense'):
@@ -31,8 +31,8 @@ def task(app, workflow_key='travel_expense'):
 
 @pytest.mark.parametrize('workflow_key', ['travel_expense', 'business_entertainment', 'business_support_fee',
                                         'general_expense', 'small_marketing_fee'])
-def test_matching_case_previews_then_transfers_with_persisted_target_and_never_submits(tmp_path, monkeypatch, delivery, workflow_key):
-    app, api = service(tmp_path)
+def test_matching_case_previews_then_transfers_with_persisted_target_and_never_submits(tmp_path, monkeypatch, finance_case, workflow_key):
+    app, api, delivery = finance_case
     task_id = task(app, workflow_key)
     calls = []
     def prepare(request_id, plan):
@@ -55,6 +55,7 @@ def test_matching_case_previews_then_transfers_with_persisted_target_and_never_s
     assert result['delivery']['recipient_id'] == '8'
     assert calls == ['prepare', 'transfer']
     assert api.posts == []
+    monkeypatch.setattr(app, 'predictor', lambda *_a, **_k: pytest.fail('submitted task must not predict again'))
     assert app.submit(task_id, opinion='禁止重复', confirm_write=True)['status'] == 'submitted'
     assert calls == ['prepare', 'transfer']
     from apps.oa.approvals.client import query
@@ -70,8 +71,8 @@ def test_matching_case_previews_then_transfers_with_persisted_target_and_never_s
     assert calls == ['prepare', 'transfer']
 
 
-def test_blocked_or_changed_delivery_never_starts_a_write(tmp_path, monkeypatch, delivery):
-    app, api = service(tmp_path)
+def test_blocked_or_changed_delivery_never_starts_a_write(tmp_path, monkeypatch, finance_case):
+    app, api, delivery = finance_case
     task_id = task(app)
     delivery.update(action='blocked', reason='finance_recipient_ambiguous')
     assert app.submit(task_id, opinion='合成审核意见')['delivery']['action'] == 'blocked'
@@ -87,8 +88,8 @@ def test_blocked_or_changed_delivery_never_starts_a_write(tmp_path, monkeypatch,
     assert api.posts == []
 
 
-def test_unknown_transfer_uses_saved_transfer_evidence_for_readonly_recovery(tmp_path, monkeypatch, delivery):
-    app, api = service(tmp_path)
+def test_unknown_transfer_uses_saved_transfer_evidence_for_readonly_recovery(tmp_path, monkeypatch, finance_case):
+    app, api, delivery = finance_case
     task_id = task(app)
     monkeypatch.setattr(api, 'prepare_transfer', lambda req, plan: {**plan, 'operator_id': '7'}, raising=False)
     def send(*args):
@@ -98,6 +99,7 @@ def test_unknown_transfer_uses_saved_transfer_evidence_for_readonly_recovery(tmp
     app.submit(task_id, opinion='另一份未发送意见')
     result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
     assert result['status'] == 'unknown'
+    monkeypatch.setattr(app, 'predictor', lambda *_a, **_k: pytest.fail('unknown task must not predict again'))
     assert app.submit(task_id, opinion='禁止重发', confirm_write=True)['status'] == 'unknown'
     calls = []
     def verify(client, request_id, opinion, started_at, context):
@@ -112,20 +114,21 @@ def test_unknown_transfer_uses_saved_transfer_evidence_for_readonly_recovery(tmp
     assert api.posts == []
 
 
-def test_negative_match_retains_normal_submit(tmp_path, delivery):
-    app, api = service(tmp_path)
+def test_negative_match_retains_normal_submit(tmp_path, finance_case):
+    app, api, delivery = finance_case
     task_id = task(app)
     delivery['action'] = 'submit'
     assert app.submit(task_id, opinion='合成审核意见', confirm_write=True)['status'] == 'submitted'
     assert api.posts == [('101', '合成审核意见')]
 
 
-def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path, monkeypatch, delivery):
-    app, api = service(tmp_path)
+def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path, monkeypatch, finance_case):
+    app, api, delivery = finance_case
     task_id = task(app, 'tpm_small_marketing_fee')
     def unexpected(*args, **kwargs):
         pytest.fail('excluded workflow must not load finance policy, predict, or transfer')
     monkeypatch.setattr(finance_precheck, 'load_policy', unexpected)
+    app.predictor = unexpected
     monkeypatch.setattr(prediction, 'predict', unexpected)
     monkeypatch.setattr(api, 'prepare_transfer', unexpected, raising=False)
     monkeypatch.setattr(api, 'transfer_and_verify', unexpected, raising=False)
@@ -137,8 +140,8 @@ def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path
     assert api.posts == [('101', '合成审核意见')]
 
 
-def test_prediction_block_before_real_submission_remains_failurable_without_losing_material(tmp_path, delivery):
-    app, api = service(tmp_path)
+def test_prediction_block_before_real_submission_remains_failurable_without_losing_material(tmp_path, finance_case):
+    app, api, delivery = finance_case
     task_id = task(app)
     material = app.inspect(task_id)['task']['material_file']
     delivery.update(action='blocked', reason='finance_prediction_incomplete')
@@ -150,3 +153,26 @@ def test_prediction_block_before_real_submission_remains_failurable_without_losi
     run_id = app.store.get_task(task_id)['last_run_id']
     assert app.fail(run_id, task_id, 'finance_prediction_incomplete')['status'] == 'failed'
     assert app.inspect(task_id)['task']['material_file'] == material
+
+
+def test_prediction_failure_preserves_review_and_never_starts_a_write(tmp_path, finance_case):
+    app, api, _ = finance_case
+    task_id = task(app)
+    before = app.inspect(task_id)
+    def failed(*args, **kwargs):
+        raise TimeoutError('prediction_timeout')
+    app.predictor = failed
+    with pytest.raises(TimeoutError, match='prediction_timeout'):
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    assert app.inspect(task_id) == before
+    assert api.posts == []
+
+
+def test_unconfigured_finance_policy_does_not_invoke_predictor(tmp_path, monkeypatch, finance_case):
+    app, api, _ = finance_case
+    task_id = task(app)
+    monkeypatch.setattr(finance_precheck, 'load_policy', lambda: None)
+    app.predictor = lambda *_a, **_k: pytest.fail('unconfigured policy must not predict')
+    preview = app.submit(task_id, opinion='合成审核意见')
+    assert preview['status'] == 'preview' and 'delivery' not in preview
+    assert api.posts == [] and app.inspect(task_id)['submissions'] == []
