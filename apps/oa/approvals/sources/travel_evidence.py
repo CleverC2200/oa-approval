@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import hashlib
 from typing import Any
 import re
+import traceback
 import urllib.parse
 
 from apps.oa.approvals.sources import travel_hotel, travel_invoices
@@ -78,6 +79,7 @@ class CandidateObservation:
     diagnostics: tuple[dict, ...] = ()
     source_facts: tuple[dict, ...] = ()
     order_invoices: tuple[dict, ...] = ()
+    read_error: dict | None = None
 
     @classmethod
     def failure(
@@ -95,7 +97,15 @@ class CandidateObservation:
             diagnostic["browser"] = browser
         if error is not None:
             diagnostic["exception_type"] = type(error).__name__
-        return cls(browser=browser, diagnostics=(diagnostic,))
+        context = None
+        if error is not None:
+            context = {"exception_type": type(error).__name__, "frames": [
+                {"file": frame.filename, "function": frame.name, "line": frame.lineno}
+                for frame in traceback.extract_tb(error.__traceback__)]}
+            cause = error.__cause__ or error.__context__
+            if cause is not None:
+                context['cause_type'] = type(cause).__name__
+        return cls(browser=browser, diagnostics=(diagnostic,), read_error=context)
 
     def assess(
         self, *, expected_marker: str, expected_resource_count: int | None

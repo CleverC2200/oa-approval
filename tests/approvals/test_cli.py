@@ -461,6 +461,8 @@ original_collect = demo.collect_demo
 def collect(request_id, **options):
     if request_id == '90002':
         if PHASE_LIMIT:
+            collection_budget.record_read({'status': READ_STATUS, 'observations': [
+                {'diagnostics': [{'stage': 'browser', 'reason': 'browser_failed', 'exception_type': 'RuntimeError'}]}]})
             phase = collection_budget.phase('synthetic_browser_cleanup', 1)
             phase.__enter__()
         if owner.COLLECTION_TIMEOUT_SECONDS < 900:
@@ -488,7 +490,7 @@ demo.DemoApi.submit_and_verify = submit
 demo.collect_demo = collect
 if __name__ == '__main__':
     raise SystemExit(cli.main())
-'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(900 if getattr(request, 'param', None) == 'phase' else getattr(request, 'param', 900))).replace('DETACHED_PID', repr(str(tmp_path / 'detached-pid'))).replace('PHASE_LIMIT', repr(getattr(request, 'param', None) == 'phase')))
+'''.replace('PROJECT', repr(str(PROJECT))).replace('CONTROL', repr(str(control_path))).replace('UNKNOWN', repr(str(tmp_path / 'unknown'))).replace('COLLECTION_BUDGET', repr(900 if getattr(request, 'param', None) in {'phase', 'phase_complete'} else getattr(request, 'param', 900))).replace('DETACHED_PID', repr(str(tmp_path / 'detached-pid'))).replace('PHASE_LIMIT', repr(getattr(request, 'param', None) in {'phase', 'phase_complete'})).replace('READ_STATUS', repr('complete' if getattr(request, 'param', None) == 'phase_complete' else 'failed')))
     process = subprocess.Popen([sys.executable, str(entry), '--root', str(tmp_path), 'pending', '--demo'],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True)
@@ -624,7 +626,10 @@ def test_exit_waits_for_disconnected_collection_and_keeps_lock(blocked_collectio
 def test_collection_process_crash_marks_preparing_task_failed_once(blocked_collection, tmp_path):
     process, started, first, invoke, client, channel = blocked_collection
     channel.sendall(b'x')
-    assert json.loads(client.makefile().readline()) == {'status':'failed', 'error':'collection_process_failed'}
+    result = json.loads(client.makefile().readline())
+    assert result['status'] == 'failed' and result['error'] == 'collection_process_failed'
+    assert result['task_id'] == 2 and result['stage'] == 'unknown'
+    assert Path(result['diagnostics_file']).is_file()
     from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
@@ -799,7 +804,9 @@ def test_partial_collection_reply_cannot_block_deadline(tmp_path, monkeypatch):
         assert incoming.poll(5)
         collection.complete()
         assert time.monotonic() - beginning < 6
-        assert replies == [{'status': 'failed', 'error': 'collection_deadline'}]
+        assert len(replies) == 1
+        assert replies[0]['status'] == 'failed' and replies[0]['error'] == 'collection_deadline'
+        assert replies[0]['task_id'] == task['id'] and replies[0]['stage'] == 'unknown'
         assert app.store.get_task(task['id'])['status'] == 'failed'
     finally:
         app.store.connection.close()
@@ -832,8 +839,9 @@ def test_process_scan_failure_does_not_leave_frozen_collector(tmp_path, monkeypa
         app.store.connection.close()
 
 
-@pytest.mark.parametrize('blocked_collection', ['phase'], indirect=True)
-def test_browser_cleanup_deadline_does_not_wait_for_collection_total(blocked_collection):
+@pytest.mark.parametrize('blocked_collection,read_status', [('phase', 'failed'), ('phase_complete', 'complete')],
+                         indirect=['blocked_collection'])
+def test_browser_cleanup_deadline_does_not_wait_for_collection_total(blocked_collection, read_status):
     import time
 
     process, started, first, invoke, client, channel = blocked_collection
@@ -843,6 +851,21 @@ def test_browser_cleanup_deadline_does_not_wait_for_collection_total(blocked_col
     assert before['phase']['phase'] == 'synthetic_browser_cleanup'
     result = json.loads(client.makefile().readline())
     assert result['error'] == 'collection_deadline'
+    assert result['stage'] == 'synthetic_browser_cleanup'
+    assert result['task_id'] == 2 and result['run_id'] == started['run_id']
+    assert result['agent_id'] == 'second'
+    report = json.loads(Path(result['diagnostics_file']).read_text())
+    assert report['stage'] == result['stage'] and report['task_id'] == 2
+    reads = json.loads(Path(report['read_results_file']).read_text())
+    assert reads['run_id'] == started['run_id'] and reads['task_id'] == 2
+    assert reads['read_results'][0]['status'] == read_status
+    assert 'observations' not in json.dumps(result)
+    shown = invoke('show', '--task-id', '2')
+    assert shown['collection_failure']['diagnostics_file'] == result['diagnostics_file']
+    assert shown['collection_failure']['stage'] == result['stage']
+    assert shown['task']['status'] == 'failed'
+    assert shown['task']['material_file'] is None
+    assert shown['submissions'] == []
     assert time.monotonic() - beginning < 6
     assert invoke('finish', '--run-id', started['run_id'])['status'] == 'closed'
     process.wait(timeout=10)

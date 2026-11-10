@@ -18,7 +18,7 @@ from uuid import uuid4
 from apps.oa.runtime import collection_budget, control
 
 from apps.oa.runtime.paths import PROJECT_ROOT
-from apps.oa.approvals.client import emit, failure, socket_path
+from apps.oa.approvals.client import collection_diagnostics_file, emit, failure, socket_path
 from apps.oa.approvals.source_policy import load_source_policy
 from apps.oa.approvals.status import closeout_blockers, submission_acceptance
 
@@ -166,7 +166,8 @@ def collect_process(root, demo, run_id, request, output, source_policy, phase_fi
             approval = create_demo(root)
         else:
             approval = Approval(root, source_policy=source_policy)
-        with collection_budget.tracking(phase_file):
+        with collection_budget.tracking(phase_file, run_id=run_id,
+                task_id=request.get('expected_task_id'), agent_id=request.get('agent_id')):
             result = dispatch(approval, run_id, request)
     except Exception as error:
         result = failure(error)
@@ -287,10 +288,28 @@ class _Collection:
                 reason = "collection_deadline" if self.timed_out else "collection_process_failed"
                 if self.timed_out and stage is not None:
                     reason += ":" + stage["phase"]
+                result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
                 for task in self._store.tasks(self._run_id):
                     if task['status'] == 'preparing':
+                        details = {'run_id': self._run_id, 'task_id': task['id'], 'agent_id': task['agent_id'],
+                                   'stage': stage['phase'] if stage else 'unknown',
+                                   'error': result['error'],
+                                   'elapsed_seconds': round(time.monotonic() - self.started, 1)}
+                        if stage is not None:
+                            details['phase_started_at'] = stage['started_at']
+                        if self.phase_file is not None:
+                            details['phase_file'] = str(self.phase_file)
+                            read_file = self.phase_file.with_suffix('.read.json')
+                            if read_file.is_file():
+                                details['read_results_file'] = str(read_file)
+                        report = collection_diagnostics_file(self._store.path.parent, task)
+                        result.update({key: details[key] for key in ('run_id', 'task_id', 'agent_id', 'stage')})
+                        try:
+                            control.write_control_bytes_atomic(report, json.dumps(details).encode())
+                            result['diagnostics_file'] = str(report)
+                        except OSError:
+                            result['diagnostics_write_failed'] = True
                         self._store.fail_collection(task['id'], reason)
-                result = {'status': 'failed', 'error': 'collection_deadline' if self.timed_out else 'collection_process_failed'}
             else:
                 result = received[0]
         finally:
