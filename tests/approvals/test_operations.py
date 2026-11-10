@@ -40,9 +40,10 @@ def collect(request_id, *, attachment_root, **kwargs):
             "prepared":{"structured_contents":[{"resource_id":"file-1","key_text":["原件：100.00"]}],"images":[],"manifest":[]}}
 
 
-def service(tmp_path, api=None):
+def service(tmp_path, api=None, *, predictor=None):
     api = api or FakeOA()
-    return Approval(tmp_path, api=api, writer=api, configs=[], collector=collect, source_policy=POLICY), api
+    return Approval(tmp_path, api=api, writer=api, configs=[], collector=collect,
+                    predictor=predictor, source_policy=POLICY), api
 
 
 def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):

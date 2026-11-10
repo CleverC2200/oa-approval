@@ -20,8 +20,8 @@ REQUEST_PATH = '/api/workflow/paService/getWorkflowRequest'
 
 
 class _PredictionSession:
-    def __init__(self, timeout):
-        self.origin = auth.env('OA_BASE_URL').rstrip('/')
+    def __init__(self, timeout, *, oa_origin):
+        self.origin = oa_origin.rstrip('/')
         http._origin(self.origin)
         token, user_id = auth.credentials(base_url=self.origin)
         self.headers = {'appid': auth.env('OA_APP_ID'), 'token': token, 'userid': user_id,
@@ -232,7 +232,7 @@ def _resolve_finance_tail(request_id, nodes, session, leader_id):
         'archive_node_id': archive['node_id'], 'nodes': verified_nodes, 'rows': rows}
 
 
-def predict(request_id, *, timeout=60, refresh=False):
+def predict(request_id, *, oa_origin, timeout=60, refresh=False):
     if not isinstance(request_id, str) or not re.fullmatch(r'[1-9][0-9]*', request_id):
         raise ValueError('prediction_request_id_invalid')
     if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 300:
@@ -241,7 +241,7 @@ def predict(request_id, *, timeout=60, refresh=False):
     initiator = {'id': None, 'name': '', 'read_status': 'unavailable', 'source': REQUEST_PATH}
     data, nodes, operator_responses, complete = None, [], [], False
     try:
-        session = _PredictionSession(timeout)
+        session = _PredictionSession(timeout, oa_origin=oa_origin)
         operator_responses = session.operator_responses
         if policy is not None:
             try:

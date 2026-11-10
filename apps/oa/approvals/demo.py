@@ -30,6 +30,9 @@ class DemoApi:
     def handled_rows(self, **_options):
         return [dict(row) for row in self.handled]
 
+    def predict(self, request_id, *, refresh=False):
+        return {'finance_precheck': {'status': 'not_required'}, 'delivery': {'action': 'submit'}}
+
     def submit_and_verify(self, request_id, remark):
         row = next(row for row in self.rows if row['request_id'] == request_id)
         self.rows.remove(row)
@@ -72,4 +75,5 @@ def create_demo(root):
         AttachmentOrigins('', frozenset()), '',
         BrowserLocation(Path('/synthetic/chrome'), Path('/synthetic/profile'), 'Default', 'http://127.0.0.1:9223'),
     )
-    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api, source_policy=source_policy)
+    return Approval(root, api=api, configs=CONFIGS, collector=collect_demo, writer=api,
+                    predictor=api.predict, source_policy=source_policy)

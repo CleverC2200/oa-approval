@@ -107,8 +107,10 @@ def main(argv=None):
     try:
         if args.operation == 'predict':
             from apps.oa.approvals.sources.prediction import predict, render_text
+            from apps.oa.approvals.sources import auth
 
-            result = predict(args.request_id, timeout=args.timeout, refresh=args.refresh)
+            result = predict(args.request_id, oa_origin=auth.env('OA_BASE_URL'),
+                             timeout=args.timeout, refresh=args.refresh)
             if args.format == 'json':
                 emit(result)
             else:
