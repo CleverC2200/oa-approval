@@ -9,6 +9,7 @@ import socket
 
 from apps.oa.approvals.store import Store
 from apps.oa.approvals.status import batch_status
+from apps.oa.runtime import control
 
 
 def emit(value):
@@ -55,6 +56,21 @@ def _owner_status(root):
     return owner
 
 
+def collection_diagnostics_file(root, task):
+    return root / 'collection-errors' / task['last_run_id'] / f"{task['id']}.json"
+
+
+def collection_failure_info(root, task):
+    path = collection_diagnostics_file(root, task)
+    raw = control.read_control_bytes(path)
+    if raw is None:
+        return {}
+    record = json.loads(raw)
+    if record['task_id'] != task['id'] or record['run_id'] != task['last_run_id']:
+        raise ValueError('collection_diagnostics_identity_mismatch')
+    return {'collection_failure': {**record, 'diagnostics_file': str(path)}}
+
+
 def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
     database = root / 'approval.sqlite3'
     if not database.is_file():
@@ -63,6 +79,7 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
     try:
         if operation == 'show':
             details = store.details(task_id)
+            details.update(collection_failure_info(root, details['task']))
             if not full:
                 details['task'].pop('material_json', None)
                 details['task'].pop('frozen_json', None)

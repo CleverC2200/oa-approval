@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from apps.oa.runtime import collection_budget
 from contextlib import ExitStack, contextmanager
+from dataclasses import asdict
 import html
 from html.parser import HTMLParser
 import os
@@ -449,7 +450,8 @@ class _CandidateSession:
         return self
 
     def __exit__(self, *_args):
-        self.page.close()
+        with collection_budget.phase("travel_page_cleanup", BROWSER_CLEANUP_SECONDS):
+            self.page.close()
 
     def read(self):
         try:
@@ -669,6 +671,15 @@ class _CandidateSession:
         return snapshot
 
 
+def _persistent_read_value(value):
+    if isinstance(value, dict):
+        return {key: _persistent_read_value(item) for key, item in value.items()
+                if not key.startswith('_ephemeral_')}
+    if isinstance(value, (tuple, list)):
+        return [_persistent_read_value(item) for item in value]
+    return value
+
+
 class _BrowserAttempt:
     def __init__(
         self,
@@ -708,6 +719,7 @@ class _BrowserAttempt:
         try:
             stack = ExitStack()
             browser = None
+            read_status = "interrupted"
             try:
                 with collection_budget.phase("travel_browser", max(1, self.timeout_sec)):
                     self.deadline = time.monotonic() + max(1, self.timeout_sec)
@@ -723,13 +735,26 @@ class _BrowserAttempt:
                     browser = playwright.chromium.launch(**launch)
                     context = browser.new_context(storage_state=self.storage_state)
                     self._read_candidates(context)
+            except Exception as error:
+                self.results.append(CandidateObservation.failure(
+                    "browser", "browser_deadline" if isinstance(error, _TravelReadDeadline) else "browser_failed",
+                    headless=self.headless, error=error))
+                read_status = "failed"
+            else:
+                read_status = "complete" if any(item.assess(
+                    expected_marker=self.expected_marker,
+                    expected_resource_count=self.expected_resource_count).attempt_complete
+                    for item in self.results) else "incomplete"
             finally:
-                with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
-                    try:
-                        if browser is not None:
-                            browser.close()
-                    finally:
-                        stack.close()
+                try:
+                    self._checkpoint(read_status)
+                finally:
+                    with collection_budget.phase("travel_browser_cleanup", BROWSER_CLEANUP_SECONDS):
+                        try:
+                            if browser is not None:
+                                browser.close()
+                        finally:
+                            stack.close()
         except (_TravelReadDeadline, Exception) as error:
             self.results.append(
                 CandidateObservation.failure(
@@ -742,6 +767,14 @@ class _BrowserAttempt:
                 )
             )
         return self.results
+
+    def _checkpoint(self, status, *, scope="attempt"):
+        observations = []
+        for item in self.results:
+            record = asdict(item)
+            record['download_resource_count'] = len(record.pop('download_targets'))
+            observations.append(_persistent_read_value(record))
+        collection_budget.record_read({"status": status, "scope": scope, "observations": observations})
 
     def _read_candidates(self, context):
         deadline = self.deadline
@@ -767,11 +800,11 @@ class _BrowserAttempt:
             ) as candidate:
                 observation = candidate.read()
                 self.results.append(observation)
+                assessment = observation.assess(expected_marker=self.expected_marker,
+                    expected_resource_count=self.expected_resource_count)
+                self._checkpoint("complete" if assessment.attempt_complete else "incomplete", scope="candidate")
                 if any(item.get("reason", "").startswith("travel_sso_")
-                       for item in observation.diagnostics) or observation.assess(
-                    expected_marker=self.expected_marker,
-                    expected_resource_count=self.expected_resource_count,
-                ).attempt_complete:
+                       for item in observation.diagnostics) or assessment.attempt_complete:
                     break
 
 

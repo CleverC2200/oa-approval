@@ -600,3 +600,94 @@ def test_late_read_preserves_browser_cleanup_budget(browser_transport, monkeypat
                                           expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)
     assert seen == [True]
     assert json.loads(marker.read_text()) is None
+
+
+@pytest.mark.parametrize('read_status', ['complete', 'incomplete', 'failed'])
+def test_read_outcome_is_saved_before_browser_cleanup_blocks(browser_transport, monkeypatch, tmp_path, read_status):
+    from dataclasses import replace
+    from apps.oa.runtime import collection_budget
+
+    class CollectorTerminated(BaseException):
+        pass
+
+    marker = tmp_path / 'phase.json'
+    checkpoint = marker.with_suffix('.read.json')
+    original_read = travel_browser._BrowserAttempt._read_candidates
+
+    def close():
+        record = json.loads(checkpoint.read_text())
+        assert record['run_id'] == 'synthetic-run'
+        assert record['task_id'] == 12 and record['agent_id'] == 'reviewer'
+        result = record['read_results'][-1]
+        assert result['status'] == read_status
+        assert result['observations']
+        if read_status == 'failed':
+            assert result['observations'][0]['diagnostics'][0]['exception_type'] == 'RuntimeError'
+            assert result['observations'][0]['read_error']['exception_type'] == 'RuntimeError'
+            assert result['observations'][0]['read_error']['frames'][-1]['function'] == 'read_candidates'
+        else:
+            assert 'SYNTHETIC-TRAVEL' in result['observations'][0]['text']
+        assert 'private-cookie' not in checkpoint.read_text()
+        assert 'private-session-token' not in checkpoint.read_text()
+        assert checkpoint.stat().st_mode & 0o077 == 0
+        raise CollectorTerminated()
+
+    def read_candidates(attempt, context):
+        browser_transport.browsers[-1].close = close
+        if read_status == 'failed':
+            raise RuntimeError('private-session-token')
+        original_read(attempt, context)
+        attempt.results[-1] = replace(attempt.results[-1],
+            scan_status='resources_found' if read_status == 'complete' else 'empty',
+            download_targets=({'id': 'synthetic-file', '_ephemeral_cookie_header': 'private-cookie'},),
+            order_invoices=({'invoices': [{'resource': {'_ephemeral_cookie_header': 'private-cookie',
+                'id': 'synthetic-invoice'}}]},))
+        attempt.expected_resource_count = 1
+
+    monkeypatch.setattr(travel_browser._BrowserAttempt, '_read_candidates', read_candidates)
+    with collection_budget.tracking(marker, run_id='synthetic-run', task_id=12, agent_id='reviewer'):
+        with pytest.raises(CollectorTerminated):
+            travel_source.browser.read_attempt(['https://trip.example.test/target'], timeout_sec=10,
+                storage_state={}, headless=True, expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)
+
+
+
+@pytest.mark.parametrize('read_failed', [False, True])
+def test_candidate_outcome_is_saved_before_page_cleanup_blocks(browser_transport, monkeypatch, tmp_path, read_failed):
+    from apps.oa.runtime import collection_budget
+
+    class CollectorTerminated(BaseException):
+        pass
+
+    marker = tmp_path / 'phase.json'
+    original_enter = travel_browser._CandidateSession.__enter__
+
+    def enter(candidate):
+        def close():
+            phase = json.loads(marker.read_text())
+            assert phase['phase'] == 'travel_page_cleanup'
+            record = json.loads(marker.with_suffix('.read.json').read_text())['read_results'][-1]
+            assert record['scope'] == 'candidate'
+            assert record['status'] == ('incomplete' if read_failed else 'complete')
+            if read_failed:
+                error = record['observations'][0]['read_error']
+                assert error['exception_type'] == 'TimeoutError'
+                assert error['frames'][-1]['function'] == 'goto'
+                assert 'private-session-token' not in json.dumps(record)
+            else:
+                assert 'SYNTHETIC-TRAVEL' in record['observations'][0]['text']
+            raise CollectorTerminated()
+
+        def goto(*_args, **_kwargs):
+            raise TimeoutError('private-session-token')
+
+        candidate.page.close = close
+        if read_failed:
+            candidate.page.goto = goto
+        return original_enter(candidate)
+
+    monkeypatch.setattr(travel_browser._CandidateSession, '__enter__', enter)
+    with collection_budget.tracking(marker):
+        with pytest.raises(CollectorTerminated):
+            travel_source.browser.read_attempt(['https://trip.example.test/target'], timeout_sec=10,
+                storage_state={}, headless=True, expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)

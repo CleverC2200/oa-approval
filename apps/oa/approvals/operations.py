@@ -372,7 +372,10 @@ class Approval:
             return {"task_id":task_id,"status":status,**result}
 
     def inspect(self, task_id):
-        return self.store.details(task_id)
+        from apps.oa.approvals.client import collection_failure_info
+
+        details = self.store.details(task_id)
+        return {**details, **collection_failure_info(self.root, details['task'])}
 
     def close(self, run_id, *, handoff=False):
         result = self.store.close(run_id, handoff=handoff)
