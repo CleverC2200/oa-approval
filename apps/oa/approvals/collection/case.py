@@ -149,8 +149,9 @@ def _authority_facts(
         include_evidence=invoice_evidence is not None,
     )
     if str(invoice_result.get("read_status") or "") == "failed":
-        raise RuntimeError(
-            str(invoice_result.get("fail_code") or "invoice_buyer_read_failed")
+        raise CollectionFailure(
+            str(invoice_result.get("fail_code") or "invoice_buyer_read_failed"),
+            diagnostics=invoice_result.get('diagnostics'),
         )
     if invoice_evidence is not None:
         invoice_evidence.update(invoice_result.get("invoice_evidence") or {

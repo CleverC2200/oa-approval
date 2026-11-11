@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import socket
 import string
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 MAX_REDIRECTS = 10
+
+
+def retryable_read_error(error):
+    if isinstance(error, HTTPError):
+        return error.code in {429, 500, 502, 503, 504}
+    if isinstance(error, URLError):
+        error = error.reason
+    return (isinstance(error, (TimeoutError, ConnectionError))
+            or isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN)
 
 
 class HttpBoundaryError(ValueError):

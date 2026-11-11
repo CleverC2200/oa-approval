@@ -37,7 +37,7 @@ def original_transport(monkeypatch, tmp_path):
     workflow['requestId'] = '101'
     client.request_context = lambda _request_id: (workflow, [])
     original_get = client.get
-    client.get = lambda path, params=None: (
+    client.get = lambda path, params=None, *, retry=True: (
         {'status': '1', 'targetIds': '9001'} if path == invoice_buyers.MAPPING_PATH
         else original_get(path, params)
     )
@@ -509,7 +509,7 @@ def many_originals(original_transport, monkeypatch):
         }]})
     state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'] = rows
     original_get = state.client.get
-    state.client.get = lambda path, params=None: (
+    state.client.get = lambda path, params=None, *, retry=True: (
         {'status': '1', 'targetIds': state.details[params['ids']]['id']}
         if path == invoice_buyers.MAPPING_PATH else original_get(path, params)
     )

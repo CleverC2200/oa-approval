@@ -8,6 +8,7 @@ import re
 import time
 from typing import Any, Dict, List
 import urllib.request
+from urllib.error import HTTPError, URLError
 
 from apps.oa.approvals import forms as evidence_packet
 from apps.oa.approvals.sources import http as safe_http
@@ -106,8 +107,24 @@ def _invoice_refs(
     return refs, invalid_invoice_numbers, has_misaligned_refs
 
 
+def _oa_response(oa_api, path, params=None):
+    response = oa_api.get(path, params, retry=False)
+    status = response.get('http_status')
+    if isinstance(status, int) and status >= 400:
+        raise HTTPError(path, status, '', None, None)
+    return response
+
+
+def _invoice_token(oa_api):
+    response = _oa_response(oa_api, TOKEN_PATH)
+    token = str(response.get('token') or '')
+    if str(response.get('status') or '') != '1' or not token:
+        raise RuntimeError('invoice_cloud_token_failed')
+    return token
+
+
 def _map_invoice_id(oa_api: OaApi, data_id: str) -> str:
-    response = oa_api.get(
+    response = _oa_response(oa_api,
         MAPPING_PATH,
         {
             "method": "cloudId",
@@ -123,7 +140,7 @@ def _map_invoice_id(oa_api: OaApi, data_id: str) -> str:
     return str(response["targetIds"])
 
 
-def _failed_result(refs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _failed_result(refs: List[Dict[str, Any]], diagnostics=()) -> Dict[str, Any]:
     invoice_numbers = list(dict.fromkeys(
         number
         for ref in refs
@@ -138,6 +155,7 @@ def _failed_result(refs: List[Dict[str, Any]]) -> Dict[str, Any]:
             {"invoice_no": invoice_no, "buyer": ""} for invoice_no in invoice_numbers
         ],
         "fail_code": "invoice_buyer_read_failed",
+        **({'diagnostics': list(diagnostics)} if diagnostics else {}),
     }
 
 
@@ -242,6 +260,7 @@ def read_invoice_buyers(
                 {"data_id": "", "invoice_no": invoice_no}
                 for invoice_no in invalid_invoice_numbers
             ],
+            diagnostics=[{'stage': 'invoice_reference', 'reason': 'invoice_reference_misaligned'}],
         )
     if not refs:
         return {
@@ -251,32 +270,55 @@ def read_invoice_buyers(
         }
 
     client = invoice_client or InvoiceCloudClient()
-    try:
-        token_response = oa_api.get(TOKEN_PATH)
-        token = str(token_response.get("token") or "")
-        if str(token_response.get("status") or "") != "1" or not token:
-            raise RuntimeError("invoice_cloud_token_failed")
+    diagnostics = []
 
+    def read(stage, operation, index=None):
+        for attempt in range(1, 4):
+            started = time.monotonic()
+            try:
+                return operation()
+            except Exception as error:
+                reason = 'invalid_response'
+                if isinstance(error, HTTPError):
+                    reason = 'http_error'
+                elif isinstance(error, (TimeoutError, ConnectionError, URLError)):
+                    reason = 'network_error'
+                elif isinstance(error, json.JSONDecodeError):
+                    reason = 'invalid_json'
+                elif isinstance(error, (RuntimeError, ValueError)) and str(error) in {
+                    'invoice_cloud_token_failed', 'invoice_id_mapping_failed', 'invoice_detail_failed',
+                    'invoice_record_unreadable', 'invoice_record_identity_invalid', 'invoice_record_identity_mismatch',
+                    'invoice_number_invalid', 'invoice_number_missing', 'invoice_number_group_mismatch',
+                }:
+                    reason = str(error)
+                item = {'stage': stage, 'attempt': attempt, 'reason': reason,
+                        'exception_type': type(error).__name__,
+                        'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
+                        'source_path': f'invoice_evidence.invoices[{index}]' if index is not None else 'invoice_evidence'}
+                if isinstance(error, HTTPError):
+                    item['http_status'] = error.code
+                    error.close()
+                if isinstance(error, URLError) and isinstance(error.reason, BaseException):
+                    item['cause_type'] = type(error.reason).__name__
+                diagnostics.append(item)
+                if not safe_http.retryable_read_error(error) or attempt == 3:
+                    raise
+                time.sleep(0.25 * 2 ** (attempt - 1))
+
+    try:
+        token = read('invoice_token', lambda: _invoice_token(oa_api))
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(refs))) as executor:
-            fids = list(
-                executor.map(
-                    lambda item: _map_invoice_id(oa_api, item["data_id"]), refs
-                )
-            )
+            fids = list(executor.map(
+                lambda pair: read('invoice_mapping', lambda: _map_invoice_id(oa_api, pair[1]['data_id']), pair[0]),
+                enumerate(refs)))
         with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, len(refs))) as executor:
-            details = list(
-                executor.map(
-                    lambda pair: client.get_invoice(
-                        token=token,
-                        data_id=pair[0]["data_id"],
-                        fid=pair[1],
-                    ),
-                    zip(refs, fids),
-                )
-            )
-        refs = _bind_invoice_numbers(refs, fids, details)
+            details = list(executor.map(
+                lambda item: read('invoice_detail', lambda: client.get_invoice(
+                    token=token, data_id=item[1]['data_id'], fid=item[2]), item[0]),
+                ((index, ref, fid) for index, (ref, fid) in enumerate(zip(refs, fids)))))
+        refs = read('invoice_binding', lambda: _bind_invoice_numbers(refs, fids, details))
     except Exception:
-        return _failed_result(refs)
+        return _failed_result(refs, diagnostics)
 
     invoices: List[Dict[str, str]] = []
     for ref, detail in zip(refs, details):
@@ -298,11 +340,13 @@ def read_invoice_buyers(
 
     result = {
         "read_status": "content_read", "invoices": invoices, "fail_code": "",
+        **({'diagnostics': diagnostics} if diagnostics else {}),
     }
     if include_evidence:
         result["invoice_evidence"] = {
             "schema_version": 1, "source": "invoice_cloud", "read_status": "content_read",
             "invoices": [_invoice_evidence(ref, detail) for ref, detail in zip(refs, details)],
+            **({'diagnostics': diagnostics} if diagnostics else {}),
         }
     return result
 

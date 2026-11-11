@@ -29,7 +29,7 @@ class InvoiceApi:
             {'workflowRequestTableFields': fields} for fields in self.rows
         ]}]}, []
 
-    def get(self, path, params=None):
+    def get(self, path, params=None, *, retry=True):
         if path == invoice_buyers.TOKEN_PATH:
             return {'status': '1', 'token': 'synthetic-token'}
         if path == invoice_buyers.MAPPING_PATH:
