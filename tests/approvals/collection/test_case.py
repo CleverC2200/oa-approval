@@ -331,8 +331,9 @@ def test_archive_limit_error_reaches_flow_admission_without_preparing_partial_fi
     monkeypatch.setattr(attachments.runtime_control, "stop_requested", lambda: False)
     prepared = []
     monkeypatch.setattr(attachment_extractors, "prepare_materials", lambda *_a, **_kw: prepared.append(True))
-    with pytest.raises(RuntimeError, match="^attachment_archive_failed$"):
+    with pytest.raises(case_bundle.CollectionFailure, match="^attachment_archive_failed$") as failure:
         collect_case("recorded-request", oa_api=RecordedOaApi("195039", "TPM小额市场费用报销申请流程"),
                      configs=FLOW_CONFIGS, allow_browser_download=True,
                      attachment_root=tmp_path / "attachments", prepared_root=tmp_path / "prepared", source_policy=POLICY)
     assert prepared == []
+    assert failure.value.diagnostics == [{'stage': 'archive_expand', 'reason': 'archive_file_limit'}]
