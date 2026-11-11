@@ -550,7 +550,8 @@ class _DownloadBatch:
             code = (
                 "attachment_download_failed" if cached else "attachment_archive_failed"
             )
-            return Failed(DownloadError(code, error))
+            reason = "archive_file_limit" if error.startswith("archive_file_limit: ") else "archive_expansion_failed"
+            return Failed(DownloadError(code, error, ({'stage': 'archive_expand', 'reason': reason},)))
         return item
 
     def _materialize_one(self, resource, outcome):

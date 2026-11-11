@@ -311,3 +311,24 @@ def test_cached_archive_reuse_preserves_existing_children(tmp_path, monkeypatch)
     assert Path(fresh['path']).read_text() == 'original invoice'
     assert child.read_text() == 'changed derived invoice'
     assert retained.read_text() == 'existing derived evidence'
+
+
+def test_photo_archive_keeps_all_154_images_and_parent_identity(tmp_path, png_bytes):
+    archive = tmp_path / 'photos.zip'
+    with zipfile.ZipFile(archive, 'w') as source:
+        for index in range(154):
+            source.writestr(f'photos/{index}.png', png_bytes)
+    original = archive.read_bytes()
+    sources = download_sources(lambda *_a, **_kw: Downloaded(archive))
+    result = attachments.download_resources(
+        [{'id': 'photos', 'name': archive.name, 'downloadUrl': '/recorded/photos.zip'}],
+        dest_dir=tmp_path / 'downloads', sources=sources, timeout_sec=5,
+        allow_browser_download=True, request_id='recorded', flow_key='tpm_small_marketing_fee',
+    )
+    assert result.errors == ()
+    children = result.items[0]['extracted_files']
+    assert len(children) == 154
+    assert len({child['resource_id'] for child in children}) == 154
+    assert {child['parent_resource_id'] for child in children} == {'photos'}
+    assert all(Path(child['path']).read_bytes() == png_bytes for child in children)
+    assert archive.read_bytes() == original

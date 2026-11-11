@@ -19,7 +19,7 @@ from apps.oa.runtime import files as material_store
 EXTRACT_DIR_NAME = "extracted"
 ZIP_EXTS = {".zip"}
 RAR_EXTS = {".rar"}
-ARCHIVE_MAX_FILES = int(os.environ.get("OA_ATTACHMENT_ARCHIVE_MAX_FILES", "128"))
+ARCHIVE_MAX_FILES = int(os.environ.get("OA_ATTACHMENT_ARCHIVE_MAX_FILES", "256"))
 ARCHIVE_MAX_FILE_BYTES = int(
     os.environ.get("OA_ATTACHMENT_ARCHIVE_MAX_FILE_BYTES", str(50 * 1024 * 1024))
 )
@@ -70,7 +70,7 @@ def extract_zip_safely(
             if len(infos) > ARCHIVE_MAX_FILES:
                 return (
                     [],
-                    f"{resource_name(resource) or path.name}: zip 文件数超过限制 {ARCHIVE_MAX_FILES}",
+                    f"archive_file_limit: {resource_name(resource) or path.name}: zip 文件数超过限制 {ARCHIVE_MAX_FILES}",
                 )
             for index, info in enumerate(infos, 1):
                 if _is_zip_symlink(info):
@@ -251,7 +251,7 @@ def extract_rar_safely(
     if len(files) > ARCHIVE_MAX_FILES:
         return (
             [],
-            f"{resource_name(resource) or path.name}: rar 文件数超过限制 {ARCHIVE_MAX_FILES}",
+            f"archive_file_limit: {resource_name(resource) or path.name}: rar 文件数超过限制 {ARCHIVE_MAX_FILES}",
         )
     if len(members) > 2 * ARCHIVE_MAX_FILES:
         return [], f"{resource_name(resource) or path.name}: rar 成员数超过限制 {2 * ARCHIVE_MAX_FILES}"
@@ -361,7 +361,7 @@ def _flatten_archive_children(
                 )
             flattened.extend(nested_flattened)
         if len(flattened) > ARCHIVE_MAX_FILES:
-            return [], f"压缩包展开后文件数超过限制 {ARCHIVE_MAX_FILES}"
+            return [], f"archive_file_limit: 压缩包展开后文件数超过限制 {ARCHIVE_MAX_FILES}"
         total_size = sum(
             Path(str(item.get("path") or "")).stat().st_size for item in flattened
         )
