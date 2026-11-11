@@ -2,13 +2,12 @@ from datetime import datetime, timezone
 from html.parser import HTMLParser
 import json
 import re
-import socket
 from time import monotonic, sleep
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.request import Request
 
-from apps.oa.approvals.sources.http import urlopen
+from apps.oa.approvals.sources.http import urlopen, retryable_read_error
 
 
 ENDPOINT = 'https://bi.synear.cn/decision/view/form'
@@ -24,15 +23,6 @@ class InvoiceTitleReadError(RuntimeError):
     def __init__(self, diagnostics):
         super().__init__('invoice_title_reference_read_failed')
         self.diagnostics = diagnostics
-
-
-def _retryable(error):
-    if isinstance(error, HTTPError):
-        return error.code in {429, 500, 502, 503, 504}
-    if isinstance(error, URLError):
-        error = error.reason
-    return (isinstance(error, (TimeoutError, ConnectionError))
-            or isinstance(error, socket.gaierror) and error.errno == socket.EAI_AGAIN)
 
 
 def _failure_reason(error):
@@ -114,7 +104,7 @@ def snapshot():
                 record(error)
                 if isinstance(error, HTTPError):
                     error.close()
-                if not _retryable(error) or attempt == 3:
+                if not retryable_read_error(error) or attempt == 3:
                     raise InvoiceTitleReadError(diagnostics) from None
                 delay = 0.25 * 2 ** (attempt - 1)
                 if monotonic() + delay >= deadline:

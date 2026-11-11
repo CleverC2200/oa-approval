@@ -4,6 +4,7 @@ from tests.approvals.source_fakes import POLICY
 
 
 import json
+from pathlib import Path
 
 
 import pytest
@@ -53,7 +54,7 @@ class RecordedInvoiceApi:
     def request_context(self, request_id):
         return self.workflow, []
 
-    def get(self, path, params=None):
+    def get(self, path, params=None, *, retry=True):
         if path == invoice_buyers.TOKEN_PATH:
             return {"status": "1", "token": "synthetic-token"}
         if path == invoice_buyers.MAPPING_PATH:
@@ -214,7 +215,7 @@ def test_legacy_invoice_lookup_and_exact_shared_invoice_keep_original_numbers():
 
 def test_invoice_read_failure_stops_collection_without_fabricated_parties():
     class UnavailableApi(RecordedInvoiceApi):
-        def get(self, path, params=None):
+        def get(self, path, params=None, *, retry=True):
             raise OSError("synthetic external failure")
 
     workflow = workflow_with_invoices([[linked_invoice()]])
@@ -223,3 +224,156 @@ def test_invoice_read_failure_stops_collection_without_fabricated_parties():
             "synthetic-request", oa_api=UnavailableApi(workflow), configs=[CONFIG],
             allow_browser_download=False,
          source_policy=POLICY)
+
+
+@pytest.mark.parametrize('stage', ['invoice_token', 'invoice_mapping', 'invoice_detail'])
+def test_transient_invoice_read_retries_only_failed_request(recorded_invoice_http, monkeypatch, stage):
+    from urllib.error import HTTPError
+    original_http = invoice_buyers.safe_http.urlopen
+    attempts = []
+    sleeps = []
+    monkeypatch.setattr(invoice_buyers.time, 'sleep', sleeps.append)
+
+    class TransientApi(RecordedInvoiceApi):
+        def get(self, path, params=None, *, retry=True):
+            selected = (path == invoice_buyers.TOKEN_PATH if stage == 'invoice_token'
+                        else path == invoice_buyers.MAPPING_PATH if stage == 'invoice_mapping' else False)
+            if selected:
+                attempts.append(stage)
+                if len(attempts) == 1:
+                    return {'http_status': 503, 'raw_text': 'private-business-body'}
+            return super().get(path, params)
+
+    def http(request, **options):
+        if stage == 'invoice_detail':
+            attempts.append(stage)
+            if len(attempts) == 1:
+                raise HTTPError('https://private.example/?token=private-token', 503, 'private-body', {}, None)
+        return original_http(request, **options)
+
+    monkeypatch.setattr(invoice_buyers.safe_http, 'urlopen', http)
+    workflow = workflow_with_invoices([[linked_invoice()]])
+    result = invoice_buyers.read_invoice_buyers(TransientApi(workflow), workflow)
+    assert result['read_status'] == 'content_read'
+    assert len(attempts) == 2 and sleeps == [0.25]
+    assert result['diagnostics'][0]['stage'] == stage
+    assert result['diagnostics'][0]['http_status'] == 503
+    assert 'private' not in json.dumps(result)
+
+
+@pytest.mark.parametrize('status,expected_attempts', [(500, 3), (403, 1)])
+def test_invoice_read_failure_keeps_stage_and_no_partial_parties(recorded_invoice_http, monkeypatch, status, expected_attempts):
+    from io import BytesIO
+    from urllib.error import HTTPError
+    responses = []
+    monkeypatch.setattr(invoice_buyers.time, 'sleep', lambda _seconds: None)
+
+    def http(*_args, **_kwargs):
+        stream = BytesIO(b'private-response-body')
+        responses.append(stream)
+        raise HTTPError('https://private.example/?secret=x', status, 'private-error', {}, stream)
+
+    monkeypatch.setattr(invoice_buyers.safe_http, 'urlopen', http)
+    workflow = workflow_with_invoices([[linked_invoice()]])
+    result = invoice_buyers.read_invoice_buyers(RecordedInvoiceApi(workflow), workflow, include_evidence=True)
+    assert result['read_status'] == 'failed' and len(responses) == expected_attempts
+    assert all(stream.closed for stream in responses)
+    assert all(not item.get('buyer') and not item.get('seller') for item in result['invoices'])
+    assert result['diagnostics'][-1]['stage'] == 'invoice_detail'
+    assert result['diagnostics'][-1]['attempt'] == expected_attempts
+    assert 'invoice_evidence' not in result
+    assert 'private' not in json.dumps(result)
+
+
+
+@pytest.mark.parametrize('persistent', [False, True])
+def test_invoice_retry_does_not_repeat_other_invoice_reads(monkeypatch, persistent):
+    from collections import Counter
+    calls = Counter()
+    monkeypatch.setattr(invoice_buyers.time, 'sleep', lambda _seconds: None)
+
+    class TransientClient(RecordedInvoiceClient):
+        def get_invoice(self, **kwargs):
+            key = kwargs['data_id']
+            calls[key] += 1
+            if key == '202' and (persistent or calls[key] == 1):
+                raise TimeoutError('private-token')
+            return super().get_invoice(**kwargs)
+
+    workflow = workflow_with_invoices([[linked_invoice()], [linked_invoice('202', '00000000000000000202')]])
+    result = invoice_buyers.read_invoice_buyers(RecordedInvoiceApi(workflow), workflow,
+        invoice_client=TransientClient(), include_evidence=True)
+    assert calls == {'101': 1, '202': 3 if persistent else 2}
+    if persistent:
+        assert result['read_status'] == 'failed' and 'invoice_evidence' not in result
+        assert all(not item['buyer'] for item in result['invoices'])
+    else:
+        assert result['read_status'] == 'content_read'
+        assert result['invoice_evidence']['diagnostics'] == result['diagnostics']
+    assert result['diagnostics'][0]['source_path'] == 'invoice_evidence.invoices[1]'
+    assert 'private' not in json.dumps(result)
+
+
+def test_invoice_failure_persists_safe_diagnostics_before_any_submission(tmp_path, recorded_invoice_http, monkeypatch):
+    from apps.oa.approvals.operations import Approval
+    from apps.oa.approvals.collection.case import CollectionFailure
+    from urllib.error import HTTPError
+
+    def unavailable(*_args, **_kwargs):
+        raise HTTPError('https://private.example/?secret=x', 500, 'private-response', {}, None)
+
+    monkeypatch.setattr(invoice_buyers.safe_http, 'urlopen', unavailable)
+    monkeypatch.setattr(invoice_buyers.time, 'sleep', lambda _seconds: None)
+    workflow = workflow_with_invoices([[linked_invoice()]])
+    api = RecordedInvoiceApi(workflow)
+    api.pending_rows = lambda: [{'request_id': 'synthetic-request', 'workflow_key': 'general_expense',
+                                'received_at': '2026-01-01 09:00:00', 'operator_id': 'reviewer'}]
+    app = Approval(tmp_path, api=api, configs=[CONFIG], source_policy=POLICY)
+    try:
+        run = app.pending()
+        with pytest.raises(CollectionFailure, match='invoice_buyer_read_failed') as captured:
+            app.collect(run['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='general_expense')
+        report = json.loads(Path(captured.value.diagnostics_file).read_text())
+        assert report['diagnostics'][-1]['stage'] == 'invoice_detail'
+        assert report['diagnostics'][-1]['http_status'] == 500
+        assert len(report['diagnostics']) == 3
+        assert 'private' not in json.dumps(report)
+        task = app.inspect(1)
+        assert task['task']['status'] == 'failed' and task['task']['material_file'] is None
+        assert task['submissions'] == []
+    finally:
+        app.store.connection.close()
+
+
+
+@pytest.mark.parametrize('failure,expected_attempts', [('timeout', 3), ('tls', 1), ('http_429', 3), ('http_503', 3), ('http_403', 1)])
+def test_native_oa_transport_does_not_stack_invoice_retries(monkeypatch, failure, expected_attempts):
+    from io import BytesIO
+    import ssl
+    from urllib.error import HTTPError, URLError
+    from apps.oa.approvals.sources.oa import OaApi
+
+    calls = []
+    responses = []
+    monkeypatch.setattr(invoice_buyers.time, 'sleep', lambda _seconds: None)
+
+    def http(request, **options):
+        calls.append(request.full_url)
+        if failure == 'timeout':
+            raise URLError(TimeoutError('private-token'))
+        if failure == 'tls':
+            raise URLError(ssl.SSLCertVerificationError('private-token'))
+        stream = BytesIO(b'private-response')
+        responses.append(stream)
+        raise HTTPError(request.full_url, int(failure.removeprefix('http_')), 'private-message', {}, stream)
+
+    monkeypatch.setattr(invoice_buyers.safe_http, 'urlopen', http)
+    api = OaApi('synthetic-token', 'synthetic-user', app_id='synthetic-app', base_url='https://oa.example.test')
+    workflow = workflow_with_invoices([[linked_invoice()]])
+    result = invoice_buyers.read_invoice_buyers(api, workflow)
+    assert result['read_status'] == 'failed'
+    assert len(calls) == expected_attempts
+    assert len(result['diagnostics']) == expected_attempts
+    assert result['diagnostics'][-1]['stage'] == 'invoice_token'
+    assert all(stream.closed for stream in responses)
+    assert 'private' not in json.dumps(result) and 'synthetic-token' not in json.dumps(result)

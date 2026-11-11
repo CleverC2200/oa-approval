@@ -165,16 +165,21 @@ class OaApi:
             "userid": self.enc_uid,
         }
 
-    def _read_response(self, request: urllib.request.Request) -> dict[str, Any]:
-        for attempt in range(2):
+    def _read_response(self, request: urllib.request.Request, *, retry: bool = True) -> dict[str, Any]:
+        attempts = 2 if retry else 1
+        for attempt in range(attempts):
             try:
                 with safe_http.urlopen(request, timeout=TIMEOUT) as response:
                     return _decode_json(response.read().decode("utf-8", errors="ignore"))
             except urllib.error.HTTPError as error:
-                return {"http_status": error.code, "error": str(error),
-                        "raw_text": error.read().decode("utf-8", errors="ignore")}
-            except urllib.error.URLError:
-                if attempt == 1: raise
+                try:
+                    return {"http_status": error.code, "error": str(error),
+                            "raw_text": error.read().decode("utf-8", errors="ignore")}
+                finally:
+                    error.close()
+            except urllib.error.URLError as error:
+                if not safe_http.retryable_read_error(error) or attempt == attempts - 1:
+                    raise
                 time.sleep(0.25)
         raise AssertionError("unreachable")
 
@@ -182,6 +187,7 @@ class OaApi:
         self,
         path: str,
         params: dict[str, Any] | None = None,
+        *, retry: bool = True,
     ) -> dict[str, Any]:
         query = "?" + urllib.parse.urlencode(params or {}) if params else ""
         request = urllib.request.Request(
@@ -189,7 +195,7 @@ class OaApi:
             headers=self._headers(),
             method="GET",
         )
-        return self._read_response(request)
+        return self._read_response(request, retry=retry)
 
     def _post_readonly(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         if path not in READONLY_POST_ENDPOINTS:
