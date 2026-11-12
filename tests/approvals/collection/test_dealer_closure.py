@@ -85,10 +85,11 @@ def test_public_collect_freezes_closure_facts_and_uses_registered_feedback_write
     assert any(f['code'] == 'fj' and f['read_status'] != 'empty' for f in material['declared_fields'])
     assert Path(collected['rule_file']).name == 'SKILL.md'
     assert 'oa-dealer-closure' in collected['rule_file']
-    result = app.submit(collected['task_id'], opinion='✅ 无余额，不退款。❗ 冰柜待核。', confirm_write=True)
+    opinion = '✅ 无余额，不退款；无免投冰柜。'
+    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True)
     assert result['status'] == 'submitted'
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
-    assert api.posts == [('101', '✅ 无余额，不退款。❗ 冰柜待核。', 'comment')]
+    assert api.posts == [('101', opinion, 'comment')]
     assert len(app.inspect(collected['task_id'])['submissions']) == 1
 
 

@@ -14,7 +14,7 @@ Python入口、环境和参数以项目README及`--help`为准。复用`apps.oa.
 
 连接设置位于私有OA认证文件同目录的`dealer-closure.json`，要求普通文件、权限600。包含Doris解释器/连接模块路径，SAP解释器/SDK路径、正式环境标识和钥匙串服务，DMS正式基址。口令通过已有钥匙串取出，仅在子进程标准输入中传递，不保存到材料或命令行。配置缺失或读取失败不形成已完成意见。
 
-私有配置中的冰柜确认须绑定申请、唯一投递ID、公司、客户、确认日期及依据；仅匹配本次投递时进入冻结事实，不以当前批次历史确认泛化新单空值。
+私有配置中的冰柜确认须绑定申请、唯一投递ID、公司、客户、确认日期及依据；仅匹配本次投递时进入冻结事实。BI字段解释按[Skill第2节](../SKILL.md#2-取得本轮事实)，与个案业务确认分别记录。
 
 ## BI
 
@@ -39,7 +39,7 @@ WHERE company_code=%s AND cust_code=%s;
 | `pre_end_balance` | 对应独立预提科目的余额。 |
 | `gl_special_balance`、`gl_special_code` | 特别总账金额及标识，成对核对。 |
 | `cust_status_credit` | 报表权限状态，必要时核实际冻结字段。 |
-| `freezers_qty` | 冰柜数量；NULL不证明0台，另存业务确认客户范围与日期。 |
+| `freezers_qty` | 免投冰柜台数，保留原值，按[Skill第2节](../SKILL.md#2-取得本轮事实)解释。 |
 | `three_financing_amt`、`no_subsidy_amt` | 约定的融资和发货后补贴结果，已知历史覆盖问题另列。 |
 | `remain_balance` | BI独立字段；映射未确认时不代替SAP下单剩余，不用于认定同客户账面余额错误。 |
 
