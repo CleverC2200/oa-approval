@@ -68,7 +68,11 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
                    df.nodetype as destnode_type, d.isend as destnode_isend,
                    l.isreject, l.customworkflowid,
                    (select count(*) from ecology.workflow_subwfset w
-                    where w.mainworkflowid=r.workflowid) as subworkflow_count
+                    where w.mainworkflowid=r.workflowid
+                      and (w.triggernodeid is null or w.triggernodeid<>:archive_node_id)) as subworkflow_count,
+                   (select count(*) from ecology.workflow_subwfset w
+                    where w.mainworkflowid=r.workflowid
+                      and w.triggernodeid=:archive_node_id) as archive_subworkflow_count
             from ecology.workflow_requestbase r
             join ecology.workflow_nodelink l on l.workflowid=r.workflowid
             left join ecology.workflow_nodebase s on s.id=l.nodeid
@@ -78,7 +82,7 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
             where r.requestid=:request_id and (l.isreject is null or l.isreject <> '1')
             order by l.id
         """,
-        params=("request_id",), max_rows=256, timeout_sec=5,
+        params=("request_id", "archive_node_id"), max_rows=256, timeout_sec=5,
     ),
     "prediction_terminal_loop_links": SqlTemplate(
         name="prediction_terminal_loop_links",

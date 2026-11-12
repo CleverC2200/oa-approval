@@ -162,11 +162,13 @@ def _resolve_finance_tail(request_id, nodes, session, leader_id):
 
     try:
         rows = official_sql._query_rows('prediction_finance_tail_links',
-            {'request_id': int(request_id)}, require_connection=True)
+            {'request_id': int(request_id), 'archive_node_id': int(archive['node_id'])}, require_connection=True)
     except RuntimeError:
         return
     if (not rows or len(rows) >= 256 or len({str(row['workflowid']) for row in rows}) != 1
             or len({str(row['linkid']) for row in rows}) != len(rows)
+            or len({str(row['archive_subworkflow_count']) for row in rows}) != 1
+            or any(not re.fullmatch(r'0|[1-9][0-9]*', str(row['archive_subworkflow_count'])) for row in rows)
             or any(str(row['requestid']) != request_id or str(row['subworkflow_count']) != '0'
                    for row in rows)):
         return
@@ -228,6 +230,8 @@ def _resolve_finance_tail(request_id, nodes, session, leader_id):
                 return
         verified_nodes.append({'node_id': identity, 'node_name': name, 'node_kind': kind, 'operators': people})
     unknown['resolution'] = {'kind': 'finance_tail_excludes_leader', 'leader_id': leader_id,
+        'scope': 'current_main_workflow',
+        'excluded_archive_subworkflow_count': int(rows[0]['archive_subworkflow_count']),
         'source': 'official_sql.prediction_finance_tail_links', 'anchor_node_id': anchor['node_id'],
         'archive_node_id': archive['node_id'], 'nodes': verified_nodes, 'rows': rows}
 
