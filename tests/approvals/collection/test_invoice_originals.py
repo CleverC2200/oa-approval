@@ -393,6 +393,7 @@ def test_unmapped_original_keeps_authoritative_invoice_without_guessing_download
         state.detail.pop('oa')
     elif mapping == 'multiple_pdfs':
         state.detail['flist'].append({'id': '8002', 'type': 'pdf', 'del': 0})
+        state.detail['modify_info']['pdf'] = '8999'
     else:
         state.detail['flist'][0]['del'] = 1
     material = collect_original(state, tmp_path)
@@ -402,6 +403,35 @@ def test_unmapped_original_keeps_authoritative_invoice_without_guessing_download
     assert not material['resources'] and not material['prepared']['images']
     assert not state.initialized
     assert not any(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
+
+def test_explicit_original_pdf_is_read_without_selecting_the_other_pdf(original_transport, tmp_path):
+    state = original_transport
+    state.detail['flist'].append({'id': '8002', 'type': 'pdf', 'del': 0})
+    state.detail['modify_info']['fileType'] = '2'
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    selected, other = invoice['files']
+    assert invoice['body_read_status'] == 'partial_read'
+    assert selected['original_source']['cloud_file_id'] == '8001'
+    assert selected['body_read_status'] == 'content_read'
+    assert other['file_id'] == '8002' and other['body_read_status'] == 'not_read'
+    assert 'original_source' not in other
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+
+@pytest.mark.parametrize('change', ['conflict', 'missing', 'deleted', 'duplicate'])
+def test_multiple_pdf_selection_rejects_inconsistent_official_mapping(original_transport, change):
+    state = original_transport
+    state.detail['flist'].append({'id': '8002', 'type': 'pdf', 'del': 0})
+    state.detail['modify_info']['fileType'] = '2'
+    if change == 'conflict':
+        state.detail['modify_info']['furl'] = '8002'
+    elif change == 'missing':
+        state.detail['modify_info']['pdf'] = '8999'
+    elif change == 'deleted':
+        state.detail['flist'][0]['del'] = 1
+    else:
+        state.detail['flist'].append(deepcopy(state.detail['flist'][0]))
+    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
 
 def test_original_prepares_every_page_before_claiming_complete_body(original_transport, tmp_path):
     state = original_transport

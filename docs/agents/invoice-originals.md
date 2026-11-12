@@ -1,6 +1,6 @@
 # 关联发票原件读取
 
-发票云原件按同一记录的文件与 OA 文档映射采集，保留明确返回的记录身份和票号。PDF 要求 `modify_info.pdf/furl` 均指向唯一有效 PDF；无有效 PDF 时，JPEG 要求唯一有效 `jpg/jpeg` 文件、`modify_info.pdf` 为空且 `furl` 指向该图片。两者均须有 `oa.doc_id/img_id`。云文件 ID 与 OA 主文件 ID 分属两个来源，不能互换。多个有效 PDF、无 PDF 时多个 JPEG、其他格式或缺少映射时保留未读，不推测下载接口。已绑定 PDF 同时带其他格式文件时，保留原有 PDF 读取与其他文件未读的分项覆盖状态。
+发票云原件按同一记录的文件与 OA 文档映射采集，保留明确返回的记录身份和票号。PDF 要求 `modify_info.pdf/furl` 均指向唯一有效 PDF；存在多个 PDF 时，仅在 `fileType=2` 且 `pdf/furl` 指向同一唯一有效候选时读取该原件，其他文件保留未读。无有效 PDF 时，JPEG 要求唯一有效 `jpg/jpeg` 文件、`modify_info.pdf` 为空且 `furl` 指向该图片。两者均须有 `oa.doc_id/img_id`。云文件 ID 与 OA 主文件 ID 分属两个来源，不能互换。多 PDF 映射不唯一或冲突、无 PDF 时多个 JPEG、其他格式或缺少映射时保留未读，不推测下载接口。已绑定 PDF 同时带其他格式文件时，保留原有 PDF 读取与其他文件未读的分项覆盖状态。
 
 OFD 原件同时提供官方 PDF 阅读件时，仅在同一票记录、唯一有效 OFD/PDF、`fileType=4`、`furl` 精确指向 OFD、`pdf` 精确指向 PDF 且 OA 文档及文件身份均明确时读取该 PDF。冻结来源保留 OFD 云文件身份与 `official_pdf` 关系；不能把 OA 的 OFD 原文件字节当成 PDF。PDF 沿现有发票云下载链读取，仍执行下载前后关联、账号、文档及主文件核验；OFD 分项保留未直接读取状态。
 

@@ -365,12 +365,16 @@ def original_source(data: dict, invoice_number: str) -> dict:
     files = [item for item in data.get('flist') or [] if isinstance(item, dict)
              and item.get('del', 0) in (0, '0')]
     active = [item for item in files if item.get('type') == 'pdf']
+    modified = data.get('modify_info')
+    if len(active) > 1 and isinstance(modified, dict) and str(modified.get('fileType')) == '2':
+        reference = _positive_id(modified.get('pdf'))
+        if reference and str(modified.get('furl')) == reference:
+            active = [item for item in active if _positive_id(item.get('id')) == reference]
     if not active:
         active = [item for item in files if item.get('type') in {'jpg', 'jpeg'}]
     if len(active) != 1:
         return {}
     cloud_file = _positive_id(active[0].get('id'))
-    modified = data.get('modify_info')
     native = data.get('oa')
     if not cloud_file or not isinstance(modified, dict) or not isinstance(native, dict):
         return {}
