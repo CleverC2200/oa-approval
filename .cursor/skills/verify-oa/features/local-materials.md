@@ -8,6 +8,7 @@
 - `prepare-manifest` 从 `--manifest` 保留资源 ID、父子关系及归档资源。
 - `read-full` 以 text 或 JSON 返回完整材料正文。
 - `read-outline` 返回规模与 JSON Pointer，供定位后继续读完整材料。
+- `read-pages` 按材料版本和连续字符范围读取正文或目录；JSON Pointer 可定位大对象中的原值。
 
 ## How to get to it (user POV)
 
@@ -27,6 +28,7 @@ Preconditions:
 - **清单入口。** 同一脚本调用模块入口 `prepare --manifest`，清单为相同 PDF 的两个独立资源。要求2个资源、2页图片，ID仍分别为 `same-a`、`same-b`。
 - **完整读取。** 脚本分别执行统一入口 `read --format json` 和模块入口默认 text；两份正文都包含合成标记 `OA verification fixture 12.50`。
 - **概要读取。** 脚本执行 `read --view outline --format json`；结果为结构化 outline，准备记录保持 complete，概要不含合成正文。
+- **有界读取。** 使用 `read <material_file> --format json --page-offset 0`，每页最多2000字符。沿 `next_offset` 和同一 `material_sha256` 完整读完适用范围；正文及目录分页回归在 `tests/materials/test_read_pages.py`。范围读取不声明整单审核完成。
 - **原件与副作用。** `proof.json` 记录原件前后 SHA-256一致、资源 ID及 Git refs 未变化。`commands.txt` 与逐步 stdout/stderr/退出码记录动作和结果；`cleanup.json` 确认 scratch 已删除。
 
 ## Gotchas

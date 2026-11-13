@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import shlex
 from pathlib import Path
@@ -121,21 +122,72 @@ def _image_tool_routes(material: dict, material_file: Path) -> dict:
     return routes
 
 
-def read(material_file: Path, *, view: str = 'full') -> str:
+def _load_material(material_file):
     material_file = Path(material_file).absolute()
     if material_file.is_symlink() or not material_file.is_file():
         raise ValueError('material_file_invalid')
-    material = json.loads(material_file.read_text())
+    raw = material_file.read_bytes()
+    material = json.loads(raw)
     if not isinstance(material, dict):
         raise ValueError('material_file_invalid')
+    return material_file, raw, material
+
+
+def _full_text(material, material_file):
+    text = render(material)
+    routes = _image_tool_routes(material, material_file)
+    if routes:
+        text += '\n[reader.image_tool_routes]\n' + _json(routes) + '\n'
+    return text
+
+
+def read(material_file: Path, *, view: str = 'full') -> str:
+    material_file, _, material = _load_material(material_file)
     if view == 'outline':
         from apps.oa.materials.navigation import outline
 
         return _json(outline(material)) + '\n'
     if view != 'full':
         raise ValueError('material_read_view_invalid')
-    view = render(material)
-    routes = _image_tool_routes(material, material_file)
-    if routes:
-        view += '\n[reader.image_tool_routes]\n' + _json(routes) + '\n'
-    return view
+    return _full_text(material, material_file)
+
+
+def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sha256=None, view='full'):
+    if type(offset) is not int or offset < 0 or type(page_chars) is not int or not 1 <= page_chars <= 2000:
+        raise ValueError('material_read_range_invalid')
+    if offset and expected_sha256 is None:
+        raise ValueError('material_read_version_required')
+    material_file, raw, material = _load_material(material_file)
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 is not None and expected_sha256 != digest:
+        raise ValueError('material_read_version_changed')
+    if view not in {'full', 'outline'} or view == 'outline' and pointer:
+        raise ValueError('material_read_view_invalid')
+    if not isinstance(pointer, str) or pointer and not pointer.startswith('/') or re.search(r'~(?![01])', pointer):
+        raise ValueError('material_read_pointer_invalid')
+    value = material
+    for segment in pointer.split('/')[1:] if pointer else []:
+        key = segment.replace('~1', '/').replace('~0', '~')
+        if isinstance(value, dict) and key in value:
+            value = value[key]
+        elif isinstance(value, list) and re.fullmatch(r'0|[1-9][0-9]*', key) and int(key) < len(value):
+            value = value[int(key)]
+        else:
+            raise ValueError('material_read_pointer_invalid')
+    if view == 'outline':
+        from apps.oa.materials.navigation import outline
+
+        text = _json(outline(material)) + '\n'
+    elif not pointer:
+        text = _full_text(material, material_file)
+    elif isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, ensure_ascii=False, indent=2)
+    if offset > len(text):
+        raise ValueError('material_read_range_invalid')
+    end = min(offset + page_chars, len(text))
+    return {'status': 'ok', 'coverage': 'navigation_range_only' if view == 'outline' else 'range_only',
+            'view': view, 'material_file': str(material_file),
+            'material_sha256': digest, 'source_pointer': pointer, 'offset': offset, 'end': end,
+            'total_chars': len(text), 'next_offset': end if end < len(text) else None, 'text': text[offset:end]}

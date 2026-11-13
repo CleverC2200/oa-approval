@@ -27,6 +27,8 @@ description: 核对 OA 经销商关户申请、外部账务和签署资料，生
 
 ## 2. 取得本轮事实
 
+冻结材料正文先按本次[有界读取](../oa-finance-preaudit/references/review-assessment.md#有界读取)逐段读取；目录不计完整核验，原账务与适用业务规则保持本 Skill 的口径。
+
 主Agent通过collect取得并冻结`dealer_closure_evidence`：提交上下文、BI、正式SAP、适用DMS、附件清单及本投递适用的业务确认。审核Agent按[数据入口说明](references/read-sources.md)解释本轮字段，不重新读取线上资料覆盖冻结结果。技术读取失败沿批次失败入口保留，真实材料与意见留在Git忽略目录。
 
 | 审核项 | 来源与标准 |

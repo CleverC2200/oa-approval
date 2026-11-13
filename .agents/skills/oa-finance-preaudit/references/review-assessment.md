@@ -1,5 +1,21 @@
 # 提交前审核结果
 
+## 有界读取
+
+规则与材料分别读取。冻结材料正文通过现有材料 CLI 分页，每次工具调用只返回一页；不要先把整份材料和嵌套订单合并打印后再补读。首段示例：
+
+```bash
+bash .codex/python.sh -m apps.oa.materials read "$OA_MATERIAL_FILE" --format json --page-offset 0
+```
+
+每页最多2000字符，返回当前材料 `material_sha256`、`offset`、`end`、`total_chars` 和 `next_offset`。后续段使用同一材料、同一 `--pointer` 和返回的 `--expected-sha256`，将 `next_offset` 作为下一次 `--page-offset`，直到该范围读完。原值、换行及资源身份完整保留；换材料或混用版本会被拒绝。为每页 JSON 元数据和正文留足工具输出预算，必要时缩小 `--page-chars` 后回读该段。
+
+`--pointer /authority_facts/0/value` 可定位原 JSON 的具体值；字符串原样分页，其他对象完整序列化分页，不按摘要替代原文。`--view outline` 也可分页，但只提供定位，不计正文已读。按本单适用范围保存所读 Pointer 及连续字符范围，完成全部适用材料、明细和原件核对后再交审核结果。`next_offset=null` 只说明当前范围没有下一段，不证明其他范围或业务审核完成。原图识别仍使用本流程规定的专用入口。
+
+如果实际发生输出截断或读取失败，继续按既定保护记录证据及收尾；分页不放宽失败、未知提交或上下文保护。
+
+## 审核交付
+
 审核 Agent 在最终交付中增加独立的审核结果 JSON 文件，主 Agent 核对后通过 `submit --review-file <绝对路径>` 提交；真实写入必需，海外也沿用此绑定检查。该文件记录已实际执行的核验，不由模板或脚本代填完成结论：
 
 ```json
