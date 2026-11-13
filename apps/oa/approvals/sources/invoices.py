@@ -371,7 +371,7 @@ def original_source(data: dict, invoice_number: str) -> dict:
         if reference and str(modified.get('furl')) == reference:
             active = [item for item in active if _positive_id(item.get('id')) == reference]
     if not active:
-        active = [item for item in files if item.get('type') in {'jpg', 'jpeg'}]
+        active = [item for item in files if item.get('type') in {'jpg', 'jpeg', 'png'}]
     if len(active) != 1:
         return {}
     cloud_file = _positive_id(active[0].get('id'))
@@ -380,7 +380,7 @@ def original_source(data: dict, invoice_number: str) -> dict:
         return {}
     doc_id = _positive_id(native.get('doc_id'))
     file_id = _positive_id(native.get('img_id'))
-    file_type = 'pdf' if active[0]['type'] == 'pdf' else 'jpg'
+    file_type = 'jpg' if active[0]['type'] == 'jpeg' else active[0]['type']
     pdf_reference = modified.get('pdf')
     if not doc_id or not file_id:
         return {}
@@ -395,7 +395,7 @@ def original_source(data: dict, invoice_number: str) -> dict:
         return {}
     if file_type == 'pdf' and str(pdf_reference) != cloud_file:
         return {}
-    if file_type == 'jpg' and pdf_reference not in (None, ''):
+    if file_type in {'jpg', 'png'} and pdf_reference not in (None, ''):
         return {}
     source = {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
               'document_id': doc_id, 'native_file_id': file_id}

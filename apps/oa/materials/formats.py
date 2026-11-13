@@ -45,7 +45,7 @@ MAX_OFD_XML_BYTES = 5_000_000
 
 
 from apps.oa.materials.prepared import (
-    PreparedMaterial, SUCCESSFUL_PREPARATION_STATUSES, SKIPPED_PREPARATION_STATUSES,
+    PreparedMaterial, PreparationFailure, SUCCESSFUL_PREPARATION_STATUSES, SKIPPED_PREPARATION_STATUSES,
     skipped_video_sources,
 )
 
@@ -841,7 +841,7 @@ def _convert_spreadsheet(source: _ConversionSource, *, out_dir: Path, compact: b
             fact['key_text'].append(f'{cell}: embedded image {number}')
     except Exception as error:
         return source.result('spreadsheet_failed', images=images, path=str(source.path),
-                             error_message=str(error)[:500])
+                             error_message=str(error)[:500], exception_type=type(error).__name__)
     return source.result('spreadsheet_read', images=images, structured=[fact],
                          image_count=len(images), path=str(source.path))
 
@@ -850,7 +850,7 @@ def _convert_structured(source: _ConversionSource, *, reader, success: str, fail
     try:
         fact = reader(source.path)
     except Exception as error:
-        return source.result(failure, path=str(source.path), error_message=str(error)[:500])
+        return source.result(failure, path=str(source.path), error_message=str(error)[:500], exception_type=type(error).__name__)
     return source.result(success, structured=[fact], path=str(source.path))
 
 
@@ -858,7 +858,7 @@ def _convert_docx(source: _ConversionSource, *, out_dir: Path) -> _ConversionRes
     try:
         fact, images = docx_fact_and_images(source.path, resource_id=source.resource_id, out_dir=out_dir)
     except Exception as error:
-        return source.result('docx_failed', path=str(source.path), error_message=str(error)[:500])
+        return source.result('docx_failed', path=str(source.path), error_message=str(error)[:500], exception_type=type(error).__name__)
     return source.result('docx_read', images=images, structured=[fact],
                          path=str(source.path), image_count=len(images))
 
@@ -884,6 +884,13 @@ def _convert_attachment(source: _ConversionSource, *, out_dir: Path,
             body_read_status='not_read', image_count=0, reason='video_content_excluded')
     if suffix in PDF_EXTS | {'.doc', '.pptx'}:
         return _convert_pages(source, out_dir=out_dir, compact=compact_pdf)
+    if (suffix in SPREADSHEET_EXTS and source.path.name.startswith('~$')
+            and source.path.stat().st_size <= 512 and not zipfile.is_zipfile(source.path)
+            and _is_ooxml_spreadsheet(source.path.with_name(source.path.name[2:]))):
+        return source.result('spreadsheet_read', structured=[{
+            'document_type': 'office_owner_file', 'summary': 'Office临时锁定文件，原件保留，不作为业务凭据。',
+            'key_text': ['此文件只记录Office编辑锁定信息；业务内容以同目录的对应工作簿为准。']}],
+            path=str(source.path), image_count=0, reason='office_owner_file')
     if suffix in SPREADSHEET_EXTS or (suffix in LEGACY_SPREADSHEET_EXTS and _is_ooxml_spreadsheet(source.path)):
         return _convert_spreadsheet(source, out_dir=out_dir, compact=compact_spreadsheet)
     if suffix in DOCX_EXTS:
@@ -908,7 +915,7 @@ class _Preparation:
         source = _conversion_source(item)
         key = ((source.path.suffix.lower(), source.source_content_sha256)
                if source.path.suffix.lower() in SPREADSHEET_EXTS | LEGACY_SPREADSHEET_EXTS
-               and source.path.is_file() else None)
+               and not source.path.name.startswith('~$') and source.path.is_file() else None)
         result = self._spreadsheet_contents.get(key) if key is not None else None
         if result is None:
             result = _convert_attachment(source, out_dir=self.out_dir, compact_pdf=self.compact_pdf,
@@ -922,7 +929,15 @@ class _Preparation:
         images, manifest, structured, validation = [], [], [], []
         for item in attachments:
             extracted = item.get('extracted_files') if isinstance(item.get('extracted_files'), list) else []
-            results = [self.convert(child) for child in extracted if isinstance(child, dict)] if extracted else [self.convert(item)]
+            results = []
+            for child in [entry for entry in extracted if isinstance(entry, dict)] if extracted else [item]:
+                try:
+                    results.append(self.convert(child))
+                except Exception as error:
+                    error.diagnostics = [{'stage': 'preparation', 'reason': 'preparation_exception',
+                        'exception_type': type(error).__name__, 'attachment_ref': str(child.get('resource_id') or ''),
+                        **({'owner_ref': str(child['parent_resource_id'])} if child.get('parent_resource_id') else {})}]
+                    raise
             for result in results:
                 images.extend(result.images)
                 structured.extend(result.structured_contents)
@@ -936,12 +951,17 @@ class _Preparation:
                     'skipped_videos': skipped_video_sources(children)})
             else:
                 manifest.extend(results[0].manifest)
-        if any(str(entry.get('status') or '') not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
+        failed = [entry for entry in validation if str(entry.get('status') or '') not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
                or (entry.get('status') == 'pdf_rendered' and (
                    int(entry.get('image_count') or 0) < 1
-                   or int(entry.get('image_count') or 0) != int(entry.get('page_count') or 0)))
-               for entry in validation):
-            raise RuntimeError('attachment_content_incomplete')
+                   or int(entry.get('image_count') or 0) != int(entry.get('page_count') or 0)))]
+        if failed:
+            raise PreparationFailure([{'stage': 'preparation', 'reason': str(entry.get('status') or 'unknown'),
+                'attachment_ref': str(entry.get('resource_id') or ''),
+                **({'cause_type': entry['error_message']} if re.fullmatch(r'[a-z][a-z0-9_]{0,63}', str(entry.get('error_message') or '')) else {}),
+                **({'exception_type': entry['exception_type']} if entry.get('exception_type') else {}),
+                **({'owner_ref': str(entry['parent_resource_id'])} if entry.get('parent_resource_id') else {})}
+                for entry in failed])
         return PreparedMaterial({'images': images, 'manifest': manifest, 'structured_contents': structured})
 
 

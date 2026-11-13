@@ -32,11 +32,12 @@ class OriginalContext:
 
 
 def valid_original_file(resource: dict, path: Path) -> bool:
-    if resource.get('_invoice_original', {}).get('file_type') != 'jpg':
+    file_type = resource.get('_invoice_original', {}).get('file_type')
+    if file_type not in {'jpg', 'png'}:
         return True
     try:
         with Image.open(path) as image:
-            if image.format not in {'JPEG', 'MPO'}:
+            if image.format not in ({'PNG'} if file_type == 'png' else {'JPEG', 'MPO'}):
                 return False
             for index in range(getattr(image, 'n_frames', 1)):
                 image.seek(index)
@@ -228,7 +229,7 @@ class OriginalSources:
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
-                signature = b'\xff\xd8\xff' if source.get('file_type') == 'jpg' else b'%PDF-'
+                signature = {'jpg': b'\xff\xd8\xff', 'png': b'\x89PNG\r\n\x1a\n'}.get(source.get('file_type'), b'%PDF-')
                 reason = ''
                 if len(body) > _MAX_ORIGINAL_BYTES:
                     reason = 'cloud_content_too_large'

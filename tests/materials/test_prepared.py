@@ -6,6 +6,15 @@ from apps.oa.materials.prepared import read_prepared
 import pytest
 
 
+def test_preparation_failure_identifies_the_failed_resource(tmp_path):
+    source = tmp_path / 'invalid.xlsx'
+    source.write_bytes(b'not a workbook')
+    with pytest.raises(RuntimeError, match='attachment_content_incomplete') as captured:
+        prepare_materials([{'resource_id': 'workbook', 'path': str(source)}], out_dir=tmp_path / 'prepared')
+    assert captured.value.diagnostics == [{'stage': 'preparation', 'reason': 'spreadsheet_failed',
+                                          'attachment_ref': 'workbook', 'exception_type': 'BadZipFile'}]
+
+
 def test_prepared_projection_preserves_identity_without_sharing_mutable_records(tmp_path):
     import fitz
 
@@ -89,3 +98,43 @@ def test_archive_docx_keeps_local_child_identity_and_existing_outer_parent(tmp_p
     assert prepared['structured_contents'][0]['parent_resource_id'] == 'archive'
     assert [item['resource_id'] for item in prepared['manifest']] == ['archive']
     assert 'parent_resource_id' not in prepared['manifest'][0]
+
+
+def test_office_owner_file_requires_corresponding_workbook_and_preserves_original(tmp_path):
+    import openpyxl
+
+    workbook = tmp_path / 'costs.xlsx'
+    openpyxl.Workbook().save(workbook)
+    owner = tmp_path / '~$costs.xlsx'
+    original = b'\x05owner' + b'\x00' * 159
+    owner.write_bytes(original)
+    prepared = prepare_materials([{'resource_id': 'owner', 'path': str(owner)}], out_dir=tmp_path / 'prepared').to_record()
+    assert prepared['structured_contents'][0]['document_type'] == 'office_owner_file'
+    assert prepared['manifest'][0]['reason'] == 'office_owner_file'
+    assert owner.read_bytes() == original
+    workbook.unlink()
+    with pytest.raises(RuntimeError, match='attachment_content_incomplete'):
+        prepare_materials([{'resource_id': 'owner', 'path': str(owner)}], out_dir=tmp_path / 'unpaired')
+
+
+def test_owner_file_pairing_is_not_reused_across_resources_or_plain_zip(tmp_path):
+    import openpyxl
+    import zipfile
+
+    paired = tmp_path / 'paired'
+    paired.mkdir()
+    workbook = paired / 'costs.xlsx'
+    openpyxl.Workbook().save(workbook)
+    original = b'\x05owner' + b'\x00' * 159
+    owner = paired / '~$costs.xlsx'
+    owner.write_bytes(original)
+    unpaired = tmp_path / '~$costs.xlsx'
+    unpaired.write_bytes(original)
+    with pytest.raises(RuntimeError, match='attachment_content_incomplete') as captured:
+        prepare_materials([{'resource_id': 'paired', 'path': str(owner)},
+                           {'resource_id': 'unpaired', 'path': str(unpaired)}], out_dir=tmp_path / 'prepared')
+    assert captured.value.diagnostics[0]['attachment_ref'] == 'unpaired'
+    with zipfile.ZipFile(workbook, 'w') as archive:
+        archive.writestr('ordinary.txt', 'not a workbook')
+    with pytest.raises(RuntimeError, match='attachment_content_incomplete'):
+        prepare_materials([{'resource_id': 'owner', 'path': str(owner)}], out_dir=tmp_path / 'plain-zip')

@@ -199,3 +199,15 @@ def test_compact_spreadsheet_keeps_small_or_transparent_images_lossless(tmp_path
     ).to_record()
     images = prepared_record['images']
     assert all(Path(item['path']).read_bytes() == content for item in images)
+
+
+def test_large_worksheet_is_streamed_without_losing_cell_and_floating_images(tmp_path):
+    path = book(tmp_path)
+    rewrite_part(path, 'xl/worksheets/sheet1.xml', lambda content: content.replace(
+        b'</sheetData>', b'<row r="999"><c r="A999" t="inlineStr"><is><t>' + b'x' * 20_000_000 +
+        b'</t></is></c></row></sheetData>'))
+    original = path.read_bytes()
+    prepared = attachment_extractors.prepare_materials(
+        [{'resource_id': 'book', 'path': str(path)}], out_dir=tmp_path / 'prepared').to_record()
+    assert {image['spreadsheet_cell'] for image in prepared['images']} == {'现场!B2', '现场!C3'}
+    assert path.read_bytes() == original

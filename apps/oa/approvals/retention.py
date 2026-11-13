@@ -37,7 +37,7 @@ def task_paths(store, task):
 
 def verified_tasks(store):
     tasks = []
-    for row in store.connection.execute("SELECT id,request_id,workflow_key,last_run_id,last_seen_at,error FROM tasks WHERE status='submitted'"):
+    for row in store.connection.execute("SELECT id,request_id,workflow_key,last_run_id,last_seen_at,error FROM tasks WHERE status='submitted' AND failure_count=0 AND NOT EXISTS (SELECT 1 FROM submissions WHERE task_id=tasks.id AND status='failed')"):
         task = dict(row)
         submission = store.connection.execute('SELECT * FROM submissions WHERE task_id=? ORDER BY id DESC LIMIT 1',
                                                (task['id'],)).fetchone()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import mimetypes
+import json
 from pathlib import Path
 import re
 from typing import Any, Sequence
@@ -505,6 +506,12 @@ def _collect_case(
         transfer.travel_session = read_session
     travel_source = travel_orders.TravelSource(source_policy, transfer=transfer, read_session=read_session)
     workflow, raw_resources = oa_api.request_context(str(request_id))
+    if attachment_root is not None:
+        from apps.oa.runtime import files
+        files.write_bytes(Path(attachment_root).parent / 'collection-input.json',
+            json.dumps({'request_id': str(request_id), 'workflow': workflow, 'resources': raw_resources},
+                       ensure_ascii=False, default=str).encode(),
+            source={'request_id': str(request_id), 'kind': 'collection_input'})
     try:
         config = flow.select_config_for_workflow(
             str(request_id),

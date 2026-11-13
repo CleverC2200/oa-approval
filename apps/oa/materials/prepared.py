@@ -14,6 +14,12 @@ SUCCESSFUL_PREPARATION_STATUSES = {
 SKIPPED_PREPARATION_STATUSES = {'video_skipped'}
 
 
+class PreparationFailure(RuntimeError):
+    def __init__(self, diagnostics: list[dict]):
+        super().__init__('attachment_content_incomplete')
+        self.diagnostics = diagnostics
+
+
 def skipped_video_sources(manifest: list[dict]) -> list[dict]:
     return [source for entry in manifest for source in (
         [entry] if entry.get('status') == 'video_skipped' else entry.get('skipped_videos', [])

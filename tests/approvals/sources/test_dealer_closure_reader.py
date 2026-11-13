@@ -23,9 +23,10 @@ class SapRecording:
             return {'RFCSI_EXPORT': self.identity}
         if function == 'RPY_PROGRAM_READ':
             return {'SOURCE': ['SYNTHETIC READ-ONLY PROGRAM']}
+        assert params['GET_SORTED'] == 'X'
         fields = [r['FIELDNAME'] for r in params['FIELDS']]
         return {'DATA': [{'WA': '|'.join(str(row.get(f, '')) for f in fields)}
-                         for row in self.tables.get(params['QUERY_TABLE'], [])]}
+                         for row in self.tables.get(params['QUERY_TABLE'], [])[params.get('ROWSKIPS', 0):params.get('ROWSKIPS', 0) + params['ROWCOUNT']]]}
 
     def close(self):
         self.closed = True
@@ -76,8 +77,8 @@ def test_company_ledger_is_scoped_and_active_contract_amounts_include_following_
     assert connection.closed
 
 
-@pytest.mark.parametrize('failure', ['environment', 'client', 'truncation'])
-def test_reader_rejects_wrong_environment_nonproduction_client_and_truncated_rows(monkeypatch, failure):
+@pytest.mark.parametrize('failure', ['environment', 'client', 'cardinality'])
+def test_reader_rejects_wrong_environment_and_nonproduction_client(monkeypatch, failure):
     connection = SapRecording()
     if failure == 'environment':
         connection.identity['RFCSYSID'] = 'Q01'
@@ -87,16 +88,57 @@ def test_reader_rejects_wrong_environment_nonproduction_client_and_truncated_row
         connection.tables['T000'] *= 10000
     monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
     with pytest.raises(RuntimeError, match={'environment': 'environment_mismatch',
-                                          'client': 'client_not_production', 'truncation': 'rows_truncated'}[failure]):
+                                          'client': 'client_not_production', 'cardinality': 'client_not_production'}[failure]):
         reader.sap(payload())
     assert connection.closed
-    if failure == 'truncation':
+    if failure == 'cardinality':
         try:
             reader.sap(payload())
         except RuntimeError as error:
-            assert reader.failure(error)['reason'] == 'dealer_closure_sap_rows_truncated'
-            assert reader.failure(error)['stage'] == 'T000'
+            assert reader.failure(error)['reason'] == 'dealer_closure_sap_client_not_production'
+            assert reader.failure(error)['stage'] == 'source'
 
 
 def test_worker_failure_never_echoes_arbitrary_error_text():
     assert reader.failure(RuntimeError('synthetic-secret'))['reason'] == 'dealer_closure_source_failed'
+
+
+@pytest.mark.parametrize('count', [10000, 10001])
+def test_reader_paginates_and_verifies_all_rows(monkeypatch, count):
+    connection = SapRecording()
+    connection.tables['KNB1'] = [{'KUNNR': str(index), 'BUKRS': 'D001'} for index in range(count)]
+    monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
+    result = reader.sap(payload())['queries']['company_accounts']
+    assert len(result['rows']) == count
+    assert result['rows'][-1]['KUNNR'] == str(count - 1)
+    assert [page['request']['ROWSKIPS'] for page in result['pages']] == [0, 10000]
+    assert result['verification_pages'] == result['pages']
+    assert connection.closed
+
+
+@pytest.mark.parametrize('failure', ['changed', 'stalled', 'limit'])
+def test_reader_rejects_inconsistent_or_unbounded_pages(monkeypatch, failure):
+    connection = SapRecording()
+    connection.tables['KNB1'] = [{'KUNNR': str(index)} for index in range(10001)]
+    original = connection.call
+    first_reads = 0
+
+    def call(function, **params):
+        nonlocal first_reads
+        if function == 'RFC_READ_TABLE' and params['QUERY_TABLE'] == 'KNB1':
+            if params['ROWSKIPS'] == 0:
+                first_reads += 1
+            if failure == 'stalled':
+                params['ROWSKIPS'] = 0
+            if failure == 'changed' and first_reads > 1:
+                connection.tables['KNB1'][0]['KUNNR'] = 'changed'
+        return original(function, **params)
+
+    connection.call = call
+    if failure == 'limit':
+        monkeypatch.setattr(reader, '_MAX_SAP_ROWS', 10000)
+    monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
+    with pytest.raises(RuntimeError, match='snapshot_changed' if failure == 'changed' else 'rows_truncated') as captured:
+        reader.sap(payload())
+    assert captured.value.source_stage == 'KNB1'
+    assert connection.closed

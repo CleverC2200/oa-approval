@@ -337,7 +337,10 @@ def test_invoice_failure_persists_safe_diagnostics_before_any_submission(tmp_pat
         assert report['diagnostics'][-1]['stage'] == 'invoice_detail'
         assert report['diagnostics'][-1]['http_status'] == 500
         assert len(report['diagnostics']) == 3
-        assert 'private' not in json.dumps(report)
+        captured_input = json.loads((Path(report['material_directory']) / 'collection-input.json').read_text())
+        assert captured_input['workflow'] == workflow
+        assert captured_input['request_id'] == 'synthetic-request'
+        assert 'private' not in json.dumps({key: value for key, value in report.items() if key != 'material_directory'})
         task = app.inspect(1)
         assert task['task']['status'] == 'failed' and task['task']['material_file'] is None
         assert task['submissions'] == []
