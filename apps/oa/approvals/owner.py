@@ -146,13 +146,14 @@ def dispatch(approval, run_id, request):
     if operation in {'submit', 'preview'}:
         return approval.submit(request['task_id'], opinion=request.get('opinion'),
                                recognition=request.get('recognition'), observations=request.get('observations'),
+                               review_assessment=request.get('review_assessment'),
                                confirm_write=operation == 'submit' and request.get('confirm_write', False),
                                allow_overseas=request.get('allow_overseas', False))
     if operation == 'postcheck':
         return approval.postcheck(request['task_id'], confirmation_note=request.get('confirmation_note'),
                                   expected_submission_id=request.get('expected_submission_id'))
     if operation == 'fail':
-        return approval.fail(run_id, request['task_id'], request['reason'])
+        return approval.fail(run_id, request['task_id'], request['reason'], review_assessment=request.get('review_assessment'))
     raise ValueError('unknown_operation')
 
 def collect_process(root, demo, run_id, request, output, source_policy, phase_file=None):
@@ -334,6 +335,7 @@ class _RoundSession:
         self._close_attempted = False
         self._close_error = None
         self._handoff = False
+        self._stop = None
 
     @property
     def collection_pipe(self):
@@ -355,6 +357,9 @@ class _RoundSession:
             elif request.get('operation') == 'finish':
                 if source == 'socket' and request.get('run_id') != self._run_id:
                     raise ValueError('run_mismatch')
+                from apps.oa.approvals.execution import validate_stop
+
+                stop = validate_stop(self._approval.store, self._run_id, request.get('stop'), handoff=request.get('handoff', False))
                 if request.get('require_drained'):
                     store = self._approval.store
                     blockers = closeout_blockers(
@@ -366,6 +371,7 @@ class _RoundSession:
                         return
                 self._finishing = True
                 self._handoff = request.get('handoff', False)
+                self._stop = stop
                 if source == 'socket':
                     self._finish_responders.append(respond)
             elif request.get('operation') == 'status':
@@ -422,7 +428,7 @@ class _RoundSession:
             self._close_attempted = True
             try:
                 self._close_transport()
-                self._closed_result = self._approval.close(self._run_id, handoff=self._handoff)
+                self._closed_result = self._approval.close(self._run_id, handoff=self._handoff, stop=self._stop)
             except Exception as error:
                 self._close_error = error
                 raise

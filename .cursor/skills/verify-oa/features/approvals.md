@@ -33,8 +33,9 @@ Preconditions:
 - **只读核对。** 其他命令调用使用保存的同一绝对 root。运行 `status --view batch`，要求 run_id 匹配、owner可达；`show --task-id` 的 ID取本次 start/collect 返回值。
 - **领取。** 执行 `collect --agent-id demo-reviewer --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"`。两个变量取本次队列首单，要求返回本次 material_file，文件存在且 prepared 含合成页。
 - **预览。** 将“合成验证意见，不是业务审核结论”保存为意见文件，运行 `preview --task-id "$OA_TASK_ID" --opinion-file "$OA_OPINION_FILE"`。要求 preview；再 show，submissions 仍为空，不能只看退出码。
-- **fake 写入。** 仅对本次 `demo=true` owner运行 `submit --task-id "$OA_TASK_ID" --opinion-file "$OA_OPINION_FILE" --confirm-write YES`，核三项 true。再 `postcheck` 和 show，仍只有一次提交。不能把相同命令应用到真实 root。
+- **fake 写入。** 按[审核结果接口](../../../../.agents/skills/oa-finance-preaudit/references/review-assessment.md)记录本次合成材料的实际验收，保存 `$OA_REVIEW_FILE`。仅对本次 `demo=true` owner运行 `submit --task-id "$OA_TASK_ID" --opinion-file "$OA_OPINION_FILE" --review-file "$OA_REVIEW_FILE" --confirm-write YES`，核三项 true。再 `postcheck` 和 show，仍只有一次提交。不能把相同命令应用到真实 root。
 - **全链路 harness。** 运行 SKILL 的既有 `test_demo_runs_collect_preview_submit_and_postcheck`。它覆盖三类合成流程、保存识别来源、预览不产生提交、fake 提交与回查；模型响应在传输边界 fake。
+- **异常分支。** 使用 `bash .codex/python.sh scripts/verify-review-outcomes.py --root <新的私有合成目录>`，通过真实公开 CLI 的 demo owner 验证业务待核后补位、拒绝假读取失败停止、失败登记及证据保留、异常标题和归档资格。`proof.json` 保存验收，既有审批数据库会被拒绝；该脚本不验证真实图片识别准确性。
 - **收尾。** 所有已领取任务完成后，`finish --run-id "$OA_RUN_ID" --require-drained`，变量取启动回执。等待原会话退出，status核 closed、owner不可达及已处理任务的 verified 回执。部分未领取不代表队列耗尽。
 
 ## Gotchas

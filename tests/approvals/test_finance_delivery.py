@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 import json
 
 import pytest
@@ -50,13 +51,13 @@ def test_matching_case_previews_then_transfers_with_persisted_target_and_never_s
     preview = app.submit(task_id, opinion='合成审核意见')
     assert preview['delivery']['action'] == 'transfer'
     assert calls == []
-    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     assert result['status'] == 'submitted'
     assert result['delivery']['recipient_id'] == '8'
     assert calls == ['prepare', 'transfer']
     assert api.posts == []
     monkeypatch.setattr(app, 'predictor', lambda *_a, **_k: pytest.fail('submitted task must not predict again'))
-    assert app.submit(task_id, opinion='禁止重复', confirm_write=True)['status'] == 'submitted'
+    assert app.submit(task_id, opinion='禁止重复', confirm_write=True, review_assessment=completed_review(app, task_id))['status'] == 'submitted'
     assert calls == ['prepare', 'transfer']
     from apps.oa.approvals.client import query
     from apps.oa.approvals.owner import _RoundSession
@@ -77,13 +78,13 @@ def test_blocked_or_changed_delivery_never_starts_a_write(tmp_path, monkeypatch,
     delivery.update(action='blocked', reason='finance_recipient_ambiguous')
     assert app.submit(task_id, opinion='合成审核意见')['delivery']['action'] == 'blocked'
     with pytest.raises(ValueError, match='finance_recipient_ambiguous'):
-        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     delivery['action'] = 'transfer'
     def prepare(*args):
         raise ValueError('transfer_target_changed')
     monkeypatch.setattr(api, 'prepare_transfer', prepare, raising=False)
     with pytest.raises(ValueError, match='transfer_target_changed'):
-        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     assert app.inspect(task_id)['submissions'] == []
     assert api.posts == []
 
@@ -97,10 +98,10 @@ def test_unknown_transfer_uses_saved_transfer_evidence_for_readonly_recovery(tmp
     monkeypatch.setattr(api, 'transfer_and_verify', send, raising=False)
     app.submit(task_id, opinion='合成审核意见')
     app.submit(task_id, opinion='另一份未发送意见')
-    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     assert result['status'] == 'unknown'
     monkeypatch.setattr(app, 'predictor', lambda *_a, **_k: pytest.fail('unknown task must not predict again'))
-    assert app.submit(task_id, opinion='禁止重发', confirm_write=True)['status'] == 'unknown'
+    assert app.submit(task_id, opinion='禁止重发', confirm_write=True, review_assessment=completed_review(app, task_id))['status'] == 'unknown'
     calls = []
     def verify(client, request_id, opinion, started_at, context):
         assert context['operator_id'] == '7' and context['recipient_id'] == '8'
@@ -118,7 +119,7 @@ def test_negative_match_retains_normal_submit(tmp_path, finance_case):
     app, api, delivery = finance_case
     task_id = task(app)
     delivery['action'] = 'submit'
-    assert app.submit(task_id, opinion='合成审核意见', confirm_write=True)['status'] == 'submitted'
+    assert app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))['status'] == 'submitted'
     assert api.posts == [('101', '合成审核意见')]
 
 
@@ -135,7 +136,7 @@ def test_tpm_keeps_original_preview_and_submit_without_finance_precheck(tmp_path
     preview = app.submit(task_id, opinion='合成审核意见')
     assert preview['status'] == 'preview' and 'delivery' not in preview
     assert api.posts == []
-    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+    result = app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     assert result['status'] == 'submitted' and 'delivery' not in result
     assert api.posts == [('101', '合成审核意见')]
 
@@ -146,7 +147,7 @@ def test_prediction_block_before_real_submission_remains_failurable_without_losi
     material = app.inspect(task_id)['task']['material_file']
     delivery.update(action='blocked', reason='finance_prediction_incomplete')
     with pytest.raises(ValueError, match='finance_prediction_incomplete'):
-        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
     assert app.inspect(task_id)['task']['status'] == 'reviewing'
     assert app.inspect(task_id)['submissions'] == []
     assert api.posts == []
@@ -163,8 +164,11 @@ def test_prediction_failure_preserves_review_and_never_starts_a_write(tmp_path, 
         raise TimeoutError('prediction_timeout')
     app.predictor = failed
     with pytest.raises(TimeoutError, match='prediction_timeout'):
-        app.submit(task_id, opinion='合成审核意见', confirm_write=True)
-    assert app.inspect(task_id) == before
+        app.submit(task_id, opinion='合成审核意见', confirm_write=True, review_assessment=completed_review(app, task_id))
+    after = app.inspect(task_id)
+    assert len(after.pop('review_assessments')) == 1
+    before.pop('review_assessments')
+    assert after == before
     assert api.posts == []
 
 

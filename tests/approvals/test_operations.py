@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
 from datetime import datetime, timezone
@@ -161,14 +162,14 @@ def test_fresh_request_scope_keeps_successful_tasks_out_of_replay(tmp_path):
     app, api = service(tmp_path)
     original = dict(api.rows[0])
     task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    assert app.submit(task['task_id'], opinion='合成离线意见', confirm_write=True)['status'] == 'submitted'
+    assert app.submit(task['task_id'], opinion='合成离线意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
     api.rows = [original, {**original, 'request_id': '102'}, {**original, 'request_id': '103'}]
     run = app.pending(request_ids=['101', '102'])
     assert [(row['request_id'], row['status']) for row in run['tasks']] == [
         ('101', 'submitted'), ('102', 'queued')]
     following = app.collect(run['run_id'], agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
     assert following['request_id'] == '102'
-    assert app.submit(task['task_id'], opinion='不能重发', confirm_write=True)['status'] == 'submitted'
+    assert app.submit(task['task_id'], opinion='不能重发', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
     assert api.posts == [('101', '合成离线意见')]
 
 
@@ -249,15 +250,15 @@ def test_default_clients_handle_expired_credentials_between_tasks(tmp_path, monk
     for request_id in ("101", "102"):
         task = app.collect(run, agent_id='agent-a', expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')
         assert task["request_id"] == request_id
-        assert app.submit(task["task_id"], opinion="合成离线测试意见", confirm_write=True)["status"] == "submitted"
+        assert app.submit(task["task_id"], opinion="合成离线测试意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
     assert live.posts == [("101", "合成离线测试意见"), ("102", "合成离线测试意见")]
 
 
 def test_submit_and_repeat_do_not_send_twice(tmp_path):
     app, api = service(tmp_path)
     task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    first = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True)
-    second = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True)
+    first = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    second = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert first["status"] == second["status"] == "submitted"
     assert api.posts == [("101","请财务核对金额。")]
 
@@ -268,7 +269,7 @@ def test_changed_original_cannot_be_submitted(tmp_path):
     original = Path(app.inspect(task["task_id"])["attachments"][0]["path"])
     original.write_text("changed")
     with pytest.raises(ValueError, match="frozen_material_changed"):
-        app.submit(task["task_id"], opinion="审核意见", confirm_write=True)
+        app.submit(task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert api.posts == []
 
 
@@ -278,7 +279,7 @@ def test_replaced_task_instance_cannot_receive_previous_review(tmp_path):
     task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     api.rows[0]["task_instance_id"] = "instance-2"
     with pytest.raises(ValueError, match="submission_target_changed"):
-        app.submit(task["task_id"], opinion="审核意见", confirm_write=True)
+        app.submit(task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert api.posts == []
 
 
@@ -293,17 +294,17 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch
     monkeypatch.setattr(safe_http, "urlopen", interrupted)
     app.writer = FrozenWriterApi("fake-token", "fake-user", app_id="fake-app", base_url="https://oa.example.test")
     task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    result = app.submit(task["task_id"],opinion="意见",confirm_write=True)
+    result = app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert result["status"] == "unknown"
     fresh = app.pending()
     assert app.collect(fresh["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["status"] == "done"
-    assert app.submit(task["task_id"],opinion="意见",confirm_write=True)["status"] == "unknown"
+    assert app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
     api.rows = []
     api.handled = [{"request_id":"101"}]
     assert app.postcheck(task["task_id"])["status"] == "unknown"
     api.handled[0]["handled_at"] = "2020-01-01 12:00:00"
     assert app.postcheck(task["task_id"])["status"] == "unknown"
-    assert app.submit(task["task_id"],opinion="意见",confirm_write=True)["status"] == "unknown"
+    assert app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
     api.handled[0]["handled_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     api.rows = [{"request_id": "101"}]
     conflict = app.postcheck(task["task_id"])
@@ -317,7 +318,7 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch
     assert recovered["submit_ok"] is True
     assert recovered["done_hit"] is True
     assert recovered["postcheck_done_hit"] is True
-    assert app.submit(task["task_id"], opinion="意见", confirm_write=True)["status"] == "submitted"
+    assert app.submit(task["task_id"], opinion="意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
     assert len(api.posts) == 1
 
 
@@ -343,7 +344,7 @@ def test_postcheck_reads_handled_history_beyond_five_pages(tmp_path, incomplete)
                        agent_workflow_key='travel_expense')
     app.writer = type('UnknownWriter', (), {'submit_and_verify': lambda *_a, **_k: {
         'submit_ok': True, 'done_hit': False, 'postcheck_done_hit': False}})()
-    assert app.submit(task['task_id'], opinion='意见', confirm_write=True)['status'] == 'unknown'
+    assert app.submit(task['task_id'], opinion='意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'unknown'
     api.rows = []
     if incomplete:
         with pytest.raises(ValueError, match='handled_pagination_incomplete'):
@@ -361,7 +362,7 @@ def test_successful_occurrence_is_not_reset_when_pending_reappears(tmp_path):
     app, api = service(tmp_path)
     original = dict(api.rows[0])
     task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    app.submit(task["task_id"],opinion="意见",confirm_write=True)
+    app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     api.rows = [original]
     fresh = app.pending()
     assert fresh["tasks"][0]["status"] == "submitted"
@@ -386,11 +387,11 @@ def test_current_unknown_stops_other_writes_but_new_run_can_process_other_tasks(
         api.posts.append(request_id)
         raise OSError("connection lost")
     api.submit_and_verify = interrupted
-    assert app.submit(first["task_id"],opinion="意见",confirm_write=True)["status"] == "unknown"
+    assert app.submit(first["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, first["task_id"]))["status"] == "unknown"
     assert app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense') == {
         "run_id":run,"status":"blocked","reason":"run_blocked","summary":{"unknown":1,"reviewing":1}}
     with pytest.raises(ValueError, match="run_blocked"):
-        app.submit(second["task_id"],opinion="意见",confirm_write=True)
+        app.submit(second["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, second["task_id"]))
     fresh = app.pending()["run_id"]
     assert app.collect(fresh, agent_id='agent-b', expected_task_id=2, agent_workflow_key='general_expense')["task_id"] == second["task_id"]
     assert api.posts == ["101"]
@@ -455,7 +456,7 @@ def test_completed_later_task_can_submit_and_refill_while_older_reviews_continue
     api.rows = [{**api.rows[0], "request_id":str(value)} for value in range(101, 106)]
     run = app.pending()["run_id"]
     tasks = [app.collect(run,agent_id=f"agent-{index}", expected_task_id=index + 1, agent_workflow_key='travel_expense') for index in range(3)]
-    assert app.submit(tasks[2]["task_id"],opinion="离线意见",confirm_write=True)["status"] == "submitted"
+    assert app.submit(tasks[2]["task_id"],opinion="离线意见",confirm_write=True, review_assessment=completed_review(app, tasks[2]["task_id"]))["status"] == "submitted"
     assert [app.inspect(task["task_id"])["task"]["status"] for task in tasks[:2]] == ["reviewing", "reviewing"]
     assert app.collect(run,agent_id="agent-2", expected_task_id=4, agent_workflow_key='travel_expense')["request_id"] == "104"
     assert app.collect(run, agent_id='agent-a', expected_task_id=5, agent_workflow_key='travel_expense') == {
@@ -528,8 +529,8 @@ def test_overseas_authorized_no_invoice_preserves_fields_and_has_independent_con
     material = json.loads(Path(task["material_file"]).read_text())
     recognition = {"material_digest":digest(material),"invoices":[]}
     with pytest.raises(ValueError,match="overseas_authorization_required"):
-        app.submit(task["task_id"],recognition=recognition,confirm_write=True)
-    result = app.submit(task["task_id"],recognition=recognition,confirm_write=True,allow_overseas=True)
+        app.submit(task["task_id"],recognition=recognition,confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    result = app.submit(task["task_id"],recognition=recognition,confirm_write=True,allow_overseas=True, review_assessment=completed_review(app, task["task_id"]))
     assert result["status"] == expected_status
     assert result["fields_match"] is True
     assert api.posts == [("101",[])]

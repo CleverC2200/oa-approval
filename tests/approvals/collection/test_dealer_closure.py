@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 from copy import deepcopy
 import json
 from pathlib import Path
@@ -86,7 +87,7 @@ def test_public_collect_freezes_closure_facts_and_uses_registered_feedback_write
     assert Path(collected['rule_file']).name == 'SKILL.md'
     assert 'oa-dealer-closure' in collected['rule_file']
     opinion = '✅ 无余额，不退款；无免投冰柜。'
-    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True)
+    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
     assert result['status'] == 'submitted'
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
     assert api.posts == [('101', opinion, 'comment')]
@@ -103,7 +104,7 @@ def test_empty_bi_preserves_unknowns_and_continues_ai_preaudit(closure_app):
     assert len(evidence['dms']) == 4
     assert evidence['branch_context']['deferred_fields'] == ['yetk', 'sftk']
     opinion = '❗ BI无客户记录，余额、预提、冰柜、融资及补贴待核；余额分支及退款意向由后续节点确认。'
-    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True)
+    result = app.submit(collected['task_id'], opinion=opinion, confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
     assert result['status'] == 'submitted'
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
     assert api.posts == [('101', opinion, 'approval')]
@@ -113,7 +114,7 @@ def test_changed_feedback_button_stops_before_submission_attempt(closure_app):
     app, api, collected = closure_app
     api.form['submitButtonName'] = '提交'
     with pytest.raises(RuntimeError, match='dealer_closure_feedback_context_invalid'):
-        app.submit(collected['task_id'], opinion='✅ 合成意见。', confirm_write=True)
+        app.submit(collected['task_id'], opinion='✅ 合成意见。', confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
     assert api.posts == []
     assert app.inspect(collected['task_id'])['submissions'] == []
 
@@ -122,7 +123,7 @@ def test_changed_customer_or_amount_stops_before_submission_attempt(closure_app)
     app, api, collected = closure_app
     api.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][1]['fieldValue'] = '99000002'
     with pytest.raises(ValueError, match='dealer_closure_form_changed'):
-        app.submit(collected['task_id'], opinion='✅ 合成意见。', confirm_write=True)
+        app.submit(collected['task_id'], opinion='✅ 合成意见。', confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
     assert api.posts == []
     assert app.inspect(collected['task_id'])['submissions'] == []
 
@@ -154,7 +155,7 @@ def test_ai_preaudit_freezes_unknown_branches_and_previews_without_writing(closu
     assert evidence['form_snapshot']['fields']['sftk'] == ''
     assert evidence['bi']['rows'][0]['cust_balance'] == '0.00'
     assert len(evidence['dms']) == 4
-    result = app.submit(collected['task_id'], opinion='❗ 余额及退款意向尚未填写，后续节点确认。', confirm_write=False)
+    result = app.submit(collected['task_id'], opinion='❗ 余额及退款意向尚未填写，后续节点确认。', confirm_write=False, review_assessment=completed_review(app, collected['task_id']))
     assert result['status'] == 'preview'
     assert api.posts == []
     fields = {f['fieldName']: f['fieldValue'] for f in api.form['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']}
