@@ -89,6 +89,11 @@ class Store:
                 review_id INTEGER NOT NULL REFERENCES reviews,
                 run_id TEXT NOT NULL REFERENCES runs, started_at TEXT NOT NULL,
                 completed_at TEXT, status TEXT NOT NULL, result_json TEXT NOT NULL DEFAULT '{}');
+            CREATE TABLE IF NOT EXISTS review_assessments (
+                id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks,
+                run_id TEXT NOT NULL REFERENCES runs, material_sha256 TEXT NOT NULL,
+                assessment_json TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(task_id,material_sha256,assessment_json));
         """)
 
     def requests(self):
@@ -227,7 +232,7 @@ class Store:
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
             return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"])}
 
-    def fail(self, task_id, error, *, run_id=None):
+    def fail(self, task_id, error, *, run_id=None, review_assessment=None):
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             task = self.get_task(task_id)
@@ -238,6 +243,13 @@ class Store:
                 raise ValueError("task_run_mismatch")
             if task["status"] not in {"preparing","reviewing"}:
                 raise ValueError("task_not_failable")
+            if review_assessment is not None:
+                from apps.oa.approvals.review import validate_assessment
+
+                assessment = validate_assessment(task, review_assessment)
+                if assessment['status'] not in {'incomplete', 'technical_failure'}:
+                    raise ValueError('failure_assessment_invalid')
+                self._insert_assessment(task, assessment)
             self.connection.execute("UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1 WHERE id=?", (error,task_id))
         return self.get_task(task_id)
 
@@ -343,6 +355,7 @@ class Store:
 
     def details(self, task_id):
         return {"task":self.get_task(task_id),
+            "review_assessments":self.review_assessments(task_id),
             "attachments":[dict(row) for row in self.connection.execute("SELECT * FROM attachments WHERE task_id=? ORDER BY id",(task_id,))],
             "contents":[dict(row) for row in self.connection.execute("SELECT c.* FROM attachment_contents c JOIN attachments a ON a.id=c.attachment_id WHERE a.task_id=? ORDER BY c.id",(task_id,))],
             "reviews":[dict(row) for row in self.connection.execute("SELECT * FROM reviews WHERE task_id=? ORDER BY id",(task_id,))],
@@ -351,6 +364,21 @@ class Store:
     def submissions(self, run_id):
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM submissions WHERE run_id=? ORDER BY id", (run_id,))]
+
+    def assess_review(self, task, assessment):
+        with self.connection:
+            self._insert_assessment(task, assessment)
+
+    def _insert_assessment(self, task, assessment):
+        self.connection.execute('INSERT OR IGNORE INTO review_assessments(task_id,run_id,material_sha256,assessment_json,created_at) VALUES (?,?,?,?,?)',
+            (task['id'], task['last_run_id'], task['material_sha256'], encoded(assessment), now()))
+
+    def review_assessments(self, task_id):
+        if not self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='review_assessments'").fetchone():
+            return []
+        return [{key: value for key, value in dict(row).items() if key != 'assessment_json'}
+                | {'assessment': json.loads(row['assessment_json'])}
+                for row in self.connection.execute('SELECT * FROM review_assessments WHERE task_id=? ORDER BY id', (task_id,))]
 
     def _handoff(self, run, tasks, stored):
         if run['status'] != 'running' or any(task['status'] in (*INFLIGHT_STATUSES, 'unknown') for task in tasks):
@@ -369,13 +397,20 @@ class Store:
         processed.update(task['occurrence'] for task in tasks if task['status'] in {'preview','failed','submitted'})
         return {'status':'ready', 'remaining':remaining, 'processed_occurrences':sorted(processed)}
 
-    def close(self, run_id, *, handoff=False, collection_stopped_note=None):
+    def close(self, run_id, *, handoff=False, collection_stopped_note=None, stop=None):
+        from apps.oa.approvals.execution import close_execution, validate_stop
+
+        stop = validate_stop(self, run_id, stop, handoff=handoff)
         with self.connection:
             self.connection.execute('BEGIN IMMEDIATE')
             run = self.run(run_id)
             tasks = self.tasks(run_id)
             summary = dict(Counter(task['status'] for task in tasks))
             stored = json.loads(run['summary_json'])
+            if run['status'] == 'closed':
+                return {'run_id': run_id, 'status': 'closed', 'summary': summary,
+                        **({'execution': stored['execution']} if 'execution' in stored else {})}
+            stored['execution'] = close_execution(self, run, tasks, stop)
             if collection_stopped_note:
                 stored['orphaned_collection'] = {
                     'confirmation_note': collection_stopped_note,
@@ -385,8 +420,10 @@ class Store:
                 stored.setdefault('selection', {'workflows':None, 'request_ids':None,
                                                 'batch_size':stored.get('batch', {}).get('size')})
                 stored['handoff'] = self._handoff(run,tasks,stored)
+                if stored['handoff']['status'] == 'blocked':
+                    stored['execution'].update(status='blocked', archive_eligible=False)
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
-        result = {'run_id':run_id, 'status':'closed', 'summary':summary}
+        result = {'run_id':run_id, 'status':'closed', 'summary':summary, 'execution':stored['execution']}
         if handoff:
             result['handoff'] = {key:value for key,value in stored['handoff'].items() if key != 'processed_occurrences'}
             if result['handoff']['status'] == 'ready':
@@ -409,6 +446,7 @@ class Store:
                         and run['status'] in {'closed', 'interrupted'}):
                     expired.append(task['id'])
             for task_id in expired:
+                self.connection.execute('DELETE FROM review_assessments WHERE task_id=?', (task_id,))
                 self.connection.execute('DELETE FROM submissions WHERE task_id=?', (task_id,))
                 self.connection.execute('DELETE FROM reviews WHERE task_id=?', (task_id,))
                 self.connection.execute('DELETE FROM attachment_contents WHERE attachment_id IN (SELECT id FROM attachments WHERE task_id=?)', (task_id,))
@@ -422,5 +460,6 @@ class Store:
                     AND COALESCE(json_extract(summary_json,'$.handoff.status'),'') != 'ready'
                     AND NOT EXISTS (SELECT 1 FROM tasks WHERE tasks.last_run_id=runs.id)
                     AND NOT EXISTS (SELECT 1 FROM reviews WHERE reviews.run_id=runs.id)
+                    AND NOT EXISTS (SELECT 1 FROM review_assessments WHERE review_assessments.run_id=runs.id)
                     AND NOT EXISTS (SELECT 1 FROM submissions WHERE submissions.run_id=runs.id)""", (latest['id'],timestamp))
         return len(expired)

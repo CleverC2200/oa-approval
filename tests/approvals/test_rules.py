@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
 from pathlib import Path
@@ -91,12 +92,14 @@ def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workf
         assert {path.name for path in root.rglob('flows/*.md')} == expected
         if workflow_key == 'overseas_invoice':
             assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
-                '.agents/skills/oa-overseas-invoice/SKILL.md', 'docs/overseas-invoice.md'}
+                '.agents/skills/oa-overseas-invoice/SKILL.md', 'docs/overseas-invoice.md',
+                '.agents/skills/oa-finance-preaudit/references/review-assessment.md'}
         if workflow_key == 'dealer_closure':
             assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
                 '.agents/skills/oa-dealer-closure/SKILL.md',
                 '.agents/skills/oa-dealer-closure/references/read-sources.md',
-                '.agents/skills/oa-dealer-closure/references/result-format.md'}
+                '.agents/skills/oa-dealer-closure/references/result-format.md',
+                '.agents/skills/oa-finance-preaudit/references/review-assessment.md'}
         for document in root.rglob('*.md'):
             for link in re.findall(r'\]\(([^)]+)\)', document.read_text()):
                 path = link.split('#', 1)[0]
@@ -164,7 +167,7 @@ def test_changed_frozen_rule_cannot_be_reviewed_or_submitted(rule_case):
         rule = Path(collected['rule_file'])
         rule.write_text(rule.read_text() + '\nChanged after collection.\n')
         with pytest.raises(ValueError, match='frozen_material_changed'):
-            app.submit(collected['task_id'], opinion='Synthetic offline opinion.', confirm_write=True)
+            app.submit(collected['task_id'], opinion='Synthetic offline opinion.', confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
         details = app.inspect(collected['task_id'])
         assert not details['reviews']
         assert not details['submissions']

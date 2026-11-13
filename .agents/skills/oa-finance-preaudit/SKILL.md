@@ -52,6 +52,7 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 | 实际 Agent 身份、本代身份、`task_id` | 与当前派发的实际身份和任务一致 |
 | `material_file` | 本次 collect 返回的唯一绝对路径，作为冻结版本引用 |
 | 最终意见文件 | 已保存文件的绝对路径 |
+| 审核结果文件 | 按[提交前审核结果](references/review-assessment.md)保存本次身份、材料版本、完成状态、待核规则及完整证据引用 |
 | 识别报告、补充观察文件 | 适用文件的绝对路径；无适用文件时说明原因 |
 
 需要核对材料内容摘要时，使用公开 `show --task-id ...` 返回的 `task.material_sha256`。主 Agent 按这份交付信息核对并接管，不把文件存在当作业务核验完成。

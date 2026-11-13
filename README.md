@@ -63,6 +63,8 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 变量取本次工具返回的实际 Agent、任务、流程和轮次身份。真实 start 仅允许干净、已发布且与 origin/main 一致的 main，启动前 fetch 核对；运行中的 checkout 不自动更新。真实运行将 root 设为本项目 runtime 的绝对路径。默认目录不受启动 cwd 影响，锁与账本按所选 root 协调。
 
+真实提交同时提供 `--review-file`，记录本次实际审核完成状态、材料版本及证据；格式和失败分支见[提交前审核结果](.agents/skills/oa-finance-preaudit/references/review-assessment.md)。提前关闭的原因通过 `finish --stop-file` 保存，最终汇报读取 `status --view batch` 的 `execution`，不能只依据提交回执判断整轮正常。异常及业务待核材料保留，已验证提交不解除其保留条件。
+
 新轮默认排除同一次投递的历史预览，以及已生成意见但没有提交尝试的排队或待提交任务，保留原意见等待明确授权；新的投递身份仍可入队。提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --require-drained --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
 
 明确授权重审已有预览或未提交意见时，使用 `start --request-id <申请ID> --retry-reviewed YES`，重新领取、采集完整材料并审核；旧意见保留。该参数不继承到后续接续，也不授权真实写入。历史技术失败仍单独使用 `--retry-failed YES` 并指定申请。

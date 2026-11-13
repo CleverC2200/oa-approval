@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
 from copy import deepcopy
@@ -107,7 +108,7 @@ def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
         reading(part['resource_id'], part['sha256'], '10.10', 'INV-' + part['resource_id'])
         for part in material['attachments']]}
-    original = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)
+    original = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert original['status'] == 'unknown' and original['response_code'] == 'UNKNOWN'
     app.close(run)
     if state == 'fields_changed':
@@ -415,8 +416,8 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
     assert preview['field_plan']['remark'] == preview['opinion']
     assert posts == []
     with pytest.raises(ValueError, match='overseas_authorization_required'):
-        app.submit(task['task_id'], recognition=recognized, confirm_write=True)
-    result = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)
+        app.submit(task['task_id'], recognition=recognized, confirm_write=True, review_assessment=completed_review(app, task['task_id']))
+    result = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     expected = 'unknown' if tamper else 'submitted'
     assert result['status'] == ('unknown' if lost_response else expected)
     if not lost_response:
@@ -427,7 +428,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
         assert checked['fields_match'] is not tamper
         assert checked['submit_ok'] is True
         assert checked['postcheck_done_hit'] is not tamper
-    assert app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True)['status'] == expected
+    assert app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))['status'] == expected
     assert len(posts) == 1
     assert {item['fieldName']: item['fieldValue'] for item in
             posts[0][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']} == {
@@ -493,7 +494,7 @@ def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_
         for item in material['attachments']]}
     with pytest.raises(ValueError, match='invoice_write_adapter_required'):
         submit_overseas(app.api, app.writer, '201', material, invoice.build_plan(material, recognition), origins=POLICY.attachments)
-    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
+    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert result['status'] == 'unknown'
     assert len(app.inspect(task['task_id'])['submissions']) == 1
 
@@ -553,7 +554,7 @@ def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verific
     recognition = {'material_digest': invoice.digest(material), 'invoices': [
         reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
         for item in material['attachments']]}
-    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True)
+    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert result['status'] == 'submitted'
     assert result['fields_match'] is True
     assert len(posts) == 1

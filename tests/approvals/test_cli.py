@@ -159,6 +159,11 @@ def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pendi
 
 
 def command(root, *arguments):
+    if '--confirm-write' in arguments and '--review-file' not in arguments:
+        from tests.approvals.review_fixtures import completed_review_file
+
+        task_id = int(arguments[arguments.index('--task-id') + 1])
+        arguments = (*arguments, '--review-file', str(completed_review_file(root, task_id)))
     return [sys.executable, '-m', 'apps.oa.approvals.cli', '--root', str(root), *arguments]
 
 

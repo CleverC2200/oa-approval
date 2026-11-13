@@ -219,11 +219,11 @@ class Approval:
             self.store.fail_collection(task["id"],type(error).__name__+":"+code)
             raise
 
-    def fail(self, run_id, task_id, reason):
+    def fail(self, run_id, task_id, reason, *, review_assessment=None):
         if not isinstance(reason,str) or not reason.strip():
             raise ValueError("failure_reason_required")
         reason = reason.strip()
-        task = self.store.fail(task_id,reason,run_id=run_id)
+        task = self.store.fail(task_id,reason,run_id=run_id,review_assessment=review_assessment)
         return {"run_id":run_id,"task_id":task_id,"status":"failed",
             "reason":reason,"failure_count":task["failure_count"]}
 
@@ -236,9 +236,11 @@ class Approval:
     def _frozen(self, task):
         for path,digest in json.loads(task["frozen_json"] or "{}").items():
             if not Path(path).is_file() or file_digest(path) != digest:
-                raise ValueError("frozen_material_changed")
+                error = ValueError('frozen_material_changed')
+                error.changed_file = path
+                raise error
 
-    def submit(self, task_id, opinion=None, recognition=None, observations=None, confirm_write=False, allow_overseas=False):
+    def submit(self, task_id, opinion=None, recognition=None, observations=None, confirm_write=False, allow_overseas=False, review_assessment=None):
         with self._writer_lock():
             task = self.store.get_task(task_id)
             if task["status"] in {"submitted","unknown","submitting"}:
@@ -247,7 +249,36 @@ class Approval:
                 raise ValueError("task_not_reviewable")
             if self.store.run(task["last_run_id"])["status"] != "running":
                 raise ValueError("run_blocked")
-            self._frozen(task)
+            from apps.oa.approvals.review import record_failure, validate_assessment
+
+            try:
+                self._frozen(task)
+            except (OSError, ValueError) as error:
+                raise record_failure(self.store, task, 'frozen_material_changed',
+                    opinion=opinion, recognition=recognition, observations=observations,
+                    details={'exception_type': type(error).__name__,
+                             'changed_file': getattr(error, 'changed_file', getattr(error, 'filename', None))}) from error
+            if confirm_write and any(item['assessment']['status'] in {'technical_failure', 'incomplete'}
+                    and item['run_id'] == task['last_run_id'] and item['material_sha256'] == task['material_sha256']
+                    for item in self.store.review_assessments(task_id)):
+                raise ValueError('review_failure_unresolved')
+            read_failed = (isinstance(recognition, dict) and recognition.get('kind') == 'deepseek_attachment_recognition'
+                           and recognition.get('status') == 'failed')
+            observations_failed = observations and any(item.get('status') == 'failed' for item in observations)
+            read_incomplete = (isinstance(recognition, dict) and recognition.get('kind') == 'deepseek_attachment_recognition'
+                               and recognition.get('status') not in {'complete', 'skipped'})
+            observations_incomplete = observations and any(item.get('status') in {'failed', 'unread', 'unconfirmed'} for item in observations)
+            if read_failed or observations_failed or confirm_write and (read_incomplete or observations_incomplete):
+                error = record_failure(self.store, task, 'recognition_not_complete',
+                                       status='technical_failure' if read_failed or observations_failed else 'incomplete',
+                                       recognition=recognition, observations=observations, opinion=opinion)
+                if confirm_write:
+                    raise error
+            if review_assessment is not None or confirm_write:
+                assessment = validate_assessment(task, review_assessment)
+                self.store.assess_review(task, assessment)
+                if assessment['status'] not in {'complete', 'business_pending'}:
+                    raise ValueError('review_not_complete')
             material = json.loads(task["material_json"])
             plan = None
             if task["workflow_key"] == "overseas_invoice":
@@ -389,8 +420,8 @@ class Approval:
         details = self.store.details(task_id)
         return {**details, **collection_failure_info(self.root, details['task'])}
 
-    def close(self, run_id, *, handoff=False):
-        result = self.store.close(run_id, handoff=handoff)
+    def close(self, run_id, *, handoff=False, stop=None):
+        result = self.store.close(run_id, handoff=handoff, stop=stop)
         cleanup = retention.cleanup(self.store, execute=True)
         if cleanup["status"] != "completed":
             result["cleanup"] = cleanup

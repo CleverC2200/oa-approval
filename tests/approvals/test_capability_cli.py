@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import completed_review
 import json
 from pathlib import Path
 import subprocess
@@ -35,11 +36,11 @@ def test_reviewed_delivery_requires_scoped_authorization_and_fresh_collection(tm
         assert app.inspect(task['id'])['reviews'] == original_review
         assert app.inspect(task['id'])['submissions'] == []
         with pytest.raises(ValueError, match='task_not_reviewable'):
-            app.submit(task['id'], opinion='Must collect again', confirm_write=True)
+            app.submit(task['id'], opinion='Must collect again', confirm_write=True, review_assessment=completed_review(app, task['id']))
         fresh = app.collect(retry['run_id'], agent_id='retry', expected_task_id=task['id'],
                             agent_workflow_key=task['workflow_key'])
         assert fresh['material_file'] != material['material_file']
-        assert app.submit(task['id'], opinion='Fresh review', confirm_write=True)['status'] == 'submitted'
+        assert app.submit(task['id'], opinion='Fresh review', confirm_write=True, review_assessment=completed_review(app, task['id']))['status'] == 'submitted'
         assert len(app.inspect(task['id'])['submissions']) == 1
     finally:
         app.store.connection.close()
@@ -655,7 +656,18 @@ def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkey
         {'operation': 'submit', 'task_id': 1, 'opinion': '合成意见', 'confirm_write': True},
         {'operation': 'collect', 'agent_id': 'second', 'expected_task_id': 2, 'agent_workflow_key': 'business_entertainment'},
     ]
-    monkeypatch.setattr(sys, 'stdin', io.StringIO(''.join(json.dumps(item) + '\n' for item in requests)))
+    class ReviewInput(io.StringIO):
+        def readline(self, *args):
+            line = super().readline(*args)
+            item = json.loads(line) if line else None
+            if item and item['operation'] == 'submit':
+                from tests.approvals.review_fixtures import completed_review_file
+
+                item['review_assessment'] = json.loads(completed_review_file(tmp_path, item['task_id']).read_text())
+                return json.dumps(item) + '\n'
+            return line
+
+    monkeypatch.setattr(sys, 'stdin', ReviewInput(''.join(json.dumps(item) + '\n' for item in requests)))
     assert cli.main(['--root', str(tmp_path), 'start', '--demo']) == 130
     messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert messages[-1]['status'] == 'submitted'

@@ -46,6 +46,7 @@ def main(argv=None):
     finish.add_argument('--run-id', required=True)
     finish.add_argument('--handoff', action='store_true', help='排空后关闭并预留下一轮；返回原生独立对话接续信息')
     finish.add_argument('--require-drained', action='store_true', help='正常收尾前拒绝在途采集、审核或未核实提交，保留 owner')
+    finish.add_argument('--stop-file', type=Path, help='提前结束的结构化原因及证据；业务待核不能冒充读取失败')
     finish.add_argument('--orphaned', action='store_true', help='显式核对后关闭失联轮次；仅写本地事实，不恢复审核或创建接续')
     finish.add_argument('--collection-stopped-note', help='仅与 --orphaned 使用，记录本次人工确认采集进程已停止的授权及核对依据')
     collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
@@ -59,6 +60,7 @@ def main(argv=None):
     submit.add_argument('--opinion-file', type=Path)
     submit.add_argument('--recognition-file', type=Path, help='海外识别结果或带附件来源的 DeepSeek 报告；可与意见一起保存')
     submit.add_argument('--observations-file', type=Path)
+    submit.add_argument('--review-file', type=Path, help='绑定task_id和material_sha256的审核完成状态、适用规则及证据；真实提交必需')
     submit.add_argument('--confirm-write', choices=['YES'])
     submit.add_argument('--allow-overseas', choices=['YES'])
     preview = commands.add_parser('preview', help='保存本地审核并展示意见、处理动作和限定字段计划，不写OA')
@@ -66,6 +68,7 @@ def main(argv=None):
     preview.add_argument('--opinion-file', type=Path)
     preview.add_argument('--recognition-file', type=Path)
     preview.add_argument('--observations-file', type=Path)
+    preview.add_argument('--review-file', type=Path)
     check = commands.add_parser('postcheck', help='仅核对未知提交，不重发')
     check.add_argument('--task-id', type=int, required=True)
     check.add_argument('--confirm-not-written', choices=['YES'], help='记录本次用户明确确认未提交成功，不重发；海外仅确认节点，须核对回填字段一致')
@@ -74,6 +77,7 @@ def main(argv=None):
     failed = commands.add_parser('fail', help='登记当前轮活动审核的技术失败，不访问 OA')
     failed.add_argument('--task-id', type=int, required=True)
     failed.add_argument('--reason', required=True)
+    failed.add_argument('--review-file', type=Path, help='当前审核未完成或读取失败的绑定证据，不需要编写意见')
     failed.add_argument('--closed-run-id', help='显式核对已关闭最新轮次的写前失败，不恢复审核或访问OA')
     failed.add_argument('--expected-review-id', type=int, help='与--closed-run-id配套，精确核对无提交尝试的待提交意见')
     args = parser.parse_args(argv)
@@ -84,6 +88,8 @@ def main(argv=None):
         parser.error('--confirm-not-written YES, a nonempty --confirmation-note and a positive --expected-submission-id must be supplied together')
     if args.operation == 'finish' and args.orphaned and (args.handoff or args.require_drained):
         parser.error('--orphaned cannot use --handoff or --require-drained')
+    if args.operation == 'finish' and args.orphaned and args.stop_file:
+        parser.error('--stop-file cannot use --orphaned')
     if args.operation == 'finish' and args.collection_stopped_note is not None and (
             not args.orphaned or not args.collection_stopped_note.strip()):
         parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
@@ -103,6 +109,8 @@ def main(argv=None):
     if args.operation == 'fail' and (bool(args.closed_run_id) != (args.expected_review_id is not None)
             or (args.expected_review_id is not None and args.expected_review_id <= 0)):
         parser.error('--closed-run-id and positive --expected-review-id must be supplied together')
+    if args.operation == 'fail' and args.closed_run_id and args.review_file:
+        parser.error('--review-file cannot change a closed review')
     root = args.root.expanduser().resolve()
     try:
         if args.operation == 'predict':
@@ -168,16 +176,19 @@ def main(argv=None):
             request['run_id'] = args.run_id
             request['handoff'] = args.handoff
             request['require_drained'] = args.require_drained
+            request['stop'] = json.loads(args.stop_file.read_text()) if args.stop_file else None
         else:
             request['task_id'] = args.task_id
         if args.operation in {'submit', 'preview'}:
             request.update(opinion=args.opinion_file.read_text() if args.opinion_file else None,
                            recognition=json.loads(args.recognition_file.read_text()) if args.recognition_file else None,
                            observations=json.loads(args.observations_file.read_text()) if args.observations_file else None,
+                           review_assessment=json.loads(args.review_file.read_text()) if args.review_file else None,
                            confirm_write=getattr(args, 'confirm_write', None) == 'YES',
                            allow_overseas=getattr(args, 'allow_overseas', None) == 'YES')
         if args.operation == 'fail':
             request['reason'] = args.reason
+            request['review_assessment'] = json.loads(args.review_file.read_text()) if args.review_file else None
         if args.operation == 'postcheck':
             request['confirmation_note'] = args.confirmation_note if args.confirm_not_written == 'YES' else None
             request['expected_submission_id'] = args.expected_submission_id

@@ -34,12 +34,26 @@ def batch_status(store, run, tasks, owner):
                       or owner.get('reachable') is True and owner.get('run_id') is not None
                       and owner['run_id'] != run['id'])
     complete = run['status'] == 'closed' and owner_released
+    execution = json.loads(run['summary_json']).get('execution')
+    alerts = status_alerts(run, owner, all_acceptance, blockers, dict(Counter(task['status'] for task in tasks)))
+    if execution and execution.get('stop') and execution['stop']['kind'] in {'unexplained', 'execution_incomplete'}:
+        alerts.append({'code': 'batch_stopped_early', 'severity': 'blocked'})
+    if execution:
+        execution = {**execution, 'archive_eligible': execution['archive_eligible'] and owner_released and not blockers}
+    else:
+        execution = {'status': 'in_progress' if run['status'] != 'closed' else 'legacy_unverified',
+                     'archive_eligible': False}
+    from apps.oa.approvals.execution import execution_headline
+
+    execution['headline'] = (execution_headline(execution) if owner_released
+                             else '收尾待验｜等待执行进程退出')
     return {
+        'execution': execution,
         'acceptance': acceptance,
         'closeout': {'drained': not blockers, 'blockers': blockers,
                      'batch_complete': not blockers and not queued,
                      'complete': complete and not blockers and not queued},
-        'alerts': status_alerts(run, owner, all_acceptance, blockers, dict(Counter(task['status'] for task in tasks))),
+        'alerts': alerts,
         'agents': agents,
         'capacity': {'inflight': occupied, 'available': max(0, MAX_INFLIGHT - occupied), 'limit': MAX_INFLIGHT},
         'batch': {
