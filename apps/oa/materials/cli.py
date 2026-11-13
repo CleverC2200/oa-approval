@@ -19,6 +19,10 @@ def _parser():
     read.add_argument('--format', choices=('text', 'json'), default='text')
     read.add_argument('--view', choices=('full', 'outline'), default='full',
                       help='Outline returns structural counts and original locations; it does not count as reading coverage.')
+    read.add_argument('--page-offset', type=int, help='Read one bounded character range; requires --format json')
+    read.add_argument('--page-chars', type=int, help='Characters per page, 1–2000; default 2000')
+    read.add_argument('--pointer', default='', help='JSON Pointer to one original value, for example /authority_facts/0/value')
+    read.add_argument('--expected-sha256', help='Bind subsequent pages to the first page material_sha256')
     recognize = commands.add_parser('recognize', help='Read attachments through the authorized model interface.')
     source = recognize.add_mutually_exclusive_group(required=True)
     source.add_argument('--file', action='append', type=Path, dest='files')
@@ -101,7 +105,17 @@ def main(argv=None):
         return _progress(args)
     try:
         if args.operation == 'read':
-            from apps.oa.materials.read import read
+            from apps.oa.materials.read import read, read_page
+
+            if args.page_offset is not None:
+                if args.format != 'json':
+                    raise ValueError('material_read_page_requires_json')
+                print(json.dumps(read_page(args.material_file, offset=args.page_offset,
+                    page_chars=2000 if args.page_chars is None else args.page_chars,
+                    pointer=args.pointer, expected_sha256=args.expected_sha256, view=args.view), ensure_ascii=False))
+                return 0
+            if args.pointer or args.expected_sha256 or args.page_chars is not None:
+                raise ValueError('material_read_page_offset_required')
 
             text = read(args.material_file, view=args.view)
             if args.format == 'text':
