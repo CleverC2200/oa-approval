@@ -25,6 +25,8 @@ bash .codex/python.sh -m apps.oa.references --help
 
 审批负责轮次、任务、材料冻结、预览、提交与回查；材料负责完整准备、读取、识别和阅读副本；参考资料负责当前 TPM 报价导入。具体参数、副作用和结果见各操作 `--help`。能力内部直接组合函数，正常使用无需临时 Python 或 SQL。
 
+完整[能力地图与验证入口](.cursor/skills/verify-oa/features/README.md)按用户路径组织；[验证技能](.cursor/skills/verify-oa/SKILL.md)提供隔离演示、证据和清理步骤。
+
 ## 流程智能预测
 
 无需启动审批轮次，直接查询 OA 原生的后续流转预测：
