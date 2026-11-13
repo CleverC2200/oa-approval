@@ -223,10 +223,10 @@ def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch)
                     agent_workflow_key='general_expense')
     assert captured.value.diagnostics[0]['stage'] == 'bootstrap'
     assert captured.value.diagnostics[0]['reason'] == 'session_missing'
-    report = json.loads(next(tmp_path.rglob('collection-error.json')).read_text())
+    report = json.loads(Path(captured.value.diagnostics_file).read_text())
     assert report['diagnostics'] == captured.value.diagnostics
     assert report['diagnostics'][0]['http_status'] == 200
     assert report['diagnostics'][0]['attempt'] == 1
     assert report['diagnostics'][0]['elapsed_ms'] >= 0
-    assert 'private' not in json.dumps(report)
+    assert 'private' not in json.dumps({key: value for key, value in report.items() if key != 'material_directory'})
     assert app.inspect(1)['submissions'] == []

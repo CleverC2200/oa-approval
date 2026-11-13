@@ -26,7 +26,7 @@ def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) ->
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         if (len(infos) > 10000 or sum(info.file_size for info in infos) > 300_000_000
-                or any(info.file_size > (20_000_000 if info.filename.endswith('.xml') else 50_000_000) for info in infos)):
+                or any(info.file_size > (20_000_000 if info.filename.endswith('.xml') and not info.filename.startswith('xl/worksheets/') else 50_000_000) for info in infos)):
             raise ValueError("spreadsheet_image_limit")
         names = set(archive.namelist())
         if len(names) != len(infos):
@@ -104,27 +104,43 @@ def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) ->
         workbook_rels = relations('xl/workbook.xml')
         for sheet in xml('xl/workbook.xml').findall('s:sheets/s:sheet', _NS):
             sheet_path = referenced(workbook_rels, sheet.get(f'{{{_NS["r"]}}}id'))
-            document = xml(sheet_path)
-            shared = {
-                f.get('si'): f.text for f in document.findall('.//s:f', _NS)
-                if f.get('t') == 'shared' and f.text
-            }
-            for cell in document.findall('.//s:sheetData/s:row/s:c', _NS):
-                formula = cell.find('s:f', _NS)
-                if formula is None:
-                    continue
-                text = formula.text or ''
-                if not text and formula.get('t') == 'shared':
-                    text = shared[formula.get('si')]
+            info = archive.getinfo(sheet_path)
+            if info.file_size > 50_000_000 or total_bytes + info.file_size > 300_000_000:
+                raise ValueError("spreadsheet_image_limit")
+            total_bytes += info.file_size
+            shared = {}
+            drawings = []
+            pending = []
+            with archive.open(sheet_path) as stream:
+                for _, cell in ET.iterparse(stream, events=('end',)):
+                    if cell.tag == f'{{{_NS["s"]}}}drawing':
+                        drawings.append(cell.get(f'{{{_NS["r"]}}}id'))
+                    elif cell.tag == f'{{{_NS["s"]}}}c':
+                        formula = cell.find('s:f', _NS)
+                        if formula is not None:
+                            text = formula.text or ''
+                            if formula.get('t') == 'shared':
+                                key = formula.get('si')
+                                if text:
+                                    shared[key] = text
+                                else:
+                                    pending.append((cell.get('r'), key, True))
+                            if 'DISPIMG' in text:
+                                pending.append((cell.get('r'), text, False))
+                        cell.clear()
+                    elif cell.tag == f'{{{_NS["s"]}}}row':
+                        cell.clear()
+            for address, formula, shared_reference in pending:
+                text = shared[formula] if shared_reference else formula
                 if 'DISPIMG' not in text:
                     continue
                 match = re.search(r'DISPIMG\(\s*"([^"]+)"', text)
                 if match is None or match[1] not in cell_images:
                     raise ValueError("spreadsheet_cell_image_unresolved")
-                emit(cell_images[match[1]], f'{sheet.get("name")}!{cell.get("r")}')
+                emit(cell_images[match[1]], f'{sheet.get("name")}!{address}')
             sheet_rels = relations(sheet_path)
-            for drawing in document.findall('s:drawing', _NS):
-                drawing_path = referenced(sheet_rels, drawing.get(f'{{{_NS["r"]}}}id'))
+            for drawing in drawings:
+                drawing_path = referenced(sheet_rels, drawing)
                 drawing_rels = relations(drawing_path)
                 for anchor in xml(drawing_path):
                     for blip in anchor.findall('.//a:blip', _NS):

@@ -100,9 +100,46 @@ def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_
     assert api.posts == []
 
 
+def test_plain_collection_error_is_diagnosable_through_public_show(tmp_path):
+    from apps.oa.approvals import cli
+
+    app, api = service(tmp_path)
+    def failed(*_args, **_kwargs):
+        raise RuntimeError('attachment_content_incomplete')
+    app.collector = failed
+    run = app.pending()['run_id']
+    with pytest.raises(RuntimeError) as captured:
+        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    report = Path(cli.failure(captured.value)['diagnostics_file'])
+    body = json.loads(report.read_text())
+    assert body['task_id'] == 1 and body['run_id'] == run
+    assert body['diagnostics'] == [{'stage': 'collection', 'reason': 'attachment_content_incomplete',
+                                    'exception_type': 'RuntimeError'}]
+    assert app.inspect(1)['collection_failure']['diagnostics_file'] == str(report)
+    assert api.posts == []
+
+
+def test_collect_preserves_material_but_stops_before_review_with_missing_original(tmp_path):
+    app, api = service(tmp_path)
+    def incomplete(request_id, **kwargs):
+        material = collect(request_id, **kwargs)
+        material['invoice_evidence'] = {'invoices': [{'files': [{'media_type': 'png', 'body_read_status': 'not_read'}]}]}
+        return material
+    app.collector = incomplete
+    run = app.pending()['run_id']
+    with pytest.raises(RuntimeError, match='invoice_original_coverage_incomplete'):
+        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    details = app.inspect(1)
+    assert details['task']['status'] == 'failed' and Path(details['task']['material_file']).is_file()
+    assert details['reviews'] == [] and details['submissions'] == []
+    assert details['collection_failure']['diagnostics'][0]['source_path'] == 'invoice_evidence.invoices[0]'
+    assert api.posts == []
+
+
 def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave_task_busy(tmp_path, monkeypatch):
     from apps.oa.approvals import cli
     from apps.oa.approvals.collection.case import CollectionFailure
+    from apps.oa.runtime import control
 
     def failed(*_args, **_kwargs):
         raise CollectionFailure('travel_attachment_discovery_failed')
@@ -110,7 +147,7 @@ def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave
     app, api = service(tmp_path)
     app.collector = failed
     run = app.pending()['run_id']
-    monkeypatch.setattr(Path, 'write_text', lambda *_a, **_k: (_ for _ in ()).throw(OSError('synthetic write failure')))
+    monkeypatch.setattr(control, 'write_control_bytes_atomic', lambda *_a, **_k: (_ for _ in ()).throw(OSError('synthetic write failure')))
     with pytest.raises(CollectionFailure) as captured:
         app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     assert cli.failure(captured.value) == {'status': 'failed', 'error': 'travel_attachment_discovery_failed',

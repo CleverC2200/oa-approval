@@ -9,6 +9,8 @@ import re
 import sys
 
 
+_MAX_SAP_ROWS = 1_000_000
+
 def doris(payload):
     spec = importlib.util.spec_from_file_location('dealer_balance_connector', payload['connection']['doris_connector'])
     module = importlib.util.module_from_spec(spec)
@@ -45,26 +47,47 @@ def sap(payload):
     connection = Connection(ashost=config['sap_host'], sysnr=config['sap_sysnr'],
         client=config['sap_client'], user=config['sap_user'], passwd=payload['sap_password'], lang='ZH', trace='0')
 
-    def read(table, fields, options, limit=10000):
-        request = {'QUERY_TABLE': table, 'DELIMITER': '|', 'ROWCOUNT': limit,
+    def read(table, fields, options):
+        request = {'QUERY_TABLE': table, 'DELIMITER': '|', 'ROWCOUNT': 10000, 'GET_SORTED': 'X',
                    'FIELDS': [{'FIELDNAME': f} for f in fields], 'OPTIONS': [{'TEXT': s} for s in options]}
+
+        def scan():
+            values, pages = [], []
+            first = None
+            previous = None
+            while True:
+                page_request = {**request, 'ROWSKIPS': len(values)}
+                response = connection.call('RFC_READ_TABLE', **page_request)
+                page = response['DATA']
+                if (len(page) > request['ROWCOUNT'] or len(values) + len(page) > _MAX_SAP_ROWS
+                        or (page and page == previous)):
+                    raise RuntimeError('dealer_closure_sap_rows_truncated')
+                if first is None:
+                    first = response
+                pages.append({'request': page_request, 'row_count': len(page)})
+                values.extend(page)
+                if len(page) < request['ROWCOUNT']:
+                    return {**first, 'DATA': values}, pages
+                previous = page
+
         try:
-            response = connection.call('RFC_READ_TABLE', **request)
+            response, pages = scan()
+            verification = []
+            if len(pages) > 1:
+                repeated, verification = scan()
+                if response['DATA'] != repeated['DATA']:
+                    raise RuntimeError('dealer_closure_sap_snapshot_changed')
+            rows = []
+            for item in response['DATA']:
+                parts = item['WA'].split('|', len(fields) - 1)
+                if len(parts) != len(fields):
+                    raise RuntimeError('dealer_closure_sap_columns_invalid')
+                rows.append(dict(zip(fields, [p.strip() for p in parts])))
+            return {'request': request, 'response': response, 'rows': rows, 'complete': True,
+                    'pages': pages, 'verification_pages': verification}
         except Exception as error:
             error.source_stage = table
             raise
-        values = response.get('DATA', [])
-        if len(values) >= limit:
-            error = RuntimeError('dealer_closure_sap_rows_truncated')
-            error.source_stage = table
-            raise error
-        rows = []
-        for item in values:
-            parts = item['WA'].split('|', len(fields) - 1)
-            if len(parts) != len(fields):
-                raise RuntimeError('dealer_closure_sap_columns_invalid')
-            rows.append(dict(zip(fields, [p.strip() for p in parts])))
-        return {'request': request, 'response': response, 'rows': rows, 'complete': True}
 
     def values_condition(field, values):
         if not values or any(not re.fullmatch(r'[A-Za-z0-9]{1,12}', str(v)) for v in values):
@@ -149,7 +172,7 @@ def sap(payload):
             if not re.fullmatch(r'[0-9]{10}', account):
                 raise ValueError('dealer_closure_preaccrual_account_invalid')
             index = read('BSIS', ['BUKRS', 'HKONT', 'GJAHR', 'BELNR', 'BUZEI', 'BUDAT', 'SHKZG', 'DMBTR', 'KOSTL', 'XNEGP'],
-                [f"BUKRS = '{company}' AND HKONT = '{account}'", f"AND BUDAT <= '{cutoff}'"], limit=100000)
+                [f"BUKRS = '{company}' AND HKONT = '{account}'", f"AND BUDAT <= '{cutoff}'"])
             indexed = {(r['BELNR'], r['GJAHR'], r['BUZEI']): r for r in index['rows']}
             groups = defaultdict(set)
             for row in index['rows']:
@@ -184,7 +207,8 @@ def sap(payload):
                      f"AND GJAHR = '{row['GJAHR']}' AND BUZEI = '{row['BUZEI']}'"]))
             out['preaccrual'].append({'account': account, 'index_rows': len(indexed),
                 'index_keys_seen': len(seen), 'complete': True, 'target_rows': target,
-                'index_request': index['request'], 'reference_batches': batches, 'target_details': details})
+                'index_request': index['request'], 'index_pages': index['pages'],
+                'index_verification_pages': index['verification_pages'], 'reference_batches': batches, 'target_details': details})
         for program in ['ZSSR16', 'ZFRR04', 'ZFRR08']:
             response = connection.call('RPY_PROGRAM_READ', PROGRAM_NAME=program, ONLY_SOURCE='X', WITH_INCLUDELIST='X')
             out['programs'][program] = response

@@ -209,3 +209,46 @@ def test_symlinked_materials_parent_does_not_remove_outside_empty_directories(tm
     materials.symlink_to(outside, target_is_directory=True)
     assert retention.cleanup(app.store, execute=True)['status'] == 'completed'
     assert empty.is_dir()
+
+
+def test_successful_retry_preserves_previous_failed_attempt_and_receipt(tmp_path):
+    from tests.approvals.test_operations import collect
+
+    app, api = service(tmp_path)
+
+    def failed(request_id, **kwargs):
+        collect(request_id, **kwargs)
+        raise RuntimeError('attachment_content_incomplete')
+
+    app.collector = failed
+    run = app.pending()['run_id']
+    with pytest.raises(RuntimeError) as captured:
+        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    receipt = Path(captured.value.diagnostics_file)
+    original_receipt = receipt.read_bytes()
+    failed_directory = Path(json.loads(original_receipt)['material_directory'])
+    original = next((failed_directory / 'attachments').iterdir())
+    original_bytes = original.read_bytes()
+    app.collector = collect
+    retry_run = app.pending(request_ids=['101'], retry_failed=True)['run_id']
+    retried = app.collect(retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
+    assert app.submit(1, opinion='合成意见', confirm_write=True)['status'] == 'submitted'
+    assert len(api.posts) == 1
+    assert retention.cleanup(app.store, execute=True)['files'] == 0
+    assert original.read_bytes() == original_bytes and receipt.read_bytes() == original_receipt
+    assert Path(retried['material_file']).is_file()
+
+
+def test_rejected_submission_evidence_survives_successful_retry(tmp_path):
+    app, api = service(tmp_path)
+    failed = collected(app)
+    writer = api.submit_and_verify
+    api.submit_and_verify = lambda *_: {'failure_code': receipts.SUBMIT_REJECTED}
+    assert app.submit(1, opinion='首次合成意见', confirm_write=True)['status'] == 'failed'
+    api.submit_and_verify = writer
+    retry_run = app.pending(request_ids=['101'], retry_failed=True)['run_id']
+    retried = app.collect(retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
+    assert app.submit(1, opinion='复审合成意见', confirm_write=True)['status'] == 'submitted'
+    assert retention.cleanup(app.store, execute=True)['files'] == 0
+    assert Path(failed['material_file']).is_file() and Path(retried['material_file']).is_file()
+    assert [row['status'] for row in app.inspect(1)['submissions']] == ['failed', 'submitted']

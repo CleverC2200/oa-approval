@@ -135,13 +135,18 @@ def test_collect_reads_linked_original_body_via_native_context(original_transpor
     assert 'session=fixed' not in json.dumps(material, default=str)
 
 
+@pytest.fixture(params=['jpg', 'png'])
+def image_kind(request):
+    return request.param
+
+
 @pytest.fixture
-def jpg_original(original_transport):
+def jpg_original(original_transport, image_kind):
     state = original_transport
     with fitz.open(stream=state.pdf, filetype='pdf') as document:
-        state.pdf = document[0].get_pixmap().tobytes('jpeg')
-    state.content_type = 'image/jpeg'
-    state.detail['flist'][0]['type'] = 'jpg'
+        state.pdf = document[0].get_pixmap().tobytes('jpeg' if image_kind == 'jpg' else 'png')
+    state.content_type = 'image/jpeg' if image_kind == 'jpg' else 'image/png'
+    state.detail['flist'][0]['type'] = image_kind
     state.detail['modify_info']['pdf'] = ''
     return state
 
@@ -155,7 +160,7 @@ def test_collect_prepares_linked_jpg_original(jpg_original, tmp_path, cloud):
     invoice = material['invoice_evidence']['invoices'][0]
     assert invoice['body_read_status'] == 'content_read'
     assert invoice['files'][0]['resource_id'] == '202'
-    assert material['resources'][0]['local_readonly_path'].endswith('.jpg')
+    assert material['resources'][0]['local_readonly_path'].endswith('.' + state.detail['flist'][0]['type'])
     assert material['prepared']['manifest'][0]['status'] == 'image'
     assert len(material['prepared']['images']) == 1
 
@@ -165,6 +170,8 @@ def test_collect_preserves_and_prepares_every_mpo_frame(jpg_original, tmp_path, 
     from PIL import Image
 
     state = jpg_original
+    state.detail['flist'][0]['type'] = 'jpg'
+    state.content_type = 'image/jpeg'
     body = BytesIO()
     first = Image.new('RGB', (48, 32), 'red')
     second = Image.new('L', (24, 16), 180)
@@ -234,7 +241,7 @@ def test_browser_fallback_validates_jpg_original(jpg_original, tmp_path, monkeyp
             state.pdf = document.tobytes()
 
     def browser(_resource, *, dest_dir, **_kwargs):
-        path = dest_dir / 'browser-original.jpg'
+        path = dest_dir / ('browser-original.' + state.detail['flist'][0]['type'])
         path.write_bytes(state.pdf)
         return original_source.Downloaded(path)
 

@@ -188,23 +188,35 @@ class Approval:
             files = material_paths(material) | {material_file} | {path for path in (directory / "rules").rglob("*") if path.is_file()}
             frozen = {str(path):file_digest(path) for path in files}
             frozen_task = self.store.freeze(task["id"],material,material_file,file_digest(material_file),frozen,rule)
+            from apps.oa.approvals.collection import invoice_originals
+            from apps.oa.approvals.collection.case import CollectionFailure
+
+            missing = invoice_originals.readiness_diagnostics(material)
+            if missing:
+                self.store.fail(task['id'], 'invoice_original_coverage_incomplete', run_id=run_id)
+                raise CollectionFailure('invoice_original_coverage_incomplete', diagnostics=missing)
             return {"run_id":run_id,"task_id":task["id"],"workflow_key":task["workflow_key"],
                 "request_id":task["request_id"],"material_file":str(material_file),"rule_file":str(rule),"rules_root":str(directory / "rules"),"status":frozen_task["status"],
                 **({"reason":frozen_task["error"]} if frozen_task["status"] == "failed" else {})}
         except Exception as error:
             from apps.oa.approvals.collection.case import CollectionFailure
 
-            from apps.oa.approvals.sources.auth import AuthFailure
+            from apps.oa.approvals.client import collection_diagnostics_file
+            from apps.oa.runtime import control
 
-            if isinstance(error, (CollectionFailure, AuthFailure)):
-                report = directory / "collection-error.json"
-                try:
-                    report.write_text(encoded({"error": str(error), "counts": error.counts,
-                        "diagnostics": error.diagnostics}), encoding="utf-8")
-                    error.diagnostics_file = str(report)
-                except OSError:
-                    error.diagnostics_write_failed = True
-            self.store.fail_collection(task["id"],type(error).__name__+":"+str(error)[:200])
+            code = str(error) if re.fullmatch(r'[a-z][a-z0-9_]*', str(error)) else 'collection_failed'
+            safe = CollectionFailure(code, getattr(error, 'counts', {}), getattr(error, 'diagnostics', []))
+            diagnostics = safe.diagnostics or [{'stage': 'collection', 'reason': code,
+                                               'exception_type': type(error).__name__}]
+            report = collection_diagnostics_file(self.root, task)
+            try:
+                control.write_control_bytes_atomic(report, encoded({'run_id': run_id, 'task_id': task['id'],
+                    'agent_id': task['agent_id'], 'material_directory': str(directory),
+                    'error': code, 'counts': safe.counts, 'diagnostics': diagnostics}).encode())
+                error.diagnostics_file = str(report)
+            except OSError:
+                error.diagnostics_write_failed = True
+            self.store.fail_collection(task["id"],type(error).__name__+":"+code)
             raise
 
     def fail(self, run_id, task_id, reason):

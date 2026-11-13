@@ -15,6 +15,20 @@ _FINANCE_FLOWS = {
 }
 
 
+def readiness_diagnostics(material: dict) -> list[dict]:
+    if material.get('workflow_key') not in _FINANCE_FLOWS:
+        return []
+    result = []
+    for index, invoice in enumerate(material.get('invoice_evidence', {}).get('invoices', [])):
+        if (body_coverage(invoice, material.get('resources', []), material.get('prepared', {}))
+                not in {'content_read', 'partial_read'}
+                or not any(file.get('original_source') and file.get('body_read_status') == 'content_read'
+                           for file in invoice.get('files', []))):
+            result.append({'stage': 'invoice_original_coverage', 'reason': 'required_original_unread',
+                           'source_path': f'invoice_evidence.invoices[{index}]'})
+    return result
+
+
 def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict, *, base_url: str) -> list[dict]:
 
     invoices = evidence.get('invoices') or []
@@ -106,10 +120,10 @@ def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial)
     resource = [item for item in resource_rows if item.get('resource_id') == resource_id]
     coverage = prepared.coverage(resource_id)
     file_type = source.get('file_type', 'pdf')
-    if file_type not in {'pdf', 'jpg'} or coverage is None:
+    if file_type not in {'pdf', 'jpg', 'png'} or coverage is None:
         raise RuntimeError('attachment_content_incomplete')
-    image = file_type == 'jpg'
-    media_type = 'image/jpeg' if image else 'application/pdf'
+    image = file_type in {'jpg', 'png'}
+    media_type = {'jpg': 'image/jpeg', 'png': 'image/png', 'pdf': 'application/pdf'}[file_type]
     statuses = {'image', 'image_converted'} if image else {'pdf_rendered'}
     page_count = (coverage.declared_page_count or 1) if image else coverage.declared_page_count
     if (len(resource) != 1 or resource[0].get('media_type') != media_type
