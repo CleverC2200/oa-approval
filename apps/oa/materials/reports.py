@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 import json
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 
 class RecognitionRecord(TypedDict):
@@ -27,6 +27,7 @@ class RecognitionRecord(TypedDict):
     reason: NotRequired[str]
     region: NotRequired[list[int]]
     error_code: NotRequired[str]
+    failure_stage: NotRequired[Literal['selection_validation']]
     failed_part: NotRequired[dict[str, Any]]
     failed_response: NotRequired[dict[str, Any]]
     observations_file: NotRequired[str]
@@ -42,6 +43,7 @@ class ProgressSummary(TypedDict):
     region: NotRequired[list[int]]
     reason: NotRequired[str]
     error_code: NotRequired[str]
+    failure_stage: NotRequired[Literal['selection_validation']]
     failed_part: NotRequired[dict[str, Any]]
 
 
@@ -63,12 +65,12 @@ def summarize(report: Mapping[str, Any], report_file: Path) -> ProgressSummary:
     if report.get('selection') is not None:
         summary['selection'] = {name: report['selection'][name] for name in ('resource_id', 'page')
                                 if name in report['selection']}
-    for name in ('region', 'reason', 'error_code'):
+    for name in ('region', 'reason', 'error_code', 'failure_stage'):
         if name in report:
             summary[name] = report[name]
     if 'failed_part' in report:
         names = ('part_id', 'kind', 'resource_id', 'prepared_resource_id', 'page_number', 'evidence_ref',
-                 'failed_tile_box', 'region', 'rotate')
+                 'failed_tile_box', 'region', 'rotate', 'source_image_size')
         summary['failed_part'] = {name: report['failed_part'][name] for name in names if name in report['failed_part']}
     return summary
 
@@ -131,6 +133,10 @@ def _validate(report: dict) -> None:
     for name in ('reason', 'error_code'):
         if name in report and not isinstance(report[name], str):
             raise ValueError
+    if 'failure_stage' in report and (
+            report['failure_stage'] != 'selection_validation' or report['status'] != 'failed'
+            or report.get('error_code') != 'attachment_region_out_of_bounds' or report['parts']):
+        raise ValueError
     if 'region' in report and not _box(report['region']):
         raise ValueError
     if 'failed_part' in report:

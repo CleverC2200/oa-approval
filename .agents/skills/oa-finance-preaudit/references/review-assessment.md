@@ -16,6 +16,10 @@ bash .codex/python.sh -m apps.oa.materials read "$OA_MATERIAL_FILE" --format jso
 
 ## 审核交付
 
+本流程允许使用附件识别入口时，局部复读先从已完成原页报告的 `source_image_size` 核对尺寸，再以旋转前原图像素填写 `--region X0 Y0 X1 Y1`。确认选区覆盖目标文字，不凭屏幕显示比例猜坐标，不自动截掉越界部分。
+
+`status=failed` 且 `failure_stage=selection_validation` 表示选区在送交模型前被本地校验拒绝。保留该失败报告，按返回的原图尺寸重新确定选区，用新输出目录完成复读；失败报告本身不能作为完成识别提交。只有修正后的识别和全部适用核对完成，才能交付完成结果，证据文件保留原拒绝报告及新的复读报告。这只适用于登记审核失败前的选区参数纠正，不适用于原件缺失或变化、权限、模型读取失败或未知提交；已经登记的 `incomplete` / `technical_failure` 仍须按精确授权重新采集，不自动解除保护。
+
 审核 Agent 在最终交付中增加独立的审核结果 JSON 文件，主 Agent 核对后通过 `submit --review-file <绝对路径>` 提交；真实写入必需，海外也沿用此绑定检查。该文件记录已实际执行的核验，不由模板或脚本代填完成结论：
 
 ```json
