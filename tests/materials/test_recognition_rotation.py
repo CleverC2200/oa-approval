@@ -64,6 +64,7 @@ def test_recognize_rotates_reading_copy_clockwise(tmp_path, requests, rotate, si
     assert part['prepared_resource_id'] == 'file-1'
     assert part['source_image_path'] == str(source)
     assert part['page_number'] == 1
+    assert part['source_image_size'] == [3, 2]
 
 
 def test_region_is_cropped_in_original_coordinates_before_rotation(tmp_path, requests):
@@ -103,6 +104,45 @@ def test_cli_accepts_clockwise_rotation(tmp_path, requests, capsys):
     assert summary['coverage'] == 'all_prepared_content'
     assert report['parts'][0]['rotate'] == 270
     assert image_pixels(requests[0])[0] == (2, 3)
+
+
+def test_cli_region_validation_preserves_failure_and_allows_corrected_selection(tmp_path, requests, capsys):
+    source = tmp_path / 'page.png'
+    Image.new('RGB', (1191, 794), 'white').save(source)
+    original = source.read_bytes()
+    rejected = tmp_path / 'rejected'
+    code = materials_cli.main(['recognize', '--file', str(source),
+        '--region', '680', '100', '1450', '350', '--output-dir', str(rejected)])
+
+    assert code == 1
+    summary = json.loads(capsys.readouterr().out)
+    assert summary['status'] == 'failed'
+    assert summary['error_code'] == 'attachment_region_out_of_bounds'
+    assert summary['failure_stage'] == 'selection_validation'
+    assert summary['failed_part']['source_image_size'] == [1191, 794]
+    assert summary['failed_part']['region'] == [680, 100, 1450, 350]
+    assert requests == []
+    report_file = Path(summary['report_file'])
+    rejected_report = report_file.read_bytes()
+    assert materials_cli.main(['progress', str(report_file)]) == 0
+    progress = json.loads(capsys.readouterr().out)
+    assert progress['failure_stage'] == 'selection_validation'
+    assert progress['failed_part']['source_image_size'] == [1191, 794]
+
+    code = materials_cli.main(['recognize', '--file', str(source),
+        '--region', '680', '100', '1191', '350', '--output-dir', str(tmp_path / 'corrected')])
+
+    assert code == 0
+    corrected = json.loads(capsys.readouterr().out)
+    report = json.loads(Path(corrected['report_file']).read_text())
+    assert report['status'] == 'complete'
+    assert report['parts'][0]['region'] == [680, 100, 1191, 350]
+    assert report['parts'][0]['source_image_size'] == [1191, 794]
+    assert 'failure_stage' not in report
+    assert len(requests) == 1
+    assert image_pixels(requests[0])[0] == (511, 250)
+    assert source.read_bytes() == original
+    assert report_file.read_bytes() == rejected_report
 
 
 def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_path, requests):

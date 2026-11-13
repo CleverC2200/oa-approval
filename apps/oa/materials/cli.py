@@ -50,7 +50,7 @@ def _parser():
 
 
 def _recognize(args):
-    from apps.oa.materials import recognize
+    from apps.oa.materials import recognize, reports
 
     values = vars(args).copy()
     values.pop('operation')
@@ -60,11 +60,13 @@ def _recognize(args):
         values['prompt'] = recognize.DEFAULT_PROMPT
     try:
         report = recognize.recognize(**values)
+        diagnostic = reports.summarize(report, Path(report['report_file']))
         print(json.dumps({key: report[key] for key in ('status', 'report_file', 'model', 'transport')}
                          | {'parts': len(report['parts']), 'skipped_sources': len(report.get('skipped_sources', [])),
                             'coverage': report.get('coverage'), 'reason': report.get('reason'),
                             'selection': report.get('selection'),
-                            'observations_file': report.get('observations_file'), 'error_code': report.get('error_code')}, ensure_ascii=False))
+                            'observations_file': report.get('observations_file'), 'error_code': report.get('error_code')}
+                         | {key: diagnostic[key] for key in ('failure_stage', 'failed_part') if key in diagnostic}, ensure_ascii=False))
         return 0 if report['status'] in {'complete', 'skipped'} else 1
     except (OSError, ValueError) as error:
         code = str(error) if str(error) in {'attachment_api_key_missing', 'attachment_recognition_input_invalid', 'attachment_recognition_timeout_invalid', 'attachment_region_invalid', 'attachment_region_source_invalid', 'attachment_rotation_invalid', 'attachment_resource_invalid', 'attachment_page_invalid'} else 'attachment_recognition_start_failed'

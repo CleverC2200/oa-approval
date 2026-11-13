@@ -484,6 +484,10 @@ def _plan_reading(snapshot: _InputSnapshot, selection: _Selection) -> _ReadPlan:
                      any(part['kind'] == 'image' for part, _ in parts))
 
 
+class _SelectionValidationError(ValueError):
+    pass
+
+
 class _RecognitionSession:
     def __init__(self, options: _RecognitionOptions, *, post, monotonic, on_progress=None):
         self.options = options
@@ -532,6 +536,8 @@ class _RecognitionSession:
             code = str(error)
             self.report.update(status='failed', error_code=(code if code.startswith(('attachment_', 'frozen_'))
                                                           else 'attachment_recognition_failed'))
+            if isinstance(error, _SelectionValidationError):
+                self.report['failure_stage'] = 'selection_validation'
             if self._current:
                 self.report['failed_part'] = self._current
         self.report['completed_at'] = datetime.now(timezone.utc).isoformat()
@@ -562,18 +568,19 @@ class _RecognitionSession:
             current['image_normalization'] = {'kind': 'png_ztxt_compression_method',
                 'source_sha256': digest, 'reading_copy_sha256': _digest(reading_copy)}
         raw = reading_copy
-        if selection.region is None:
-            return digest, _image_tiles(raw, rotate=selection.rotate)
         region = selection.region
-        current.update(region=list(region), content_sha256=digest)
+        if region is not None:
+            current.update(region=list(region), content_sha256=digest)
         with _open_image(raw) as original:
             current['source_image_size'] = list(original.size)
+            if region is None:
+                return digest, _image_tiles(raw, rotate=selection.rotate)
             if selection.rotate and getattr(original, 'n_frames', 1) > 1:
                 raise ValueError('attachment_multiframe_rotation_unsupported')
             if original.format not in {'JPEG', 'PNG', 'WEBP', 'GIF'} or getattr(original, 'n_frames', 1) != 1:
                 raise ValueError('attachment_region_source_invalid')
             if region[2] > original.width or region[3] > original.height:
-                raise ValueError('attachment_region_out_of_bounds')
+                raise _SelectionValidationError('attachment_region_out_of_bounds')
             encoded = _png_crop(original, region)
         current['region_png_sha256'] = _digest(encoded)
         return digest, [(region, _image_block(encoded, rotate=selection.rotate))]
