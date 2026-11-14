@@ -82,7 +82,7 @@ def submit_overseas(api, writer, request_id, material, plan, *, origins):
             'response_code': code if re.fullmatch(r'[A-Z0-9_-]{1,64}', code) else 'unavailable',
             "failure_code":receipts.SUBMIT_REJECTED if code == "ERROR" else "writer_result_unknown"}
     pending = any(str(row.get("request_id")) == request_id for row in api.pending_rows())
-    done = handled_since(api.handled_rows(),request_id,started_at)
+    done = handled_since(api.handled_rows(max_pages=None),request_id,started_at)
     fields_match = check_overseas_fields(api,request_id,material,plan,origins=origins)
     result = receipts.verification_result(done,pending,submit_ok=True,fields_match=fields_match)
     return {**result,"failure_code":None if result["postcheck_done_hit"] else receipts.POSTCHECK_TIMEOUT}

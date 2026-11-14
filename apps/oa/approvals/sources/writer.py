@@ -119,7 +119,7 @@ class FrozenWriterApi(OaApi):
                     from apps.oa.approvals.sources.dealer_closure import feedback_verified
                     done_hit = feedback_verified(self, dealer_material, remark, started_at)
                 else:
-                    done_hit = handled_since(self.handled_rows(),target,started_at)
+                    done_hit = handled_since(self.handled_rows(max_pages=None),target,started_at)
                 pending_hit = any(
                     row.get("request_id") == target for row in self.pending_rows()
                 )

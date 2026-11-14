@@ -1,7 +1,7 @@
 from datetime import datetime
 from io import BytesIO
 import json
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -12,6 +12,37 @@ from apps.oa.approvals.sources.oa import HANDLED_ENDPOINTS
 from apps.oa.approvals.sources.oa import TODO_ENDPOINT
 from apps.oa.approvals.sources.writer import FrozenWriterApi
 from apps.oa.approvals.sources.writer import SUBMIT_ENDPOINT
+
+
+@pytest.mark.parametrize('target_page', [2, 6])
+def test_writer_finds_current_receipt_after_old_receipt_and_fifth_page(monkeypatch, target_page):
+    posts = []
+    monkeypatch.setattr(writer_api.time, 'sleep', lambda _: None)
+    def transport(request, **_kwargs):
+        path = urlparse(request.full_url).path
+        if path == SUBMIT_ENDPOINT:
+            posts.append(request.data)
+            result = {'code': 'SUCCESS'}
+        elif path == TODO_ENDPOINT:
+            result = {'data': []}
+        else:
+            assert path in HANDLED_ENDPOINTS
+            page = int(parse_qs(request.data.decode())['pageNo'][0])
+            rows = [{'requestId': str(page * 1000 + index), 'operateDate': '2020-01-01',
+                     'operateTime': '00:00:00'} for index in range(100)]
+            if page == 1:
+                rows[0]['requestId'] = '101'
+            if page == target_page:
+                value = datetime.now(ZoneInfo('Asia/Shanghai'))
+                rows = [{'requestId': '101', 'operateDate': value.strftime('%Y-%m-%d'),
+                         'operateTime': value.strftime('%H:%M:%S')}]
+            result = {'data': rows}
+        return BytesIO(json.dumps(result).encode())
+    monkeypatch.setattr(safe_http, 'urlopen', transport)
+    writer = FrozenWriterApi('fake-token', 'fake-user', app_id='fake-app', base_url='https://oa.example.test')
+    result = writer.submit_and_verify('101', 'Synthetic opinion')
+    assert result == {'submit_ok': True, 'done_hit': True, 'postcheck_done_hit': True, 'failure_code': None}
+    assert len(posts) == 1
 
 
 @pytest.mark.parametrize("handled_time, confirmed", [(None, False), ("2020-01-01 12:00:00", False), ("fresh", True)])
