@@ -251,6 +251,9 @@ class Approval:
                 raise ValueError("task_not_reviewable")
             if self.store.run(task["last_run_id"])["status"] != "running":
                 raise ValueError("run_blocked")
+            if observations is not None and (not isinstance(observations, list)
+                    or any(not isinstance(item, dict) for item in observations)):
+                raise ValueError('attachment_observations_invalid')
             from apps.oa.approvals.review import record_failure, validate_assessment
 
             try:
