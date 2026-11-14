@@ -59,3 +59,24 @@ def test_only_actual_empty_queue_gets_empty_headline(tmp_path):
     assert status['execution']['remaining_count'] == 0
     assert status['execution']['archive_eligible'] is True
     app.store.connection.close()
+
+
+def test_legacy_empty_batch_has_unknown_pending_count_without_rewriting_history(tmp_path):
+    app, api = service(tmp_path)
+    api.rows = []
+    run = app.pending(batch_size=40)['run_id']
+    app.close(run)
+    legacy = json.loads(app.store.run(run)['summary_json'])
+    legacy.pop('pending')
+    legacy['execution'].pop('remaining_count')
+    legacy['execution'].pop('selected_remaining_count')
+    with app.store.connection:
+        app.store.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (json.dumps(legacy), run))
+    status = query(tmp_path, 'status', run_id=run, view='batch')
+    assert status['pending'] is None
+    assert status['execution']['status'] == 'legacy_unverified'
+    assert '无待审' not in status['execution']['headline']
+    assert status['execution']['remaining_count'] is None
+    assert status['execution']['archive_eligible'] is False
+    assert json.loads(app.store.run(run)['summary_json']) == legacy
+    app.store.connection.close()

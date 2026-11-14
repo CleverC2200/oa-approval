@@ -40,6 +40,10 @@ def batch_status(store, run, tasks, owner):
         alerts.append({'code': 'batch_stopped_early', 'severity': 'blocked'})
     if execution:
         execution = {**execution, 'archive_eligible': execution['archive_eligible'] and owner_released and not blockers}
+        if (execution['status'] == 'success' and not execution.get('verified_count')
+                and json.loads(run['summary_json']).get('pending') is None):
+            execution.update(status='legacy_unverified', archive_eligible=False,
+                             remaining_count=None, selected_remaining_count=None)
     else:
         execution = {'status': 'in_progress' if run['status'] != 'closed' else 'legacy_unverified',
                      'archive_eligible': False}
