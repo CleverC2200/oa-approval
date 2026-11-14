@@ -48,13 +48,14 @@ def _digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
-def _read(path: Path) -> bytes:
+def _read(path: Path, *, max_bytes: int | None = None) -> bytes:
+    limit = MAX_FILE_BYTES if max_bytes is None else max_bytes
     metadata = path.lstat()
     if not stat.S_ISREG(metadata.st_mode):
         raise ValueError('attachment_file_invalid')
-    if metadata.st_size > MAX_FILE_BYTES:
+    if metadata.st_size > limit:
         raise ValueError('attachment_file_too_large')
-    raw = runtime_control.read_control_bytes(path, max_bytes=MAX_FILE_BYTES)
+    raw = runtime_control.read_control_bytes(path, max_bytes=limit)
     if raw is None:
         raise ValueError('attachment_file_missing')
     return raw
@@ -311,7 +312,7 @@ def _image_tiles(raw: bytes, *, rotate: int = 0):
 
 
 def _material(path: Path) -> tuple[dict, dict]:
-    raw = _read(path)
+    raw = _read(path, max_bytes=MAX_SOURCE_BYTES)
     material = json.loads(raw)
     if not isinstance(material, dict) or not isinstance(material.get('prepared'), dict):
         raise ValueError('attachment_content_incomplete')

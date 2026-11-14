@@ -62,6 +62,24 @@ def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
     assert "100.00" in details["contents"][0]["content"]
 
 
+@pytest.mark.parametrize('observations', [{'status': 'complete'}, ['invalid'], 'invalid', 3])
+def test_invalid_observations_are_correctable_before_any_review_or_write(tmp_path, observations):
+    app, api = service(tmp_path)
+    run = app.pending()
+    task = app.collect(run['run_id'], agent_id='travel-agent', expected_task_id=1, agent_workflow_key='travel_expense')
+    with pytest.raises(ValueError, match='attachment_observations_invalid'):
+        app.submit(task['task_id'], opinion='合成意见', observations=observations, confirm_write=True,
+                   review_assessment=completed_review(app, task['task_id']))
+    details = app.inspect(task['task_id'])
+    assert details['task']['status'] == 'reviewing'
+    assert details['reviews'] == [] and details['submissions'] == []
+    assert app.store.review_assessments(task['task_id']) == []
+    assert api.posts == []
+    result = app.submit(task['task_id'], opinion='合成意见', observations=[], confirm_write=True,
+                        review_assessment=completed_review(app, task['task_id']))
+    assert result['status'] == 'submitted' and len(api.posts) == 1
+
+
 def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_or_submission(tmp_path, monkeypatch):
     from apps.oa.approvals import cli
     from apps.oa.approvals.sources import travel as travel_orders
