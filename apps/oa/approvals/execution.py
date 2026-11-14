@@ -110,4 +110,4 @@ def execution_headline(execution):
             'stopped': f'已停止｜已提交并验证 {verified} 单',
             'preview': f"仅预览 {execution.get('preview_count', 0)} 单，未提交",
             'in_progress': '运行中｜等待本轮收尾',
-            'legacy_unverified': '历史结果待核｜未保存执行快照'}[state]
+            'legacy_unverified': '历史结果待核｜快照证据不完整'}[state]
