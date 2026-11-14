@@ -5,6 +5,7 @@ from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 from tests.approvals.source_fakes import POLICY
 
 from io import BytesIO
+from pathlib import Path
 
 from copy import deepcopy
 
@@ -269,6 +270,27 @@ def test_collect_reads_cloud_original_when_native_document_remains_denied(origin
     assert not any('synthetic-token' in p.read_text(errors='ignore')
                    for p in (tmp_path / 'attachments').rglob('*.json'))
 
+@pytest.mark.parametrize('kind', ['valid_prefix', 'late_header', 'invalid_body'])
+def test_cloud_pdf_preamble_is_parsed_without_changing_original(original_transport, tmp_path, kind):
+    state = original_transport
+    state.still_denied = True
+    prefix = b'\x00\x01synthetic-preamble\x00\x01'
+    state.cloud_pdf = (prefix + state.pdf if kind == 'valid_prefix' else
+                       b'x' * 1024 + state.pdf if kind == 'late_header' else
+                       prefix + b'%PDF-1.7 invalid document %%EOF')
+    if kind != 'valid_prefix':
+        with pytest.raises(RuntimeError, match='^attachment_content_incomplete$'):
+            collect_original(state, tmp_path)
+        assert not list((tmp_path / 'prepared').rglob('*.png'))
+        return
+    material = collect_original(state, tmp_path)
+    resource, = material['resources']
+    assert Path(resource['local_readonly_path']).read_bytes() == state.cloud_pdf
+    assert resource['resource_id'] == '202'
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'content_read'
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+    assert NUMBER in material['prepared']['structured_contents'][0]['key_text'][0]
+
 def test_cloud_body_is_not_prepared_after_linked_file_changes(original_transport, tmp_path):
     state = original_transport
     state.still_denied = True
@@ -284,10 +306,11 @@ def test_cloud_body_is_not_prepared_after_linked_file_changes(original_transport
     ('actor', 'rpa_session_invalid'),
     ('data_id', 'resource_ownership_untrusted'),
 ])
-def test_cloud_download_rechecks_live_identity_before_preparation(original_transport, tmp_path, change, expected):
+@pytest.mark.parametrize('preamble', [b'', b'\x00synthetic-prefix\x01'])
+def test_cloud_download_rechecks_live_identity_before_preparation(original_transport, tmp_path, change, expected, preamble):
     state = original_transport
     state.still_denied = True
-    state.cloud_pdf = state.pdf
+    state.cloud_pdf = preamble + state.pdf
     if change == 'data_id':
         field = state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
         state.after_cloud_download = lambda: field.update(fieldValue='102')
