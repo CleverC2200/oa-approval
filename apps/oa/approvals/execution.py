@@ -48,7 +48,9 @@ def validate_stop(store, run_id, value, *, handoff=False):
 def close_execution(store, run, tasks, stop):
     import json
 
-    frozen = json.loads(run['summary_json']).get('batch')
+    summary = json.loads(run['summary_json'])
+    frozen = summary.get('batch')
+    pending = summary.get('pending')
     scoped = tasks if frozen is None else [store.get_task(i) for i in frozen['task_ids']]
     acceptance = submission_acceptance(store, run['id'], scoped)
     queued = sum(t['status'] == 'queued' for t in scoped)
@@ -75,7 +77,12 @@ def close_execution(store, run, tasks, stop):
         status = 'preview'
     else:
         status = 'success'
+    if status == 'success' and not verified and (pending is None or pending['raw_count']):
+        status = 'no_eligible'
+    remaining = None if pending is None else pending['raw_count'] - verified
+    selected_remaining = None if pending is None else pending['selected_count'] - verified
     return {'status': status, 'verified_count': verified, 'failure_count': failed,
+            'remaining_count': remaining, 'selected_remaining_count': selected_remaining,
             'preview_count': preview, 'unclaimed_count': queued,
             'unfinished_count': unfinished, 'unverified_count': unverified,
             'unknown_count': acceptance['unknown_attempt_count'] + acceptance['unfinished_attempt_count'], 'stop': stop,
@@ -94,6 +101,11 @@ def execution_headline(execution):
     if state == 'blocked':
         pending = execution['unclaimed_count'] + execution['unfinished_count'] + execution['unverified_count']
         return f'❌ 阻断｜成功 {verified} 单，未处理 {pending} 单'
+    if state == 'no_eligible':
+        remaining = execution.get('selected_remaining_count')
+        return ('本次未领取｜待办数量尚未核实' if remaining is None else
+                f'本次未领取｜授权范围内仍有 {remaining} 单待办' if remaining else
+                f"本次未领取｜仍有 {execution['remaining_count']} 单范围外待办")
     return {'continued': f'接续｜已提交并验证 {verified} 单，按证据轮换',
             'stopped': f'已停止｜已提交并验证 {verified} 单',
             'preview': f"仅预览 {execution.get('preview_count', 0)} 单，未提交",

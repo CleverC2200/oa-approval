@@ -112,7 +112,7 @@ class Store:
             raise ValueError('continuation_not_available')
         return stored['selection']
 
-    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False):
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False, pending_count=None):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -120,6 +120,10 @@ class Store:
             self.connection.execute('BEGIN IMMEDIATE')
             self.continuation_options(continue_from)
             stored = {'selection':selection} if selection is not None else {}
+            pending = {'snapshot_at': timestamp, 'raw_count': len(rows) if pending_count is None else pending_count,
+                       'selected_count': len(rows), 'outside_selection_count': 0 if pending_count is None else pending_count - len(rows),
+                       'excluded': []}
+            stored['pending'] = pending
             processed = set()
             if continue_from is not None:
                 previous = json.loads(self.run(continue_from)['summary_json'])
@@ -140,16 +144,19 @@ class Store:
                     raise ValueError("pending_identity_missing")
                 occurrence = occurrence_key(row)
                 if occurrence in processed:
+                    pending['excluded'].append({'request_id': request_id, 'reason': 'continuation_processed'})
                     continue
                 previous_task = self.connection.execute(
-                    """SELECT status,
+                    """SELECT id,status,
                         EXISTS(SELECT 1 FROM reviews WHERE task_id=tasks.id)
                         AND NOT EXISTS(SELECT 1 FROM submissions WHERE task_id=tasks.id) AS unsubmitted_review
                     FROM tasks WHERE occurrence=?""", (occurrence,)).fetchone()
                 if previous_task and previous_task['status'] == 'failed' and not retry_failed:
+                    pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'historical_failure'})
                     continue
                 if previous_task and not retry_reviewed and (previous_task['status'] == 'preview' or
                         (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
+                    pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'unsubmitted_review'})
                     continue
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",

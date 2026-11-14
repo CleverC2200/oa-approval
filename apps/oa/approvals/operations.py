@@ -116,7 +116,8 @@ class Approval:
         if retry_reviewed and not request_ids:
             raise ValueError("retry_reviewed_requires_request_ids")
         rows = []
-        for raw in self._api().pending_rows():
+        pending_rows = list(self._api().pending_rows())
+        for raw in pending_rows:
             item = dict(raw)
             if request_ids is not None and str(item.get("request_id")) not in request_ids:
                 continue
@@ -139,6 +140,7 @@ class Approval:
             rows.append(item)
         run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from, retry_failed=retry_failed,
                                   retry_reviewed=retry_reviewed,
+                                  pending_count=len(pending_rows),
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids})
         cleanup = retention.cleanup(self.store, execute=True)
         result = {"run_id":run,"tasks":self.store.tasks(run)}

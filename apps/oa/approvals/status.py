@@ -48,6 +48,7 @@ def batch_status(store, run, tasks, owner):
     execution['headline'] = (execution_headline(execution) if owner_released
                              else '收尾待验｜等待执行进程退出')
     return {
+        'pending': json.loads(run['summary_json']).get('pending'),
         'execution': execution,
         'acceptance': acceptance,
         'closeout': {'drained': not blockers, 'blockers': blockers,
