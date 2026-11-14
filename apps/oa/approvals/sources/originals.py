@@ -31,6 +31,21 @@ class OriginalContext:
     sources: dict
 
 
+def _has_original_signature(body: bytes, file_type: str | None) -> bool:
+    signature = {'jpg': b'\xff\xd8\xff', 'png': b'\x89PNG\r\n\x1a\n'}.get(file_type, b'%PDF-')
+    if body.startswith(signature):
+        return True
+    if file_type in {'jpg', 'png'} or b'%PDF-' not in body[:1024]:
+        return False
+    import fitz
+
+    try:
+        with fitz.open(stream=body, filetype='pdf') as document:
+            return bool(document.is_pdf and not document.needs_pass and document.page_count)
+    except (RuntimeError, ValueError):
+        return False
+
+
 def valid_original_file(resource: dict, path: Path) -> bool:
     file_type = resource.get('_invoice_original', {}).get('file_type')
     if file_type not in {'jpg', 'png'}:
@@ -229,11 +244,10 @@ class OriginalSources:
                         )
                     )
                 body = response.read(_MAX_ORIGINAL_BYTES + 1)
-                signature = {'jpg': b'\xff\xd8\xff', 'png': b'\x89PNG\r\n\x1a\n'}.get(source.get('file_type'), b'%PDF-')
                 reason = ''
                 if len(body) > _MAX_ORIGINAL_BYTES:
                     reason = 'cloud_content_too_large'
-                elif not body.startswith(signature):
+                elif not _has_original_signature(body, source.get('file_type')):
                     reason = 'cloud_signature_mismatch'
                 elif length is not None and len(body) != int(length):
                     reason = 'cloud_length_mismatch'
