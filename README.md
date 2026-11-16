@@ -104,3 +104,5 @@ bash .codex/python.sh -m apps.oa.references import-tpm --help
 - [海外回填规则](docs/overseas-invoice.md)
 
 参考报价导入后再采集 TPM 材料；未配置时材料明确记录缺口。完整测试、合成运行、真实模型和真实业务验收分别报告。没有独立授权时不调用真实业务接口。
+
+商旅账号或公司配置缺失的已授权交接，按[商旅 SSO 受限交接](.agents/skills/oa-finance-preaudit/references/travel-sso-handoff.md)配置私有授权。公开 `collect` 自动按单绑定，不需要临时包装器补参数；授权缺失时保持普通采集。完整流程回归入口为 `bash .codex/python.sh -m pytest -q tests/approvals/test_travel_sso_policy.py`。

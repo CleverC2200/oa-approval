@@ -494,12 +494,10 @@ def _collect_case(
     read_session=None,
     travel_read_exception: dict | None = None,
 ) -> dict[str, Any]:
-    if travel_read_exception is not None and (
-            not isinstance(travel_read_exception, dict)
-            or travel_read_exception.get("request_id") != str(request_id)
-            or not isinstance(travel_read_exception.get("authorization_note"), str)
-            or not travel_read_exception["authorization_note"].strip()):
-        raise ValueError("travel_read_exception_invalid")
+    from apps.oa.approvals import travel_exception
+
+    if travel_read_exception is not None:
+        travel_exception.validate(travel_read_exception, request_id)
     download_sources = attachments.build_download_sources(source_policy)
     transfer = download_sources.transfer
     if read_session is not None:
@@ -552,12 +550,10 @@ def _collect_case(
         if (not travel_read_exception or config.get("flow_key") != "travel_expense"
                 or str(error) != "travel_attachment_discovery_failed"
                 or not error.diagnostics
-                or any(item.get("reason") not in {
-                    "login_required", "travel_sso_account_missing", "travel_sso_company_missing"
-                } for item in error.diagnostics)):
+                or any(item.get("reason") not in travel_read_exception.get(
+                    'allowed_reasons', travel_exception.EXPLICIT_REASONS) for item in error.diagnostics)):
             raise
-        read_exception = {"request_id": str(request_id),
-                          "authorization_note": travel_read_exception["authorization_note"],
+        read_exception = {**travel_read_exception,
                           "error": str(error), "diagnostics": error.diagnostics,
                           "declared_attachment_count": _declared_attachment_count(workflow),
                           "unread_scope": "商旅页面及附件发现未完成；表单中已知附件仍按正常流程读取。"}
