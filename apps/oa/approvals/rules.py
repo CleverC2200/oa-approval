@@ -29,6 +29,8 @@ def freeze_rules(workflow_key, directory):
         entry = reference / "flows" / (RULE_NAMES[workflow_key]+".md")
         selected = [entry, *(reference / name for name in (
             "result-contract.md", "observation-contract.md", "execution-contract.md"))]
+        if workflow_key == 'travel_expense':
+            selected.append(reference / 'travel-sso-handoff.md')
         if workflow_key == "packaging_layout_approval":
             audit = Path(".agents/skills/audit-chinese-image-text")
             selected += [audit / "SKILL.md", audit / "scripts/problem_set.py"]

@@ -194,7 +194,7 @@ class Store:
             raise ValueError("task_not_found")
         return dict(row)
 
-    def claim(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None):
+    def claim(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None, authorize=None):
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             run = self.run(run_id)
@@ -236,8 +236,10 @@ class Store:
                 return unclaimed("refused", "agent_generation_workflow_mismatch")
             if len(previous) >= AGENT_CLAIM_LIMIT:
                 return unclaimed("refused", "agent_claim_limit")
+            authorization = authorize(candidate) if authorize is not None else None
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
-            return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"])}
+            return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"]),
+                    **({'authorization': authorization} if authorize is not None else {})}
 
     def fail(self, task_id, error, *, run_id=None, review_assessment=None):
         with self.connection:

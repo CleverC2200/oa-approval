@@ -151,19 +151,15 @@ class Approval:
         return result
 
     def collect(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None, travel_read_exception=None):
-        if travel_read_exception is not None:
-            task = self.store.get_task(expected_task_id)
-            if (not isinstance(travel_read_exception, dict)
-                    or task["workflow_key"] != "travel_expense"
-                    or travel_read_exception.get("request_id") != task["request_id"]
-                    or not isinstance(travel_read_exception.get("authorization_note"), str)
-                    or not travel_read_exception["authorization_note"].strip()):
-                raise ValueError("travel_read_exception_invalid")
+        from apps.oa.approvals import travel_exception
+
         decision = self.store.claim(run_id,workflow_key,agent_id,expected_task_id=expected_task_id,
-            agent_workflow_key=agent_workflow_key)
+            agent_workflow_key=agent_workflow_key,
+            authorize=lambda task: travel_exception.for_task(task, travel_read_exception))
         if decision["status"] != "claimed":
             return decision
         task = decision["task"]
+        travel_read_exception = decision['authorization']
         directory = self.root / "materials" / str(task["id"]) / uuid4().hex
         directory.mkdir(parents=True)
         try:
@@ -279,12 +275,15 @@ class Approval:
                                        recognition=recognition, observations=observations, opinion=opinion)
                 if confirm_write:
                     raise error
+            material = json.loads(task["material_json"])
             if review_assessment is not None or confirm_write:
                 assessment = validate_assessment(task, review_assessment)
+                if (confirm_write and material.get('travel_read_exception')
+                        and assessment['status'] == 'complete'):
+                    raise ValueError('travel_exception_requires_business_pending')
                 self.store.assess_review(task, assessment)
                 if assessment['status'] not in {'complete', 'business_pending'}:
                     raise ValueError('review_not_complete')
-            material = json.loads(task["material_json"])
             plan = None
             if task["workflow_key"] == "overseas_invoice":
                 plan = business.build_plan(material,recognition)
