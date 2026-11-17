@@ -359,7 +359,11 @@ class TravelEvidence:
             for item in self.download_targets
             if item.get("_travel_order_invoice")
         } - {""}
-        additional_order_invoice_ids = order_invoice_ids - source_file_ids
+        counted_file_ids = (
+            {item.get("file_ref") for item in inventory if item.get("reason") == "downloadable"}
+            if inventory else source_file_ids
+        )
+        additional_order_invoice_ids = order_invoice_ids - counted_file_ids
         sightings += len(additional_order_invoice_ids)
         complete = all(
             item.get("reason") == "empty_placeholder"

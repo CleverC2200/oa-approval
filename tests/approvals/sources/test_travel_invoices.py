@@ -162,12 +162,13 @@ def test_complete_collection_counts_order_invoices_without_counting_form_mirrors
     assert fact['invoices'][0]['resource_id'] == resource['resource_id']
 
 
-@pytest.mark.parametrize('manual_ids,declared_count,complete', [
+@pytest.mark.parametrize('source_ids,declared_count,complete', [
     ({'201', '202'}, 4, True),
+    ({'201', '202', '123'}, 4, True),
     ({'201'}, 4, False),
     ({'201', '202'}, 5, False),
 ])
-def test_declared_count_includes_deduplicated_order_invoices_and_requires_manual_files(browser_transport, manual_ids, declared_count, complete):
+def test_declared_count_includes_deduplicated_order_invoices_and_requires_manual_files(browser_transport, source_ids, declared_count, complete):
     payload = order()
     payload['result']['invoiceList'].append({
         **payload['result']['invoiceList'][0], 'id': 'invoice-b',
@@ -185,8 +186,8 @@ def test_declared_count_includes_deduplicated_order_invoices_and_requires_manual
     assert len(evidence.download_targets) == 4
     assert len(evidence.attachment_scan_record()['inventory']) == 2
     coverage = evidence.coverage(
-        source_file_ids=manual_ids,
-        source_resource_count=len(manual_ids),
+        source_file_ids=source_ids,
+        source_resource_count=len(source_ids),
         declared_count=declared_count,
     )
     assert coverage.complete is complete
