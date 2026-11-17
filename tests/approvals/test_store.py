@@ -118,7 +118,7 @@ def test_protected_claim_refuses_stale_identity_or_wrong_agent_before_mutation(t
     assert task["id"] == 1
 
 
-def test_protected_agent_keeps_type_and_five_claim_budget_after_failures_and_previews(tmp_path):
+def test_idle_agent_can_continue_after_five_tasks_without_losing_type_and_capacity_guards(tmp_path):
     path = tmp_path / "approval.sqlite3"
     store = Store(path)
     run = store.start_run([*[pending(str(value)) for value in range(101, 108)],
@@ -132,11 +132,7 @@ def test_protected_agent_keeps_type_and_five_claim_budget_after_failures_and_pre
             store.set_status(task["id"], status)
     store.connection.close()
     store = Store(path)
-    before = store.tasks(run)
-    assert store.claim(run, agent_id="agent-a", expected_task_id=6,
-                       agent_workflow_key="travel_expense")["reason"] == "agent_claim_limit"
-    assert store.tasks(run) == before
-    rotated = store.claim(run, agent_id="agent-b", expected_task_id=6, agent_workflow_key="travel_expense")["task"]
+    rotated = store.claim(run, agent_id="agent-a", expected_task_id=6, agent_workflow_key="travel_expense")["task"]
     store.fail(rotated["id"], "read_failed")
     following = store.claim(run, agent_id="agent-b", expected_task_id=7, agent_workflow_key="travel_expense")["task"]
     store.fail(following["id"], "read_failed")

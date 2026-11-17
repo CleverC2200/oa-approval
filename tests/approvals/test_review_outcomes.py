@@ -155,16 +155,16 @@ def test_context_rotation_requires_real_evidence_and_keeps_its_copy(tmp_path):
     app, _ = service(tmp_path)
     run = app.pending()['run_id']
     evidence = tmp_path / 'platform-context.txt'
-    evidence.write_text('Synthetic platform evidence: 61 percent')
+    evidence.write_text('Synthetic platform evidence: context unavailable at 59 percent')
     stop = {'kind': 'context_limit', 'reason': 'Synthetic context limit',
-            'context_used_percent': 59, 'evidence_file': str(evidence)}
+            'context_used_percent': 101, 'evidence_file': str(evidence)}
     with pytest.raises(ValueError, match='stop_context_evidence_invalid'):
         app.close(run, stop=stop)
-    stop['context_used_percent'] = 61
+    stop['context_used_percent'] = 59
     result = app.close(run, stop=stop)
     saved = Path(result['execution']['stop']['evidence_file'])
     evidence.unlink()
-    assert saved.read_text() == 'Synthetic platform evidence: 61 percent'
+    assert saved.read_text() == 'Synthetic platform evidence: context unavailable at 59 percent'
     assert query(tmp_path, 'status', run_id=run, view='batch')['execution']['status'] == 'continued'
 
 

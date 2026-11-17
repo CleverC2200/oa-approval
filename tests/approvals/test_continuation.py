@@ -46,7 +46,7 @@ def test_continuation_drains_preview_and_failed_tasks_once_without_expanding_sel
 
 def test_authorized_failure_precedes_new_work_and_is_not_retried_again_in_continuation(tmp_path):
     app = create_demo(tmp_path)
-    app.api.rows[0]['received_at'] = '2026-10-28 12:00:00'
+    app.api.rows[0]['received_at'] = '2026-10-20 12:00:00'
     first = app.pending(request_ids=[app.api.rows[0]['request_id']], batch_size=1)
     failed = finish_one(app, first, fail=True)
     material = app.store.get_task(failed['id'])['material_file']
@@ -112,6 +112,7 @@ def test_ready_continuation_can_prioritize_newly_authorized_failure_once(tmp_pat
 @pytest.mark.parametrize('with_old_review', [False, True])
 def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_path, with_old_review):
     app = create_demo(tmp_path)
+    app.api.rows[0]['received_at'] = '2026-10-23 12:00:00'
     recovery_ids = [row['request_id'] for row in app.api.rows[1:]]
     original = app.pending(request_ids=recovery_ids)
     failed_ids = []
@@ -148,6 +149,35 @@ def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_pat
     normal = app.pending(continue_from=successor['run_id'])
     assert all(task['id'] not in failed_ids for task in normal['tasks'])
     assert normal['tasks'][0]['request_id'] == app.api.rows[0]['request_id']
+
+
+def test_recovery_shares_received_time_fifo_with_older_normal_work(tmp_path):
+    app = create_demo(tmp_path)
+    failed_request = app.api.rows[-1]['request_id']
+    original = app.pending(request_ids=[failed_request])
+    failed = finish_one(app, original, fail=True)
+    app.close(original['run_id'])
+    run = app.pending(recovery_request_ids=[failed_request], batch_size=3)
+    assert [task['request_id'] for task in run['tasks']] == [row['request_id'] for row in app.api.rows]
+    assert run['batch']['task_ids'][-1] == failed['id']
+
+
+def test_existing_continuation_exposes_prior_failed_occurrence_for_authorized_recovery(tmp_path):
+    from apps.oa.approvals.client import query
+
+    app = create_demo(tmp_path)
+    original = app.pending(batch_size=1)
+    failed = finish_one(app, original, fail=True)
+    app.close(original['run_id'], handoff=True)
+    successor = app.pending(continue_from=original['run_id'])
+    state = query(tmp_path, 'status', run_id=successor['run_id'], view='batch')
+    assert state['pending']['excluded'][0]['reason'] == 'continuation_processed'
+    assert [item['id'] for item in state['recovery_candidates']] == [failed['id']]
+    finish_one(app, successor)
+    app.close(successor['run_id'], handoff=True)
+    recovered = app.pending(continue_from=successor['run_id'],
+                            recovery_request_ids=[item['request_id'] for item in state['recovery_candidates']])
+    assert recovered['batch']['task_ids'] == [failed['id']]
 
 
 def test_preview_chain_carries_processed_occurrences_across_multiple_conversations(tmp_path):
