@@ -166,7 +166,7 @@ class Store:
                     continue
                 if recovering:
                     recovery_tasks.append(previous_task['id'])
-                if previous_task and not retry_reviewed and (previous_task['status'] == 'preview' or
+                if previous_task and not retry_reviewed and not recovering and (previous_task['status'] == 'preview' or
                         (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
                     pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'unsubmitted_review'})
                     continue

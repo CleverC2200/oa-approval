@@ -109,16 +109,34 @@ def test_ready_continuation_can_prioritize_newly_authorized_failure_once(tmp_pat
     assert app.store.get_task(failed['id'])['failure_count'] == 2
 
 
-def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_path):
+@pytest.mark.parametrize('with_old_review', [False, True])
+def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_path, with_old_review):
     app = create_demo(tmp_path)
     recovery_ids = [row['request_id'] for row in app.api.rows[1:]]
     original = app.pending(request_ids=recovery_ids)
     failed_ids = []
     for index, task in enumerate(original['tasks']):
         app.collect(original['run_id'], agent_id=f'original-{index}', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
-        app.fail(original['run_id'], task['id'], 'synthetic_read_failure')
+        if with_old_review and index == 1:
+            from tests.approvals.review_fixtures import completed_review
+
+            pending_rows = app.api.pending_rows
+
+            def unavailable():
+                raise RuntimeError('synthetic_prewrite_read_failure')
+
+            app.api.pending_rows = unavailable
+            with pytest.raises(RuntimeError, match='synthetic_prewrite_read_failure'):
+                app.submit(task['id'], opinion='Synthetic retained opinion', confirm_write=True,
+                           review_assessment=completed_review(app, task['id']))
+            app.api.pending_rows = pending_rows
+        else:
+            app.fail(original['run_id'], task['id'], 'synthetic_read_failure')
         failed_ids.append(task['id'])
     app.close(original['run_id'])
+    if with_old_review:
+        details = app.store.details(failed_ids[1])
+        app.store.fail_closed_review(original['run_id'], failed_ids[1], details['reviews'][-1]['id'], 'confirmed_prewrite_failure')
     run = app.pending(batch_size=1, recovery_request_ids=recovery_ids)
     first = finish_one(app, run, fail=True)
     assert first['id'] == failed_ids[0]
