@@ -112,10 +112,17 @@ def test_deepseek_archive_and_duplicate_pages_keep_real_attachment_ids_in_sqlite
     store = Store(tmp_path / 'approval.sqlite3')
     run = store.start_run([{'request_id': '12', 'received_at': '2026-10-22 09:00:00',
                            'operator_id': 'tester', 'workflow_key': 'general_expense'}])
-    task = store.claim(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='general_expense')["task"]
-    store.freeze(task['id'], material, material_file, 'digest', {str(image): digest}, material_file)
-    store.review(task['id'], '合成离线测试意见', report)
-    store.review(task['id'], '合成离线测试意见', report)
+    task = store.claim(run,  expected_task_id=1, )["task"]
+    store.freeze(task['id'], material, material_file, report['material_binding']['material_sha256'],
+                 {str(image): digest}, material_file)
+    store.dispatch_review(run, expected_task_id=task['id'], agent_id='synthetic-reader',
+                          agent_workflow_key='general_expense', recognition=report)
+    assessment = {'task_id': task['id'], 'material_sha256': report['material_binding']['material_sha256'],
+                  'status': 'complete', 'reason': 'Synthetic complete reading', 'evidence_files': [str(material_file)]}
+    for _ in range(2):
+        store.deliver(task['id'], agent_id='synthetic-reader', material_file=str(material_file),
+            material_sha256=report['material_binding']['material_sha256'], opinion='合成离线测试意见',
+            recognition=report, assessment=assessment)
     rows = store.connection.execute('''SELECT a.resource_id,c.content,c.metadata_json FROM attachment_contents c
         JOIN attachments a ON a.id=c.attachment_id WHERE c.source='deepseek' ORDER BY c.id''').fetchall()
     assert [(r['resource_id'], r['content']) for r in rows] == [

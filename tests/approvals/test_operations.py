@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
@@ -50,11 +51,11 @@ def service(tmp_path, api=None, *, predictor=None):
 def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
     app, api = service(tmp_path)
     run = app.pending()
-    task = app.collect(run["run_id"], agent_id="travel-agent", expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, run["run_id"], agent_id="travel-agent", expected_task_id=1, agent_workflow_key='travel_expense')
     assert Path(task["material_file"]).is_file()
     assert Path(task["rule_file"]).is_file()
     assert (Path(task["rule_file"]).parent / "../result-contract.md").resolve().is_file()
-    result = app.submit(task["task_id"], opinion="AI审核结论：需人工判断 ⚠️")
+    result = deliver_and_submit(app, task["task_id"], opinion="AI审核结论：需人工判断 ⚠️")
     assert result["status"] == "preview"
     assert api.posts == []
     details = app.inspect(task["task_id"])
@@ -66,16 +67,16 @@ def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):
 def test_invalid_observations_are_correctable_before_any_review_or_write(tmp_path, observations):
     app, api = service(tmp_path)
     run = app.pending()
-    task = app.collect(run['run_id'], agent_id='travel-agent', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, run['run_id'], agent_id='travel-agent', expected_task_id=1, agent_workflow_key='travel_expense')
     with pytest.raises(ValueError, match='attachment_observations_invalid'):
-        app.submit(task['task_id'], opinion='合成意见', observations=observations, confirm_write=True,
+        deliver_and_submit(app, task['task_id'], opinion='合成意见', observations=observations, confirm_write=True,
                    review_assessment=completed_review(app, task['task_id']))
     details = app.inspect(task['task_id'])
     assert details['task']['status'] == 'reviewing'
     assert details['reviews'] == [] and details['submissions'] == []
     assert app.store.review_assessments(task['task_id']) == []
     assert api.posts == []
-    result = app.submit(task['task_id'], opinion='合成意见', observations=[], confirm_write=True,
+    result = deliver_and_submit(app, task['task_id'], opinion='合成意见', observations=[], confirm_write=True,
                         review_assessment=completed_review(app, task['task_id']))
     assert result['status'] == 'submitted' and len(api.posts) == 1
 
@@ -102,7 +103,7 @@ def test_collection_failure_preserves_safe_attempt_diagnostics_without_material_
     app.collector = fail_collect
     run = app.pending()['run_id']
     with pytest.raises(CollectionFailure) as captured:
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
 
     output = cli.failure(captured.value)
     report = Path(output['diagnostics_file'])
@@ -128,7 +129,7 @@ def test_plain_collection_error_is_diagnosable_through_public_show(tmp_path):
     app.collector = failed
     run = app.pending()['run_id']
     with pytest.raises(RuntimeError) as captured:
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     report = Path(cli.failure(captured.value)['diagnostics_file'])
     body = json.loads(report.read_text())
     assert body['task_id'] == 1 and body['run_id'] == run
@@ -147,7 +148,7 @@ def test_collect_preserves_material_but_stops_before_review_with_missing_origina
     app.collector = incomplete
     run = app.pending()['run_id']
     with pytest.raises(RuntimeError, match='invoice_original_coverage_incomplete'):
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     details = app.inspect(1)
     assert details['task']['status'] == 'failed' and Path(details['task']['material_file']).is_file()
     assert details['reviews'] == [] and details['submissions'] == []
@@ -168,7 +169,7 @@ def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave
     run = app.pending()['run_id']
     monkeypatch.setattr(control, 'write_control_bytes_atomic', lambda *_a, **_k: (_ for _ in ()).throw(OSError('synthetic write failure')))
     with pytest.raises(CollectionFailure) as captured:
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     assert cli.failure(captured.value) == {'status': 'failed', 'error': 'travel_attachment_discovery_failed',
                                          'diagnostics_write_failed': True}
     task, = app.store.tasks(run)
@@ -179,46 +180,47 @@ def test_diagnostic_file_write_failure_does_not_hide_collection_failure_or_leave
 def test_fresh_request_scope_keeps_successful_tasks_out_of_replay(tmp_path):
     app, api = service(tmp_path)
     original = dict(api.rows[0])
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    assert app.submit(task['task_id'], opinion='合成离线意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    assert deliver_and_submit(app, task['task_id'], opinion='合成离线意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
     api.rows = [original, {**original, 'request_id': '102'}, {**original, 'request_id': '103'}]
     run = app.pending(request_ids=['101', '102'])
     assert [(row['request_id'], row['status']) for row in run['tasks']] == [
         ('101', 'submitted'), ('102', 'queued')]
-    following = app.collect(run['run_id'], agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
+    following = collect_for_review(app, run['run_id'], agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
     assert following['request_id'] == '102'
-    assert app.submit(task['task_id'], opinion='不能重发', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
+    assert deliver_and_submit(app, task['task_id'], opinion='不能重发', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'submitted'
     assert api.posts == [('101', '合成离线意见')]
 
 
-def test_collect_reports_compact_waiting_for_explicit_filter_and_done_when_empty(tmp_path):
+def test_preparation_and_dispatch_report_independent_waiting_and_done(tmp_path):
     app, api = service(tmp_path)
     run = app.pending()["run_id"]
-    assert app.collect(run, workflow_key="general_expense", agent_id='agent-a', expected_task_id=1, agent_workflow_key='general_expense') == {
-        "run_id":run, "status":"waiting", "reason":"workflow_unavailable", "summary":{"queued":1}}
-    task = app.collect(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')
-    assert app.collect(run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense') == {
-        "run_id":run, "status":"waiting", "reason":"agent_busy", "summary":{"reviewing":1}}
-    app.submit(task["task_id"], opinion="离线意见")
-    assert app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense') == {
+    assert collect_for_review(app, run, workflow_key="general_expense", agent_id='agent-a', expected_task_id=1, agent_workflow_key='general_expense') == {
+        "run_id":run, "status":"refused", "reason":"agent_workflow_mismatch", "summary":{"prepared":1}}
+    task = collect_for_review(app, run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense')
+    assert collect_for_review(app, run, agent_id="agent-a", expected_task_id=1, agent_workflow_key='travel_expense') == {
+        "run_id":run, "status":"waiting", "reason":"in_flight", "summary":{"reviewing":1}}
+    deliver_and_submit(app, task["task_id"], opinion="离线意见")
+    assert collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense') == {
         "run_id":run, "status":"done", "reason":"queue_exhausted", "summary":{"preview":1}}
     assert api.posts == []
 
 
 @pytest.mark.parametrize("source, expected_source", [("parser", "parser"), ("deepseek", "deepseek"), (None, "deepseek")])
-@pytest.mark.parametrize('report_status', [None, 'failed'])
-def test_preview_preserves_recognition_source_and_original_report(tmp_path, source, expected_source, report_status):
+def test_preview_preserves_recognition_source_and_original_report(tmp_path, source, expected_source):
     app, api = service(tmp_path)
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    part = {"resource_id":"file-1", "evidence_ref":"material:prepared.structured_contents[0]",
-            "answer":"原始金额 001.00，位置 A1"}
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    from tests.approvals.review_fixtures import recognition_report
+
+    report = recognition_report(app.store.get_task(task['task_id']))
+    part = report['parts'][0]
+    part['answer'] = '原始金额 001.00，位置 A1'
     if source is not None:
-        part["source"] = source
-    report = {"kind":"deepseek_attachment_recognition", "parts":[part]}
-    if report_status is not None:
-        report['status'] = report_status
+        part['source'] = source
+    else:
+        part.pop('source')
     for _ in range(2):
-        assert app.submit(task["task_id"], opinion="请核对金额。", recognition=report)["status"] == "preview"
+        assert deliver_and_submit(app, task["task_id"], opinion="请核对金额。", recognition=report)["status"] == "preview"
     details = app.inspect(task["task_id"])
     contents = [item for item in details["contents"] if item["locator"] == part["evidence_ref"]]
     assert len(contents) == 1
@@ -266,38 +268,38 @@ def test_default_clients_handle_expired_credentials_between_tasks(tmp_path, monk
     app = Approval(tmp_path, configs=[{"flow_key": "travel_expense"}], collector=collect, source_policy=POLICY)
     run = app.pending()["run_id"]
     for request_id in ("101", "102"):
-        task = app.collect(run, agent_id='agent-a', expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')
+        task = collect_for_review(app, run, agent_id='agent-a', expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')
         assert task["request_id"] == request_id
-        assert app.submit(task["task_id"], opinion="合成离线测试意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
+        assert deliver_and_submit(app, task["task_id"], opinion="合成离线测试意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
     assert live.posts == [("101", "合成离线测试意见"), ("102", "合成离线测试意见")]
 
 
 def test_submit_and_repeat_do_not_send_twice(tmp_path):
     app, api = service(tmp_path)
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    first = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
-    second = app.submit(task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    first = deliver_and_submit(app, task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    second = deliver_and_submit(app, task["task_id"], opinion="请财务核对金额。", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert first["status"] == second["status"] == "submitted"
     assert api.posts == [("101","请财务核对金额。")]
 
 
 def test_changed_original_cannot_be_submitted(tmp_path):
     app, api = service(tmp_path)
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     original = Path(app.inspect(task["task_id"])["attachments"][0]["path"])
     original.write_text("changed")
     with pytest.raises(ValueError, match="frozen_material_changed"):
-        app.submit(task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+        deliver_and_submit(app, task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert api.posts == []
 
 
 def test_replaced_task_instance_cannot_receive_previous_review(tmp_path):
     app, api = service(tmp_path)
     api.rows[0]["task_instance_id"] = "instance-1"
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     api.rows[0]["task_instance_id"] = "instance-2"
     with pytest.raises(ValueError, match="submission_target_changed"):
-        app.submit(task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+        deliver_and_submit(app, task["task_id"], opinion="审核意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert api.posts == []
 
 
@@ -311,18 +313,18 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch
         raise OSError("connection lost")
     monkeypatch.setattr(safe_http, "urlopen", interrupted)
     app.writer = FrozenWriterApi("fake-token", "fake-user", app_id="fake-app", base_url="https://oa.example.test")
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    result = app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    result = deliver_and_submit(app, task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     assert result["status"] == "unknown"
     fresh = app.pending()
-    assert app.collect(fresh["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["status"] == "done"
-    assert app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
+    assert collect_for_review(app, fresh["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["status"] == "blocked"
+    assert deliver_and_submit(app, task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
     api.rows = []
     api.handled = [{"request_id":"101"}]
     assert app.postcheck(task["task_id"])["status"] == "unknown"
     api.handled[0]["handled_at"] = "2020-01-01 12:00:00"
     assert app.postcheck(task["task_id"])["status"] == "unknown"
-    assert app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
+    assert deliver_and_submit(app, task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "unknown"
     api.handled[0]["handled_at"] = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
     api.rows = [{"request_id": "101"}]
     conflict = app.postcheck(task["task_id"])
@@ -336,7 +338,7 @@ def test_unknown_submission_only_allows_readonly_postcheck(tmp_path, monkeypatch
     assert recovered["submit_ok"] is True
     assert recovered["done_hit"] is True
     assert recovered["postcheck_done_hit"] is True
-    assert app.submit(task["task_id"], opinion="意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
+    assert deliver_and_submit(app, task["task_id"], opinion="意见", confirm_write=True, review_assessment=completed_review(app, task["task_id"]))["status"] == "submitted"
     assert len(api.posts) == 1
 
 
@@ -358,11 +360,11 @@ def test_postcheck_reads_handled_history_beyond_five_pages(tmp_path, incomplete)
             return {'data': [{'requestId': str(page * 100 + index + 1000)} for index in range(100)]}
 
     app, api = service(tmp_path, HistoryApi())
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1,
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1,
                        agent_workflow_key='travel_expense')
     app.writer = type('UnknownWriter', (), {'submit_and_verify': lambda *_a, **_k: {
         'submit_ok': True, 'done_hit': False, 'postcheck_done_hit': False}})()
-    assert app.submit(task['task_id'], opinion='意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'unknown'
+    assert deliver_and_submit(app, task['task_id'], opinion='意见', confirm_write=True, review_assessment=completed_review(app, task['task_id']))['status'] == 'unknown'
     api.rows = []
     if incomplete:
         with pytest.raises(ValueError, match='handled_pagination_incomplete'):
@@ -379,19 +381,19 @@ def test_postcheck_reads_handled_history_beyond_five_pages(tmp_path, incomplete)
 def test_successful_occurrence_is_not_reset_when_pending_reappears(tmp_path):
     app, api = service(tmp_path)
     original = dict(api.rows[0])
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    app.submit(task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    deliver_and_submit(app, task["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
     api.rows = [original]
     fresh = app.pending()
     assert fresh["tasks"][0]["status"] == "submitted"
     assert fresh["tasks"][0]["error"] == "submitted_pending_confirmation"
-    assert app.collect(fresh["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["status"] == "done"
+    assert collect_for_review(app, fresh["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["status"] == "done"
     api.rows[0]["received_at"] = "2026-10-23 10:00:00"
-    renewed = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
+    renewed = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
     assert renewed["task_id"] != task["task_id"]
 
 
-def test_current_unknown_stops_other_writes_but_new_run_can_process_other_tasks(tmp_path):
+def test_unknown_blocks_other_writes_and_new_run_dispatch_until_readonly_resolution(tmp_path):
     app, api = service(tmp_path)
     api.rows.append({**api.rows[0],"request_id":"102","workflow_key":"general_expense"})
     def collector(request_id, **kwargs):
@@ -400,18 +402,18 @@ def test_current_unknown_stops_other_writes_but_new_run_can_process_other_tasks(
         return material
     app.collector = collector
     run = app.pending()["run_id"]
-    first,second = app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense'),app.collect(run, agent_id='agent-b', expected_task_id=2, agent_workflow_key='general_expense')
+    first,second = collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense'),collect_for_review(app, run, agent_id='agent-b', expected_task_id=2, agent_workflow_key='general_expense')
     def interrupted(request_id, opinion):
         api.posts.append(request_id)
         raise OSError("connection lost")
     api.submit_and_verify = interrupted
-    assert app.submit(first["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, first["task_id"]))["status"] == "unknown"
-    assert app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense') == {
+    assert deliver_and_submit(app, first["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, first["task_id"]))["status"] == "unknown"
+    assert collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense') == {
         "run_id":run,"status":"blocked","reason":"run_blocked","summary":{"unknown":1,"reviewing":1}}
     with pytest.raises(ValueError, match="run_blocked"):
-        app.submit(second["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, second["task_id"]))
+        deliver_and_submit(app, second["task_id"],opinion="意见",confirm_write=True, review_assessment=completed_review(app, second["task_id"]))
     fresh = app.pending()["run_id"]
-    assert app.collect(fresh, agent_id='agent-b', expected_task_id=2, agent_workflow_key='general_expense')["task_id"] == second["task_id"]
+    assert collect_for_review(app, fresh, agent_id='agent-b', expected_task_id=2, agent_workflow_key='general_expense')['reason'] == 'run_blocked'
     assert api.posts == ["101"]
 
 
@@ -419,9 +421,9 @@ def test_review_failure_releases_one_slot_without_accessing_oa(tmp_path):
     app, api = service(tmp_path)
     api.rows = [{**api.rows[0], "request_id":str(value)} for value in range(101, 105)]
     run = app.pending()["run_id"]
-    tasks = [app.collect(run, agent_id=f"agent-{index}", expected_task_id=index + 1, agent_workflow_key='travel_expense') for index in range(3)]
-    assert app.collect(run, agent_id='agent-a', expected_task_id=4, agent_workflow_key='travel_expense') == {
-        "run_id":run,"status":"waiting","reason":"inflight_limit","summary":{"reviewing":3,"queued":1}}
+    tasks = [collect_for_review(app, run, agent_id=f"agent-{index}", expected_task_id=index + 1, agent_workflow_key='travel_expense') for index in range(3)]
+    assert collect_for_review(app, run, agent_id='agent-a', expected_task_id=4, agent_workflow_key='travel_expense') == {
+        "run_id":run,"status":"waiting","reason":"inflight_limit","summary":{"reviewing":3,"prepared":1}}
 
     def unavailable():
         raise AssertionError("fail must not access OA")
@@ -434,14 +436,14 @@ def test_review_failure_releases_one_slot_without_accessing_oa(tmp_path):
     assert details["task"]["error"] == "native_agent_failed"
     assert details["reviews"] == details["submissions"] == []
     assert api.posts == []
-    assert app.collect(run, agent_id="agent-1", expected_task_id=4, agent_workflow_key='travel_expense')["request_id"] == "104"
+    assert collect_for_review(app, run, agent_id="agent-1", expected_task_id=4, agent_workflow_key='travel_expense')["request_id"] == "104"
 
 
 @pytest.mark.parametrize("status", ["queued", "reviewed", "preview", "submitting", "submitted", "unknown", "failed"])
 def test_fail_cannot_overwrite_tasks_outside_active_review(tmp_path, status):
     app, api = service(tmp_path)
     run = app.pending()["run_id"]
-    task = app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     app.store.set_status(task["task_id"],status)
     before = app.inspect(task["task_id"])
     with pytest.raises(ValueError, match="task_not_failable"):
@@ -453,10 +455,10 @@ def test_fail_cannot_overwrite_tasks_outside_active_review(tmp_path, status):
 def test_fail_requires_a_running_run_that_owns_the_task(tmp_path):
     app, api = service(tmp_path)
     old_run = app.pending()["run_id"]
-    old_task = app.collect(old_run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    old_task = collect_for_review(app, old_run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     api.rows = [{**api.rows[0], "request_id":"102"}]
     current_run = app.pending()["run_id"]
-    current_task = app.collect(current_run, agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
+    current_task = collect_for_review(app, current_run, agent_id='agent-a', expected_task_id=2, agent_workflow_key='travel_expense')
     with pytest.raises(ValueError, match="run_blocked"):
         app.fail(old_run,old_task["task_id"],"native_agent_failed")
     with pytest.raises(ValueError, match="task_run_mismatch"):
@@ -473,13 +475,13 @@ def test_completed_later_task_can_submit_and_refill_while_older_reviews_continue
     app, api = service(tmp_path)
     api.rows = [{**api.rows[0], "request_id":str(value)} for value in range(101, 106)]
     run = app.pending()["run_id"]
-    tasks = [app.collect(run,agent_id=f"agent-{index}", expected_task_id=index + 1, agent_workflow_key='travel_expense') for index in range(3)]
-    assert app.submit(tasks[2]["task_id"],opinion="离线意见",confirm_write=True, review_assessment=completed_review(app, tasks[2]["task_id"]))["status"] == "submitted"
+    tasks = [collect_for_review(app, run,agent_id=f"agent-{index}", expected_task_id=index + 1, agent_workflow_key='travel_expense') for index in range(3)]
+    assert deliver_and_submit(app, tasks[2]["task_id"],opinion="离线意见",confirm_write=True, review_assessment=completed_review(app, tasks[2]["task_id"]))["status"] == "submitted"
     assert [app.inspect(task["task_id"])["task"]["status"] for task in tasks[:2]] == ["reviewing", "reviewing"]
-    assert app.collect(run,agent_id="agent-2", expected_task_id=4, agent_workflow_key='travel_expense')["request_id"] == "104"
-    assert app.collect(run, agent_id='agent-a', expected_task_id=5, agent_workflow_key='travel_expense') == {
+    assert collect_for_review(app, run,agent_id="agent-2", expected_task_id=4, agent_workflow_key='travel_expense')["request_id"] == "104"
+    assert collect_for_review(app, run, agent_id='agent-a', expected_task_id=5, agent_workflow_key='travel_expense') == {
         "run_id":run,"status":"waiting","reason":"inflight_limit",
-        "summary":{"reviewing":3,"submitted":1,"queued":1}}
+        "summary":{"reviewing":3,"submitted":1,"prepared":1}}
     assert api.posts == [("103","离线意见")]
 
 
@@ -488,10 +490,10 @@ def test_four_default_previews_release_capacity_and_never_write(tmp_path):
     api.rows = [{**api.rows[0], "request_id":str(value)} for value in range(101, 105)]
     run = app.pending()["run_id"]
     for request_id in ("101", "102", "103", "104"):
-        task = app.collect(run,agent_id="agent-a", expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')
+        task = collect_for_review(app, run,agent_id="agent-a", expected_task_id=int(request_id) - 100, agent_workflow_key='travel_expense')
         assert task["request_id"] == request_id
-        assert app.submit(task["task_id"],opinion="离线预览意见")["status"] == "preview"
-    assert app.collect(run, agent_id='agent-a', expected_task_id=4, agent_workflow_key='travel_expense')["status"] == "done"
+        assert deliver_and_submit(app, task["task_id"],opinion="离线预览意见")["status"] == "preview"
+    assert collect_for_review(app, run, agent_id='agent-a', expected_task_id=4, agent_workflow_key='travel_expense')["status"] == "done"
     assert api.posts == []
 
 
@@ -499,7 +501,7 @@ def test_four_default_previews_release_capacity_and_never_write(tmp_path):
 def test_fail_requires_a_nonempty_reason(tmp_path, reason):
     app, api = service(tmp_path)
     run = app.pending()["run_id"]
-    task = app.store.claim(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')["task"]
+    task = app.store.claim(run,  expected_task_id=1, )["task"]
     with pytest.raises(ValueError, match="failure_reason_required"):
         app.fail(run,task["id"],reason)
     assert app.inspect(task["id"])["task"]["status"] == "preparing"
@@ -542,13 +544,13 @@ def test_overseas_authorized_no_invoice_preserves_fields_and_has_independent_con
     monkeypatch.setattr(official_sql,"confirmed_empty_attachment_fields",lambda *args,**kwargs:
         {"detail[0].row[0].field[0]":{"source":"database_empty","request_id":"101"}})
     app,api = service(tmp_path,api)
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    task = collect_for_review(app, app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
     import json
     material = json.loads(Path(task["material_file"]).read_text())
     recognition = {"material_digest":digest(material),"invoices":[]}
     with pytest.raises(ValueError,match="overseas_authorization_required"):
-        app.submit(task["task_id"],recognition=recognition,confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
-    result = app.submit(task["task_id"],recognition=recognition,confirm_write=True,allow_overseas=True, review_assessment=completed_review(app, task["task_id"]))
+        deliver_and_submit(app, task["task_id"],recognition=recognition,confirm_write=True, review_assessment=completed_review(app, task["task_id"]))
+    result = deliver_and_submit(app, task["task_id"],recognition=recognition,confirm_write=True,allow_overseas=True, review_assessment=completed_review(app, task["task_id"]))
     assert result["status"] == expected_status
     assert result["fields_match"] is True
     assert api.posts == [("101",[])]
@@ -561,21 +563,20 @@ def test_bounded_collect_refuses_wrong_agent_and_finishes_without_claiming_outsi
     started = app.pending(batch_size=2)
     run = started["run_id"]
     first_id, second_id, outside_id = [task["id"] for task in started["tasks"]]
-    before = app.store.tasks(run)
-    assert app.collect(run, agent_id="wrong-agent", expected_task_id=first_id,
+    assert collect_for_review(app, run, agent_id="wrong-agent", expected_task_id=first_id,
                        agent_workflow_key="general_expense") == {
-        "run_id":run, "status":"refused", "reason":"agent_workflow_mismatch", "summary":{"queued":3}}
-    assert app.store.tasks(run) == before
-    first = app.collect(run, agent_id="travel-agent", expected_task_id=first_id,
+        "run_id":run, "status":"refused", "reason":"agent_workflow_mismatch", "summary":{"prepared":1,"queued":2}}
+    assert app.store.get_task(first_id)["agent_id"] is None
+    first = collect_for_review(app, run, agent_id="travel-agent", expected_task_id=first_id,
                         agent_workflow_key="travel_expense")
     app.fail(run, first["task_id"], "read_failed")
-    second = app.collect(run, agent_id="travel-agent", expected_task_id=second_id,
+    second = collect_for_review(app, run, agent_id="travel-agent", expected_task_id=second_id,
                          agent_workflow_key="travel_expense")
-    assert app.collect(run, agent_id="next-agent", expected_task_id=outside_id, agent_workflow_key='travel_expense') == {
+    assert collect_for_review(app, run, agent_id="next-agent", expected_task_id=outside_id, agent_workflow_key='travel_expense') == {
         "run_id":run, "status":"waiting", "reason":"in_flight",
         "summary":{"failed":1,"reviewing":1,"queued":1}}
-    app.submit(second["task_id"], opinion="离线预览意见")
-    assert app.collect(run, agent_id="next-agent", expected_task_id=outside_id, agent_workflow_key='travel_expense') == {
+    deliver_and_submit(app, second["task_id"], opinion="离线预览意见")
+    assert collect_for_review(app, run, agent_id="next-agent", expected_task_id=outside_id, agent_workflow_key='travel_expense') == {
         "run_id":run, "status":"done", "reason":"batch_exhausted",
         "summary":{"failed":1,"preview":1,"queued":1}}
     assert app.inspect(outside_id)["task"]["status"] == "queued"
@@ -585,7 +586,7 @@ def test_bounded_collect_refuses_wrong_agent_and_finishes_without_claiming_outsi
 def test_collect_unknown_run_keeps_the_public_not_found_error(tmp_path):
     app, api = service(tmp_path)
     with pytest.raises(ValueError, match="^run_not_found$"):
-        app.collect("missing", agent_id="agent-a", expected_task_id=1, agent_workflow_key="travel_expense")
+        collect_for_review(app, "missing", agent_id="agent-a", expected_task_id=1, agent_workflow_key="travel_expense")
     assert api.posts == []
 
 
@@ -612,7 +613,7 @@ def test_auth_failure_keeps_attempt_diagnostics_and_never_submits(tmp_path, monk
 
     monkeypatch.setattr(auth, '_http_post', token)
     with pytest.raises(auth.AuthFailure) as caught:
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     output = cli.failure(caught.value)
     body = json.loads(Path(output['diagnostics_file']).read_text())
     assert body['error'] == 'oa_auth_applytoken_failed'

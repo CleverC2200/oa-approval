@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 import json
 
 import pytest
@@ -8,13 +9,13 @@ from apps.oa.approvals.demo import create_demo
 def finish_one(app, started, *, fail=False):
     run_id = started['run_id']
     task = next(task for task in started['tasks'] if task['status'] == 'queued')
-    collected = app.collect(run_id, agent_id=f"reviewer-{run_id}", expected_task_id=task['id'],
+    collected = collect_for_review(app, run_id, agent_id=f"reviewer-{run_id}", expected_task_id=task['id'],
                             agent_workflow_key=task['workflow_key'])
     assert collected['status'] == 'reviewing'
     if fail:
         app.fail(run_id, task['id'], 'synthetic_read_failure')
     else:
-        assert app.submit(task['id'], opinion='Synthetic preview')['status'] == 'preview'
+        assert deliver_and_submit(app, task['id'], opinion='Synthetic preview')['status'] == 'preview'
     return task
 
 
@@ -73,7 +74,7 @@ def test_recovery_requires_exact_authorized_failure_and_keeps_unrelated_failures
     first = app.pending(batch_size=3)
     failed = finish_one(app, first, fail=True)
     another = next(task for task in app.store.tasks(first['run_id']) if task['status'] == 'queued')
-    app.collect(first['run_id'], agent_id='second', expected_task_id=another['id'], agent_workflow_key=another['workflow_key'])
+    collect_for_review(app, first['run_id'], agent_id='second', expected_task_id=another['id'], agent_workflow_key=another['workflow_key'])
     app.fail(first['run_id'], another['id'], 'synthetic_second_failure')
     app.close(first['run_id'])
     current = app.pending(batch_size=2, recovery_request_ids=[failed['request_id'], 'not-in-pending'])
@@ -117,7 +118,7 @@ def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_pat
     original = app.pending(request_ids=recovery_ids)
     failed_ids = []
     for index, task in enumerate(original['tasks']):
-        app.collect(original['run_id'], agent_id=f'original-{index}', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+        collect_for_review(app, original['run_id'], agent_id=f'original-{index}', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
         if with_old_review and index == 1:
             from tests.approvals.review_fixtures import completed_review
 
@@ -128,7 +129,7 @@ def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_pat
 
             app.api.pending_rows = unavailable
             with pytest.raises(RuntimeError, match='synthetic_prewrite_read_failure'):
-                app.submit(task['id'], opinion='Synthetic retained opinion', confirm_write=True,
+                deliver_and_submit(app, task['id'], opinion='Synthetic retained opinion', confirm_write=True,
                            review_assessment=completed_review(app, task['id']))
             app.api.pending_rows = pending_rows
         else:

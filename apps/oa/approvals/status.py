@@ -4,7 +4,7 @@ from collections import Counter
 import json
 
 from apps.oa.approvals.receipts import assess_submission
-from apps.oa.approvals.store import INFLIGHT_STATUSES, MAX_INFLIGHT
+from apps.oa.approvals.store import REVIEW_STATUSES, REVIEW_SLOTS, UNFINISHED_STATUSES
 
 
 def batch_status(store, run, tasks, owner):
@@ -15,15 +15,15 @@ def batch_status(store, run, tasks, owner):
     task_ids = {task['id'] for task in scoped}
     outside = [task for task in tasks if task['id'] not in task_ids]
     queued = [task for task in scoped if task['status'] == 'queued']
-    inflight = sum(task['status'] in INFLIGHT_STATUSES for task in scoped)
+    inflight = sum(task['status'] in UNFINISHED_STATUSES for task in scoped)
     candidate = next((task for task in tasks if task['id'] in task_ids and task['status'] == 'queued'), None)
     agents = []
     for agent_id in sorted({task['agent_id'] for task in tasks if task['agent_id'] is not None}):
         claimed = [task for task in tasks if task['agent_id'] == agent_id]
-        busy = [task['id'] for task in claimed if task['status'] in INFLIGHT_STATUSES]
+        busy = [task['id'] for task in claimed if task['status'] in REVIEW_STATUSES]
         agents.append({'agent_id': agent_id, 'workflow_keys': sorted({task['workflow_key'] for task in claimed}),
                        'claimed_count': len(claimed), 'inflight_task_ids': busy, 'busy': bool(busy)})
-    occupied = sum(task['status'] in INFLIGHT_STATUSES for task in tasks)
+    occupied = sum(task['status'] in REVIEW_STATUSES for task in tasks)
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
     owner_matches = owner.get('reachable') is True and owner.get('run_id') == run['id']
@@ -64,7 +64,8 @@ def batch_status(store, run, tasks, owner):
         'review_progress': [{'task_id': task['id'], 'agent_id': task['agent_id'],
                              **progress_summary(task['material_file'], task['material_sha256'])}
                             for task in scoped if task['status'] == 'reviewing' and task['material_file']],
-        'capacity': {'inflight': occupied, 'available': max(0, MAX_INFLIGHT - occupied), 'limit': MAX_INFLIGHT},
+        'capacity': {'inflight': occupied, 'available': max(0, REVIEW_SLOTS - occupied), 'limit': REVIEW_SLOTS,
+                     **store.pipeline_capacity(tasks)},
         'batch': {
             'mode': 'all_queue' if frozen is None else 'frozen',
             'size': None if frozen is None else frozen['size'],
@@ -105,7 +106,7 @@ def recovery_candidates(store, run, tasks):
 def closeout_blockers(acceptance, *, collection_active=False):
     facts = acceptance['tasks']
     blockers = []
-    if collection_active or any(task['status'] in INFLIGHT_STATUSES for task in facts):
+    if collection_active or any(task['status'] in UNFINISHED_STATUSES for task in facts):
         blockers.append('tasks_inflight')
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] for attempt in task['submissions'])
            for task in facts):

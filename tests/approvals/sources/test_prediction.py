@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 
 import io
 import json
@@ -104,9 +105,9 @@ def test_approval_default_prediction_uses_its_source_policy(native, finance_rule
     native.replies.append(result())
     app, api = service(tmp_path)
     try:
-        task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
+        task = collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
                            agent_workflow_key='travel_expense')
-        preview = app.submit(task['task_id'], opinion='合成预览')
+        preview = deliver_and_submit(app, task['task_id'], opinion='合成预览')
         assert preview['status'] == 'preview'
         assert native.authentications == [POLICY.attachments.oa_origin]
         assert all(url.startswith(POLICY.attachments.oa_origin + '/') for url in native.urls)

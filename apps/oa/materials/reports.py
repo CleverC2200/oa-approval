@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
+from apps.oa.materials import resources as attachment_locations
+
 
 class RecognitionRecord(TypedDict):
     kind: str
@@ -156,3 +158,18 @@ def _validate(report: dict) -> None:
 
 def _box(value) -> bool:
     return isinstance(value, list) and len(value) == 4 and all(type(item) is int for item in value)
+
+
+def prepared_parts(prepared: dict):
+    for index, (location, page) in enumerate(attachment_locations.image_locations(prepared.get('images', []))):
+        resource = location['resource_id']
+        if not resource:
+            raise ValueError('attachment_page_unbound')
+        metadata = {key: value for key, value in page.items() if key != 'path'}
+        yield {**metadata, **location, 'part_id': f'image-{index + 1}', 'kind': 'image', 'source': 'deepseek',
+               'prepared_resource_id': str(page.get('resource_id') or resource)}, page
+    for index, content in enumerate(prepared.get('structured_contents', [])):
+        yield {**content, 'part_id': f'text-{index + 1}', 'kind': 'text', 'source': 'parser',
+               'resource_id': str(content.get('parent_resource_id') or content.get('resource_id') or ''),
+               'prepared_resource_id': str(content.get('resource_id') or ''),
+               'evidence_ref': f'material:prepared.structured_contents[{index}]'}, json.dumps(content, ensure_ascii=False)

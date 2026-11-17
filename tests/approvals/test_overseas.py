@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
@@ -103,12 +104,12 @@ def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path
     monkeypatch.setattr(overseas, 'download_fresh', lambda *_a, **_k: files)
     app = Approval(tmp_path / 'runtime', api=api, configs=[], source_policy=POLICY)
     run = app.pending()['run_id']
-    task = app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    task = collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
         reading(part['resource_id'], part['sha256'], '10.10', 'INV-' + part['resource_id'])
         for part in material['attachments']]}
-    original = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
+    original = deliver_and_submit(app, task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert original['status'] == 'unknown' and original['response_code'] == 'UNKNOWN'
     app.close(run)
     if state == 'fields_changed':
@@ -397,7 +398,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
 
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
     app = Approval(tmp_path / 'runtime', api=Api(), configs=[], source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
         reading(part['resource_id'], part['sha256'], '10.10', 'INV-' + part['resource_id'])
@@ -407,7 +408,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
     elif po_problem == 'mismatch':
         recognized['invoices'][1]['invoice_purchase_order']['value'] = '009999'
     assert len(material['attachments']) == 2
-    preview = app.submit(task['task_id'], recognition=recognized)
+    preview = deliver_and_submit(app, task['task_id'], recognition=recognized)
     assert preview['status'] == 'preview'
     assert preview['field_plan']['updates'] == [{'row_key': 'formtable_main_1295_dt1:1', 'values': {
         'fpje': '20.20', 'fphm': 'INV-101,INV-102', 'fpdqr': '2026-12-01',
@@ -416,8 +417,8 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
     assert preview['field_plan']['remark'] == preview['opinion']
     assert posts == []
     with pytest.raises(ValueError, match='overseas_authorization_required'):
-        app.submit(task['task_id'], recognition=recognized, confirm_write=True, review_assessment=completed_review(app, task['task_id']))
-    result = app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
+        deliver_and_submit(app, task['task_id'], recognition=recognized, confirm_write=True, review_assessment=completed_review(app, task['task_id']))
+    result = deliver_and_submit(app, task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     expected = 'unknown' if tamper else 'submitted'
     assert result['status'] == ('unknown' if lost_response else expected)
     if not lost_response:
@@ -428,7 +429,7 @@ def test_multi_invoice_collect_preview_submit_and_postcheck(case, tmp_path, monk
         assert checked['fields_match'] is not tamper
         assert checked['submit_ok'] is True
         assert checked['postcheck_done_hit'] is not tamper
-    assert app.submit(task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))['status'] == expected
+    assert deliver_and_submit(app, task['task_id'], recognition=recognized, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))['status'] == expected
     assert len(posts) == 1
     assert {item['fieldName']: item['fieldValue'] for item in
             posts[0][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']} == {
@@ -487,14 +488,14 @@ def test_missing_injected_overseas_writer_never_builds_a_real_adapter(case, tmp_
     monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda: pytest.fail('injected adapter must not fall back to real credentials'))
     app = Approval(tmp_path / 'runtime', api=Api(), writer=object(), configs=[], source_policy=POLICY)
     started = app.pending()
-    task = app.collect(started['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    task = collect_for_review(app, started['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognition = {'material_digest': invoice.digest(material), 'invoices': [
         reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
         for item in material['attachments']]}
     with pytest.raises(ValueError, match='invoice_write_adapter_required'):
         submit_overseas(app.api, app.writer, '201', material, invoice.build_plan(material, recognition), origins=POLICY.attachments)
-    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
+    result = deliver_and_submit(app, task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert result['status'] == 'unknown'
     assert len(app.inspect(task['task_id'])['submissions']) == 1
 
@@ -549,12 +550,12 @@ def test_default_overseas_write_uses_one_fresh_adapter_for_preflight_and_verific
     monkeypatch.setattr(overseas_invoice_api, 'build_api', lambda **kwargs: fresh(InvoiceApi))
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
     app = Approval(tmp_path / 'runtime', configs=[{}], source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     recognition = {'material_digest': invoice.digest(material), 'invoices': [
         reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
         for item in material['attachments']]}
-    result = app.submit(task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
+    result = deliver_and_submit(app, task['task_id'], recognition=recognition, confirm_write=True, allow_overseas=True, review_assessment=completed_review(app, task['task_id']))
     assert result['status'] == 'submitted'
     assert result['fields_match'] is True
     assert len(posts) == 1
@@ -589,7 +590,7 @@ def test_document_references_collect_and_preview_in_original_order(case, tmp_pat
     monkeypatch.setattr(overseas.official_sql, 'workflow_attachment_document', document)
     monkeypatch.setattr(overseas, 'download_fresh', lambda selected, *args, **kwargs: files)
     app = Approval(tmp_path / 'runtime', api=Api(), configs=[], source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
                        agent_workflow_key='overseas_invoice')
     material = json.loads(Path(task['material_file']).read_text())
     assert material['snapshot']['rows'][0]['resource_ids'] == ['102', '101']
@@ -597,7 +598,7 @@ def test_document_references_collect_and_preview_in_original_order(case, tmp_pat
     recognized = {'material_digest': invoice.digest(material), 'invoices': [
         reading(item['resource_id'], item['sha256'], '10.10', 'INV-' + item['resource_id'])
         for item in material['attachments']]}
-    preview = app.submit(task['task_id'], recognition=recognized)
+    preview = deliver_and_submit(app, task['task_id'], recognition=recognized)
     assert preview['status'] == 'preview'
     assert preview['field_plan']['updates'][0]['values']['fphm'] == 'INV-102,INV-101'
     assert '❌' not in preview['opinion']

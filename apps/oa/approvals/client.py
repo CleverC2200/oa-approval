@@ -83,6 +83,7 @@ def query(root, operation, *, run_id=None, task_id=None, full=False, view=None):
             if not full:
                 details['task'].pop('material_json', None)
                 details['task'].pop('frozen_json', None)
+                details['task'].pop('recognition_json', None)
                 details['attachments'] = [{key: item[key] for key in
                     ('id', 'resource_id', 'parent_resource_id', 'name', 'path', 'sha256')} for item in details['attachments']]
                 details['contents'] = [{key: item[key] for key in

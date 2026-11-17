@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 from tests.approvals.review_fixtures import completed_review
 from datetime import datetime, timedelta, timezone
 import json
@@ -10,7 +11,7 @@ from tests.approvals.test_operations import service
 
 
 def collected(app, agent='agent-a'):
-    return app.collect(app.pending()['run_id'], agent_id=agent, expected_task_id=1,
+    return collect_for_review(app, app.pending()['run_id'], agent_id=agent, expected_task_id=1,
                        agent_workflow_key='travel_expense')
 
 
@@ -25,14 +26,16 @@ def test_success_cleans_files_and_cache_but_keeps_history_and_repeat_guard(tmp_p
     with sqlite3.connect(tmp_path / 'attachment-cache.sqlite3') as cache:
         cache.execute('CREATE TABLE attachment_files(request_id,flow_key,resource_key,entry_json)')
         cache.execute("INSERT INTO attachment_files VALUES ('101','travel_expense','file-1','{}')")
-    result = app.submit(1, opinion='合成意见', recognition={'report_file': str(report)}, confirm_write=True, review_assessment=completed_review(app, 1))
+    from tests.approvals.review_fixtures import recognition_report
+    reading = recognition_report(app.store.get_task(1)) | {'report_file': str(report)}
+    result = deliver_and_submit(app, 1, opinion='合成意见', recognition=reading, confirm_write=True, review_assessment=completed_review(app, 1))
     assert result['status'] == 'submitted' and result['cleanup']['files'] > 0
     assert not Path(task['material_file']).exists() and not report.exists()
     details = app.inspect(1)
     assert details['contents'] and details['task']['material_json']
     assert details['reviews'][0]['opinion'] == '合成意见'
     assert details['submissions'][0]['status'] == 'submitted'
-    assert app.submit(1, opinion='禁止重发', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
+    assert deliver_and_submit(app, 1, opinion='禁止重发', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
     assert len(api.posts) == 1
     with sqlite3.connect(tmp_path / 'attachment-cache.sqlite3') as cache:
         assert cache.execute('SELECT count(*) FROM attachment_files').fetchone()[0] == 0
@@ -45,7 +48,7 @@ def test_non_verified_tasks_keep_material(tmp_path, status):
     task = collected(app)
     if status != 'preview':
         api.submit_and_verify = lambda *_: {'failure_code': receipts.SUBMIT_REJECTED if status == 'failed' else 'writer_result_unknown'}
-    result = app.submit(1, opinion='合成意见', confirm_write=status != 'preview', review_assessment=completed_review(app, 1))
+    result = deliver_and_submit(app, 1, opinion='合成意见', confirm_write=status != 'preview', review_assessment=completed_review(app, 1))
     assert result['status'] == status
     assert retention.cleanup(app.store, execute=True)['files'] == 0
     assert Path(task['material_file']).is_file()
@@ -55,7 +58,7 @@ def test_postcheck_success_cleans_only_after_verification(tmp_path):
     app, api = service(tmp_path)
     task = collected(app)
     api.submit_and_verify = lambda *_: {}
-    assert app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'unknown'
+    assert deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'unknown'
     api.rows = []
     api.handled = [{'request_id': '101', 'handled_at': '2999-01-01 00:00:00'}]
     result = app.postcheck(1)
@@ -67,7 +70,7 @@ def test_cleanup_preserves_shared_active_files_outside_files_and_database(tmp_pa
     app, _ = service(tmp_path)
     task = collected(app)
     original = next((Path(task['material_file']).parent / 'attachments').iterdir())
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     original.parent.mkdir(parents=True, exist_ok=True)
     original.write_text('共享原件')
     from tests.approvals.test_store import pending
@@ -105,7 +108,7 @@ def test_deletion_failure_preserves_verified_receipt_and_can_retry(tmp_path, mon
         return unlink(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, 'unlink', fail)
-    result = app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    result = deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     assert result['status'] == 'submitted' and result['cleanup']['status'] == 'partial'
     assert app.inspect(1)['submissions'][0]['status'] == 'submitted'
     monkeypatch.setattr(Path, 'unlink', unlink)
@@ -117,7 +120,7 @@ def test_deletion_failure_preserves_verified_receipt_and_can_retry(tmp_path, mon
 def test_expire_only_verified_history_older_than_one_year_and_not_seen_again(tmp_path):
     app, _ = service(tmp_path)
     collected(app)
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     run = app.store.latest_run()['id']
     app.close(run)
     cutoff = datetime.now(timezone.utc) - timedelta(days=365)
@@ -137,7 +140,7 @@ def test_expire_only_verified_history_older_than_one_year_and_not_seen_again(tmp
 def test_expiration_preserves_unresolved_recent_or_current_history(tmp_path, protected):
     app, _ = service(tmp_path)
     collected(app)
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     if protected != 'active_run':
         app.close(app.store.latest_run()['id'])
     cutoff = datetime.now(timezone.utc) - timedelta(days=365)
@@ -157,7 +160,7 @@ def test_cli_preview_does_not_mutate_and_execute_requires_idle_owner(tmp_path, c
 
     app, _ = service(tmp_path)
     task = collected(app)
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     material = Path(task['material_file'])
     material.parent.mkdir(parents=True, exist_ok=True)
     material.write_text('{}')
@@ -177,10 +180,10 @@ def test_new_delivery_collects_fresh_material_after_previous_cleanup(tmp_path):
     app, api = service(tmp_path)
     previous = dict(api.rows[0])
     first = collected(app)
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     api.rows = [{**previous, 'received_at': '2026-10-23 09:00:00'}]
     run = app.pending()['run_id']
-    second = app.collect(run, agent_id='agent-b', expected_task_id=2, agent_workflow_key='travel_expense')
+    second = collect_for_review(app, run, agent_id='agent-b', expected_task_id=2, agent_workflow_key='travel_expense')
     assert second['task_id'] != first['task_id']
     assert Path(second['material_file']).is_file()
     assert not Path(first['material_file']).exists()
@@ -201,7 +204,7 @@ def test_unverified_submitted_flag_and_collection_in_progress_prevent_cleanup(tm
 def test_symlinked_materials_parent_does_not_remove_outside_empty_directories(tmp_path):
     app, _ = service(tmp_path)
     collected(app)
-    app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
+    deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     materials = tmp_path / 'materials'
     materials.rmdir()
     outside = tmp_path.parent / (tmp_path.name + '-outside')
@@ -224,7 +227,7 @@ def test_successful_retry_preserves_previous_failed_attempt_and_receipt(tmp_path
     app.collector = failed
     run = app.pending()['run_id']
     with pytest.raises(RuntimeError) as captured:
-        app.collect(run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     receipt = Path(captured.value.diagnostics_file)
     original_receipt = receipt.read_bytes()
     failed_directory = Path(json.loads(original_receipt)['material_directory'])
@@ -232,8 +235,8 @@ def test_successful_retry_preserves_previous_failed_attempt_and_receipt(tmp_path
     original_bytes = original.read_bytes()
     app.collector = collect
     retry_run = app.pending(request_ids=['101'], retry_failed=True)['run_id']
-    retried = app.collect(retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
-    assert app.submit(1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
+    retried = collect_for_review(app, retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
+    assert deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
     assert len(api.posts) == 1
     assert retention.cleanup(app.store, execute=True)['files'] == 0
     assert original.read_bytes() == original_bytes and receipt.read_bytes() == original_receipt
@@ -245,11 +248,11 @@ def test_rejected_submission_evidence_survives_successful_retry(tmp_path):
     failed = collected(app)
     writer = api.submit_and_verify
     api.submit_and_verify = lambda *_: {'failure_code': receipts.SUBMIT_REJECTED}
-    assert app.submit(1, opinion='首次合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'failed'
+    assert deliver_and_submit(app, 1, opinion='首次合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'failed'
     api.submit_and_verify = writer
     retry_run = app.pending(request_ids=['101'], retry_failed=True)['run_id']
-    retried = app.collect(retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
-    assert app.submit(1, opinion='复审合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
+    retried = collect_for_review(app, retry_run, agent_id='agent-b', expected_task_id=1, agent_workflow_key='travel_expense')
+    assert deliver_and_submit(app, 1, opinion='复审合成意见', confirm_write=True, review_assessment=completed_review(app, 1))['status'] == 'submitted'
     assert retention.cleanup(app.store, execute=True)['files'] == 0
     assert Path(failed['material_file']).is_file() and Path(retried['material_file']).is_file()
     assert [row['status'] for row in app.inspect(1)['submissions']] == ['failed', 'submitted']
