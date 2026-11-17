@@ -38,7 +38,7 @@ def _owner_status(root):
     try:
         response = send(root, {'operation': 'status'}, timeout=0.5)
         owner = {'reachable': True, 'run_id': response['run_id'],
-                 **{key: response[key] for key in ('phase', 'collection') if key in response}}
+                 **{key: response[key] for key in ('phase', 'collection', 'writer') if key in response}}
     except TimeoutError:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
             probe.settimeout(0.5)

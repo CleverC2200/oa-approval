@@ -169,7 +169,7 @@ def test_finish_is_bound_to_current_run_and_closes_through_public_cli(tmp_path):
         assert process.poll() is None
         status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
         assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'],
-                                                    'phase': 'running', 'collection': None}
+                                                    'phase': 'running', 'collection': None, 'writer': None}
         finished = subprocess.run([*base, 'finish', '--run-id', started['run_id']], cwd=PROJECT, capture_output=True, text=True, timeout=10)
         assert finished.returncode == 0, finished.stderr + finished.stdout
         assert json.loads(finished.stdout)['status'] == 'closed'
@@ -191,7 +191,7 @@ def test_stdin_null_reports_failure_and_continues_to_the_next_request(tmp_path):
     started, failed, status = [json.loads(line) for line in result.stdout.splitlines()]
     assert failed == {'status': 'failed', 'error': 'AttributeError'}
     assert status == {'run_id': started['run_id'], 'status': 'running',
-                      'phase': 'running', 'collection': None}
+                      'phase': 'running', 'collection': None, 'writer': None}
     assert not Path(started['socket']).exists()
 
 
@@ -876,7 +876,7 @@ def test_guarded_finish_drains_before_handoff(tmp_path):
         assert json.loads(wrong.stdout)['error'] == 'run_mismatch'
         assert process.poll() is None
         status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
-        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None}
+        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None, 'writer': None}
         collected = subprocess.run([*base, 'collect', '--expected-task-id', '1'],
                                    cwd=PROJECT, capture_output=True, text=True, timeout=10)
         assert json.loads(collected.stdout)['status'] == 'prepared'

@@ -26,9 +26,13 @@ def batch_status(store, run, tasks, owner):
     occupied = sum(task['status'] in REVIEW_STATUSES for task in tasks)
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
+    unresolved = store.unresolved_writes()
     owner_matches = owner.get('reachable') is True and owner.get('run_id') == run['id']
     blockers = closeout_blockers(all_acceptance,
-        collection_active=owner_matches and owner.get('collection') is not None)
+        collection_active=owner_matches and owner.get('collection') is not None,
+        writer_active=owner_matches and owner.get('writer') is not None)
+    if unresolved and 'submission_unresolved' not in blockers:
+        blockers.append('submission_unresolved')
     if owner_state_unconfirmed(owner):
         blockers.append('owner_state_unconfirmed')
     owner_released = (owner.get('reachable') is False
@@ -37,10 +41,15 @@ def batch_status(store, run, tasks, owner):
     complete = run['status'] == 'closed' and owner_released
     execution = json.loads(run['summary_json']).get('execution')
     alerts = status_alerts(run, owner, all_acceptance, blockers, dict(Counter(task['status'] for task in tasks)))
+    if any(item['run_id'] != run['id'] or item['submission_run_id'] not in {None, run['id']} for item in unresolved):
+        if not any(alert['code'] == 'submission_unresolved' for alert in alerts):
+            alerts.append({'code': 'submission_unresolved', 'severity': 'blocked'})
     if execution and execution.get('stop') and execution['stop']['kind'] in {'unexplained', 'execution_incomplete'}:
         alerts.append({'code': 'batch_stopped_early', 'severity': 'blocked'})
     if execution:
         execution = {**execution, 'archive_eligible': execution['archive_eligible'] and owner_released and not blockers}
+        if unresolved:
+            execution.update(status='blocked', archive_eligible=False)
         if (execution['status'] == 'success' and not execution.get('verified_count')
                 and json.loads(run['summary_json']).get('pending') is None):
             execution.update(status='legacy_unverified', archive_eligible=False,
@@ -56,6 +65,7 @@ def batch_status(store, run, tasks, owner):
         'pending': json.loads(run['summary_json']).get('pending'),
         'execution': execution,
         'acceptance': acceptance,
+        'runtime_unresolved': unresolved,
         'closeout': {'drained': not blockers, 'blockers': blockers,
                      'batch_complete': not blockers and not queued,
                      'complete': complete and not blockers and not queued},
@@ -103,10 +113,10 @@ def recovery_candidates(store, run, tasks):
     return candidates
 
 
-def closeout_blockers(acceptance, *, collection_active=False):
+def closeout_blockers(acceptance, *, collection_active=False, writer_active=False):
     facts = acceptance['tasks']
     blockers = []
-    if collection_active or any(task['status'] in UNFINISHED_STATUSES for task in facts):
+    if collection_active or writer_active or any(task['status'] in UNFINISHED_STATUSES for task in facts):
         blockers.append('tasks_inflight')
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] for attempt in task['submissions'])
            for task in facts):

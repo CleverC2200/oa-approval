@@ -46,14 +46,16 @@ bash .codex/python.sh -m apps.oa.materials progress /absolute/path/recognition.j
 使用 `--material-file` 生成的报告携带真实附件 ID，压缩包内页面归属于原压缩包，重复页面分别保留各附件归属。将整份原始报告与意见一起保存，SQLite 自动按附件 ID、定位和实际来源记录内容；无 `source` 的旧报告仍按 `deepseek` 处理，历史数据保持原样：
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit --task-id "$OA_TASK_ID" \
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" deliver --task-id "$OA_TASK_ID" \
+  --agent-id "$OA_REVIEW_AGENT_ID" --material-file "$OA_MATERIAL_FILE" \
+  --material-sha256 "$OA_MATERIAL_SHA256" --review-file /absolute/path/review.json \
   --opinion-file /absolute/path/opinion.txt \
   --recognition-file /absolute/path/recognition.json
 ```
 
-定向读取同时生成 `recognition.json` 和 `observations.json`，返回 `observations_file`。观察保留真实附件 ID、原定位、实际来源、内容、区域/角度及报告路径和问题等来源信息，不同区域或角度可以区分。通过 `submit --observations-file /absolute/path/new-reread-directory/observations.json` 将复读结果作为补充保存，原始整份报告继续通过 `--recognition-file` 提供。直接原图观察由审核 Agent 实际查看后补充，工具不会生成这种观察。
+定向读取同时生成 `recognition.json` 和 `observations.json`，返回 `observations_file`。观察保留真实附件 ID、原定位、实际来源、内容、区域/角度及报告路径和问题等来源信息，不同区域或角度可以区分。通过 `deliver --observations-file /absolute/path/new-reread-directory/observations.json` 将复读结果作为补充保存，原始整份报告继续通过 `--recognition-file` 提供。直接原图观察由审核 Agent 实际查看后补充，工具不会生成这种观察。
 
-上述提交入口默认只保存预览。只读识别工具不访问 OA、不提交意见，识别文字不是权威主数据，也不证明材料属于当前费用。
+上述入口只保存本地交付，成功后再按当前授权调用 preview 或 submit；已保存识别不能单独替换。派发审核前的完整识别同时通过 `dispatch-review --recognition-file` 绑定。只读识别工具不访问 OA、不提交意见，识别文字不是权威主数据，也不证明材料属于当前费用。
 
 新材料的 `attachment_presence.status=confirmed_empty` 及 `evidence_refs` 记录官方附件来源已完整取得且无可下载附件。工具据此返回 `status=skipped`、`reason=official_no_attachments`，不调用模型；该结果仅结束附件识别，业务审核仍按[证据阅读规则](../../.agents/skills/oa-finance-preaudit/references/observation-contract.md#全页覆盖门禁)完整读取表单、明细及页面业务资料。空的资源或准备页列表本身不能证明无附件；采集/解析失败、声明附件未取得、准备不完整仍报告失败，历史材料沿用原有处理。
 
