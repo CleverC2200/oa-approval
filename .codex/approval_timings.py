@@ -35,7 +35,8 @@ def build_report(case):
         receipt_file = case / f'submit-{task_id}.json'
         receipt = json.loads(receipt_file.read_text()) if receipt_file.exists() else None
         if receipt is not None and (receipt['task_id'] != task_id or receipt['status'] != 'submitted'
-                or not all(receipt[key] is True for key in ('submit_ok', 'done_hit', 'postcheck_done_hit'))):
+                or not all(receipt[key] is True for key in ('submit_ok', 'done_hit', 'postcheck_done_hit'))
+                or (collected['workflow_key'] == 'overseas_invoice' and receipt.get('fields_match') is not True)):
             raise ValueError('timing_submission_not_verified')
         recognition = json.loads(artifact('recognition_file').read_text()) if delivery.get('recognition_file') else None
         recognition_seconds = None
