@@ -869,7 +869,8 @@ def _convert_spreadsheet(source: _ConversionSource, *, out_dir: Path, compact: b
     try:
         extracted = spreadsheet_images.extract(source.path, out_dir,
                     safe_name(source.resource_id, source.path.stem), compact=compact)
-        fact = spreadsheet_fact(source.path)
+        fact = (spreadsheet_fact(source.path) if _is_ooxml_spreadsheet(source.path)
+                else legacy_spreadsheet_fact(source.path))
         for number, (path, cell) in enumerate(extracted, 1):
             images.append(source.image(path, f'spreadsheet_image_{number}', _file_sha256(path),
                                        spreadsheet_cell=cell))
@@ -899,7 +900,6 @@ def _convert_docx(source: _ConversionSource, *, out_dir: Path) -> _ConversionRes
 
 
 _STRUCTURED_READERS = {
-    '.xls': (legacy_spreadsheet_fact, 'legacy_spreadsheet_read', 'legacy_spreadsheet_unsupported'),
     '.xml': (xml_invoice_fact, 'xml_invoice_read', 'xml_failed'),
     '.ofd': (ofd_invoice_fact, 'ofd_invoice_read', 'ofd_failed'),
 }
@@ -926,7 +926,7 @@ def _convert_attachment(source: _ConversionSource, *, out_dir: Path,
             'document_type': 'office_owner_file', 'summary': 'Office临时锁定文件，原件保留，不作为业务凭据。',
             'key_text': ['此文件只记录Office编辑锁定信息；业务内容以同目录的对应工作簿为准。']}],
             path=str(source.path), image_count=0, reason='office_owner_file')
-    if suffix in SPREADSHEET_EXTS or (suffix in LEGACY_SPREADSHEET_EXTS and _is_ooxml_spreadsheet(source.path)):
+    if suffix in SPREADSHEET_EXTS | LEGACY_SPREADSHEET_EXTS:
         return _convert_spreadsheet(source, out_dir=out_dir, compact=compact_spreadsheet)
     if suffix in DOCX_EXTS:
         return _convert_docx(source, out_dir=out_dir)
