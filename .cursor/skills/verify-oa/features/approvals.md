@@ -31,6 +31,7 @@ Preconditions:
   ```
 
 - **只读核对。** 其他命令调用使用保存的同一绝对 root。运行 `status --view batch`，要求 run_id 匹配、owner可达；`show --task-id` 的 ID取本次 start/collect 返回值。
+- **失败恢复。** `status --view batch` 的 `recovery_candidates` 只列当前范围内未开始过提交的技术失败；授权后将其中申请号逐个传入 `start --recover-request-id`，或与合法 `--continue-from` 一起使用。新冻结材料进入同一接受时间FIFO，链内只恢复一次，旧证据保留。已发生提交尝试的失败不会列入自动恢复候选；未知结果仍只回查。
 - **领取。** 执行 `collect --agent-id demo-reviewer --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"`。两个变量取本次队列首单，要求返回本次 material_file，文件存在且 prepared 含合成页。
 - **预览。** 将“合成验证意见，不是业务审核结论”保存为意见文件，运行 `preview --task-id "$OA_TASK_ID" --opinion-file "$OA_OPINION_FILE"`。要求 preview；再 show，submissions 仍为空，不能只看退出码。
 - **fake 写入。** 按[审核结果接口](../../../../.agents/skills/oa-finance-preaudit/references/review-assessment.md)记录本次合成材料的实际验收，保存 `$OA_REVIEW_FILE`。仅对本次 `demo=true` owner运行 `submit --task-id "$OA_TASK_ID" --opinion-file "$OA_OPINION_FILE" --review-file "$OA_REVIEW_FILE" --confirm-write YES`，核三项 true。再 `postcheck` 和 show，仍只有一次提交。不能把相同命令应用到真实 root。

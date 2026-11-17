@@ -13,6 +13,48 @@ from apps.oa.approvals.demo import create_demo
 PROJECT = Path(__file__).resolve().parents[2]
 
 
+def test_public_recovery_candidates_include_only_unsubmitted_failures_in_scope(tmp_path):
+    from apps.oa.approvals.client import query
+
+    app = create_demo(tmp_path)
+    run = app.pending(batch_size=1)
+    task = run['tasks'][0]
+    app.collect(run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    app.fail(run['run_id'], task['id'], 'synthetic_read_failure')
+    original = app.store.get_task(task['id'])['material_file']
+    app.close(run['run_id'])
+    excluded = app.pending(workflows=['travel_expense'], batch_size=1)
+    public = query(tmp_path, 'status', run_id=excluded['run_id'], view='batch')
+    assert [candidate['request_id'] for candidate in public['recovery_candidates']] == [task['request_id']]
+    app.close(excluded['run_id'])
+    restored = app.pending(workflows=['travel_expense'], batch_size=1,
+                           recovery_request_ids=[candidate['request_id'] for candidate in public['recovery_candidates']])
+    fresh = app.collect(restored['run_id'], agent_id='new', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    assert fresh['material_file'] != original and Path(original).is_file()
+    app.fail(restored['run_id'], task['id'], 'synthetic_recovery_still_failed')
+    assert query(tmp_path, 'status', run_id=restored['run_id'], view='batch')['recovery_candidates'] == []
+    app.close(restored['run_id'])
+    later = app.pending(workflows=['travel_expense'])
+    assert query(tmp_path, 'status', run_id=later['run_id'], view='batch')['recovery_candidates'] == []
+    assert app.api.handled == []
+
+
+def test_recovery_candidates_never_automatically_resend_an_attempted_submission(tmp_path):
+    from apps.oa.approvals.client import query
+
+    app = create_demo(tmp_path)
+    run = app.pending(batch_size=1)
+    task = run['tasks'][0]
+    app.collect(run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    app.writer = type('Rejected', (), {'submit_and_verify': lambda *args, **kwargs: {
+        'submit_ok': False, 'done_hit': False, 'postcheck_done_hit': False, 'failure_code': 'writer_submit_rejected'}})()
+    assert app.submit(task['id'], opinion='Synthetic', confirm_write=True,
+                      review_assessment=completed_review(app, task['id']))['status'] == 'failed'
+    public = query(tmp_path, 'status', run_id=run['run_id'], view='batch')
+    assert public['recovery_candidates'] == []
+    assert len(app.store.details(task['id'])['submissions']) == 1
+
+
 def test_status_exposes_version_bound_read_progress_without_completing_review(tmp_path):
     from apps.oa.approvals.client import query
     from apps.oa.materials.read import read_page
@@ -234,17 +276,17 @@ def test_batch_status_reports_actual_agent_generation_and_fifo_candidate(tmp_pat
     status = json.loads(capsys.readouterr().out)
     assert status['agents'] == [
         {'agent_id': 'actual-native-generation-1', 'workflow_keys': ['travel_expense'],
-         'claimed_count': 5, 'inflight_task_ids': [], 'busy': False, 'claim_limit_reached': True},
+         'claimed_count': 5, 'inflight_task_ids': [], 'busy': False},
         {'agent_id': 'actual-native-generation-2', 'workflow_keys': ['travel_expense'],
-         'claimed_count': 1, 'inflight_task_ids': [task_ids[5]], 'busy': True, 'claim_limit_reached': False},
+         'claimed_count': 1, 'inflight_task_ids': [task_ids[5]], 'busy': True},
     ]
     assert status['capacity'] == {'inflight': 1, 'available': 2, 'limit': 3}
     assert status['next_candidate']['request_id'] == '107'
     assert status['batch']['outside_count'] == 1
-    assert app.store.claim(run_id, agent_id='actual-native-generation-1', expected_task_id=task_ids[6],
-                           agent_workflow_key='travel_expense')['reason'] == 'agent_claim_limit'
     assert app.store.claim(run_id, agent_id='actual-native-generation-2', expected_task_id=task_ids[6],
                            agent_workflow_key='travel_expense')['reason'] == 'agent_busy'
+    assert app.store.claim(run_id, agent_id='actual-native-generation-1', expected_task_id=task_ids[6],
+                           agent_workflow_key='travel_expense')['status'] == 'claimed'
 
 
 def record_submission(store, task_id, *, status=None, result=None, opinion='合成意见'):

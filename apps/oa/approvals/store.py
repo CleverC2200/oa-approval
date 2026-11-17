@@ -11,7 +11,6 @@ from apps.oa.materials.reports import review_contents
 
 
 MAX_INFLIGHT = 3
-AGENT_CLAIM_LIMIT = 5
 INFLIGHT_STATUSES = ("preparing", "reviewing", "reviewed", "submitting")
 
 
@@ -182,7 +181,6 @@ class Store:
                     (request_id,occurrence,operator,received,workflow,run_id,timestamp,timestamp))
             if batch_size is not None:
                 eligible = [task for task in self.tasks(run_id) if task['status'] == 'queued']
-                eligible.sort(key=lambda task: task['id'] not in recovery_tasks)
                 task_ids = [task['id'] for task in eligible][:batch_size]
                 stored['batch'] = {'size':batch_size, 'task_ids':task_ids}
             if recovery_request_ids:
@@ -193,9 +191,6 @@ class Store:
     def tasks(self, run_id):
         tasks = [dict(row) for row in self.connection.execute(
             "SELECT * FROM tasks WHERE last_run_id=? ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id", (run_id,))]
-        recovery = json.loads(self.run(run_id)['summary_json']).get('recovery', {}).get('task_ids', [])
-        if recovery:
-            tasks.sort(key=lambda task: task['id'] not in recovery)
         return tasks
 
     def latest_run(self):
@@ -254,8 +249,6 @@ class Store:
             previous = [task for task in tasks if task["agent_id"] == agent_id]
             if any(task["workflow_key"] != agent_workflow_key for task in previous):
                 return unclaimed("refused", "agent_generation_workflow_mismatch")
-            if len(previous) >= AGENT_CLAIM_LIMIT:
-                return unclaimed("refused", "agent_claim_limit")
             authorization = authorize(candidate) if authorize is not None else None
             self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
             return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"]),

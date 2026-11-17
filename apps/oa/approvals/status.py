@@ -4,7 +4,7 @@ from collections import Counter
 import json
 
 from apps.oa.approvals.receipts import assess_submission
-from apps.oa.approvals.store import AGENT_CLAIM_LIMIT, INFLIGHT_STATUSES, MAX_INFLIGHT
+from apps.oa.approvals.store import INFLIGHT_STATUSES, MAX_INFLIGHT
 
 
 def batch_status(store, run, tasks, owner):
@@ -22,8 +22,7 @@ def batch_status(store, run, tasks, owner):
         claimed = [task for task in tasks if task['agent_id'] == agent_id]
         busy = [task['id'] for task in claimed if task['status'] in INFLIGHT_STATUSES]
         agents.append({'agent_id': agent_id, 'workflow_keys': sorted({task['workflow_key'] for task in claimed}),
-                       'claimed_count': len(claimed), 'inflight_task_ids': busy, 'busy': bool(busy),
-                       'claim_limit_reached': len(claimed) >= AGENT_CLAIM_LIMIT})
+                       'claimed_count': len(claimed), 'inflight_task_ids': busy, 'busy': bool(busy)})
     occupied = sum(task['status'] in INFLIGHT_STATUSES for task in tasks)
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
@@ -77,7 +76,30 @@ def batch_status(store, run, tasks, owner):
         },
         'next_candidate': {key: candidate[key] for key in
             ('id', 'request_id', 'workflow_key', 'received_at', 'status')} if candidate is not None else None,
+        'recovery_candidates': recovery_candidates(store, run, tasks),
     }
+
+
+def recovery_candidates(store, run, tasks):
+    summary = json.loads(run['summary_json'])
+    known = {task['id'] for task in tasks}
+    known.update(item['task_id'] for item in (summary.get('pending') or {}).get('excluded', [])
+                 if item.get('reason') == 'historical_failure' and 'task_id' in item)
+    processed = set(summary.get('continuation', {}).get('processed_occurrences', []))
+    workflows = (summary.get('selection') or {}).get('workflows')
+    candidates = []
+    for row in store.connection.execute("""SELECT * FROM tasks WHERE status='failed'
+            AND NOT EXISTS(SELECT 1 FROM submissions WHERE task_id=tasks.id)
+            ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id"""):
+        task = dict(row)
+        if (task['id'] not in known and task['occurrence'] not in processed
+                or workflows and task['workflow_key'] not in workflows):
+            continue
+        last_run = json.loads(store.run(task['last_run_id'])['summary_json'])
+        if task['id'] in last_run.get('recovery', {}).get('task_ids', []):
+            continue
+        candidates.append({key: task[key] for key in ('id', 'request_id', 'workflow_key', 'received_at', 'failure_count', 'error')})
+    return candidates
 
 
 def closeout_blockers(acceptance, *, collection_active=False):

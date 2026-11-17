@@ -129,16 +129,16 @@ def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_out
     assert [task['request_id'] for task in started['tasks']] == ['101', '103']
 
 
-def test_pending_cli_prioritizes_only_the_authorized_historical_failure(tmp_path, pending_output):
+def test_pending_cli_includes_only_the_authorized_failure_in_received_time_fifo(tmp_path, pending_output):
     from apps.oa.approvals.operations import Approval
 
     pending_output()
     app = Approval(tmp_path)
     app.store.set_status(1, 'failed')
     app.store.set_status(2, 'failed')
-    result = pending_output('--recover-request-id', '123', '--batch-size', '1')
-    assert result['batch']['task_ids'] == [1]
-    assert result['tasks'][0]['request_id'] == '123'
+    result = pending_output('--recover-request-id', '123', '--batch-size', '40', '--limit', '40')
+    assert result['batch']['task_ids'][-1] == 1
+    assert result['tasks'][-1]['request_id'] == '123'
     assert app.store.get_task(2)['status'] == 'failed'
 
 

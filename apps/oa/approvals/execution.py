@@ -1,5 +1,6 @@
 from pathlib import Path
 import hashlib
+import math
 
 from apps.oa.approvals.status import closeout_blockers, submission_acceptance
 
@@ -30,9 +31,10 @@ def validate_stop(store, run_id, value, *, handoff=False):
         stop['evidence_file'] = str(path)
         if value['kind'] == 'context_limit':
             percent = value.get('context_used_percent')
-            if type(percent) not in {int, float} or not 60 <= percent <= 100:
+            if percent is not None and (type(percent) not in {int, float} or not math.isfinite(percent) or not 0 <= percent <= 100):
                 raise ValueError('stop_context_evidence_invalid')
-            stop['context_used_percent'] = percent
+            if percent is not None:
+                stop['context_used_percent'] = percent
         raw = path.read_bytes()
         digest = hashlib.sha256(raw).hexdigest()
         copy = root / 'execution-evidence' / run_id / f'{digest}.bin'
