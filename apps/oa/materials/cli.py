@@ -20,9 +20,10 @@ def _parser():
     read.add_argument('--view', choices=('full', 'outline'), default='full',
                       help='Outline returns structural counts and original locations; it does not count as reading coverage.')
     read.add_argument('--page-offset', type=int, help='Read one bounded character range; requires --format json')
-    read.add_argument('--page-chars', type=int, help='Characters per page, 1–2000; default 2000')
+    read.add_argument('--page-chars', type=int, help='Characters per page, 1–16000; default 12000')
     read.add_argument('--pointer', default='', help='JSON Pointer to one original value, for example /authority_facts/0/value')
     read.add_argument('--expected-sha256', help='Bind subsequent pages to the first page material_sha256')
+    read.add_argument('--progress-file', type=Path, help='Save supplied ranges for handoff; does not certify reading or review completion')
     recognize = commands.add_parser('recognize', help='Read attachments through the authorized model interface.')
     source = recognize.add_mutually_exclusive_group(required=True)
     source.add_argument('--file', action='append', type=Path, dest='files')
@@ -107,16 +108,22 @@ def main(argv=None):
         return _progress(args)
     try:
         if args.operation == 'read':
-            from apps.oa.materials.read import read, read_page
+            from apps.oa.materials.read import DEFAULT_PAGE_CHARS, read, read_page
 
             if args.page_offset is not None:
                 if args.format != 'json':
                     raise ValueError('material_read_page_requires_json')
-                print(json.dumps(read_page(args.material_file, offset=args.page_offset,
-                    page_chars=2000 if args.page_chars is None else args.page_chars,
-                    pointer=args.pointer, expected_sha256=args.expected_sha256, view=args.view), ensure_ascii=False))
+                page = read_page(args.material_file, offset=args.page_offset,
+                    page_chars=DEFAULT_PAGE_CHARS if args.page_chars is None else args.page_chars,
+                    pointer=args.pointer, expected_sha256=args.expected_sha256, view=args.view)
+                if args.progress_file is not None:
+                    from apps.oa.materials.read_progress import save_progress
+
+                    save_progress(args.progress_file, page)
+                    page['progress_file'] = str(args.progress_file.absolute())
+                print(json.dumps(page, ensure_ascii=False))
                 return 0
-            if args.pointer or args.expected_sha256 or args.page_chars is not None:
+            if args.pointer or args.expected_sha256 or args.page_chars is not None or args.progress_file is not None:
                 raise ValueError('material_read_page_offset_required')
 
             text = read(args.material_file, view=args.view)

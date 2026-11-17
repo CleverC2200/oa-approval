@@ -112,7 +112,8 @@ class Store:
             raise ValueError('continuation_not_available')
         return stored['selection']
 
-    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False, pending_count=None):
+    def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False,
+                  recovery_request_ids=None, pending_count=None):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -124,6 +125,7 @@ class Store:
                        'selected_count': len(rows), 'outside_selection_count': 0 if pending_count is None else pending_count - len(rows),
                        'excluded': []}
             stored['pending'] = pending
+            recovery_tasks = []
             processed = set()
             if continue_from is not None:
                 previous = json.loads(self.run(continue_from)['summary_json'])
@@ -151,9 +153,13 @@ class Store:
                         EXISTS(SELECT 1 FROM reviews WHERE task_id=tasks.id)
                         AND NOT EXISTS(SELECT 1 FROM submissions WHERE task_id=tasks.id) AS unsubmitted_review
                     FROM tasks WHERE occurrence=?""", (occurrence,)).fetchone()
-                if previous_task and previous_task['status'] == 'failed' and not retry_failed:
+                recovering = (previous_task is not None and previous_task['status'] == 'failed'
+                              and request_id in (recovery_request_ids or []))
+                if previous_task and previous_task['status'] == 'failed' and not (retry_failed or recovering):
                     pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'historical_failure'})
                     continue
+                if recovering:
+                    recovery_tasks.append(previous_task['id'])
                 if previous_task and not retry_reviewed and (previous_task['status'] == 'preview' or
                         (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
                     pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'unsubmitted_review'})
@@ -169,14 +175,22 @@ class Store:
                     error=CASE WHEN tasks.status='submitted' THEN 'submitted_pending_confirmation' ELSE tasks.error END""",
                     (request_id,occurrence,operator,received,workflow,run_id,timestamp,timestamp))
             if batch_size is not None:
-                task_ids = [task["id"] for task in self.tasks(run_id) if task["status"] == "queued"][:batch_size]
+                eligible = [task for task in self.tasks(run_id) if task['status'] == 'queued']
+                eligible.sort(key=lambda task: task['id'] not in recovery_tasks)
+                task_ids = [task['id'] for task in eligible][:batch_size]
                 stored['batch'] = {'size':batch_size, 'task_ids':task_ids}
+            if recovery_request_ids:
+                stored['recovery'] = {'request_ids': recovery_request_ids, 'task_ids': recovery_tasks}
             self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored),run_id))
         return run_id
 
     def tasks(self, run_id):
-        return [dict(row) for row in self.connection.execute(
+        tasks = [dict(row) for row in self.connection.execute(
             "SELECT * FROM tasks WHERE last_run_id=? ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id", (run_id,))]
+        recovery = json.loads(self.run(run_id)['summary_json']).get('recovery', {}).get('task_ids', [])
+        if recovery:
+            tasks.sort(key=lambda task: task['id'] not in recovery)
+        return tasks
 
     def latest_run(self):
         row = self.connection.execute("SELECT * FROM runs ORDER BY started_at DESC,rowid DESC LIMIT 1").fetchone()

@@ -44,6 +44,57 @@ def test_continuation_drains_preview_and_failed_tasks_once_without_expanding_sel
     assert app.close(successor['run_id'],handoff=True)['handoff'] == {'status':'done','remaining':0}
 
 
+def test_authorized_failure_precedes_new_work_and_is_not_retried_again_in_continuation(tmp_path):
+    app = create_demo(tmp_path)
+    app.api.rows[0]['received_at'] = '2026-10-28 12:00:00'
+    first = app.pending(request_ids=[app.api.rows[0]['request_id']], batch_size=1)
+    failed = finish_one(app, first, fail=True)
+    material = app.store.get_task(failed['id'])['material_file']
+    app.close(first['run_id'])
+    recovery = app.pending(batch_size=1, recovery_request_ids=[failed['request_id']])
+    assert recovery['batch']['task_ids'] == [failed['id']]
+    assert recovery['tasks'][0]['id'] == failed['id']
+    result = finish_one(app, recovery, fail=True)
+    assert result['id'] == failed['id']
+    assert app.store.get_task(failed['id'])['failure_count'] == 2
+    from pathlib import Path
+
+    assert Path(material).is_file()
+    assert app.close(recovery['run_id'], handoff=True)['handoff']['status'] == 'ready'
+    next_run = app.pending(continue_from=recovery['run_id'])
+    assert failed['id'] not in [task['id'] for task in next_run['tasks']]
+    assert next_run['batch']['task_ids']
+    assert app.store.get_task(failed['id'])['status'] == 'failed'
+    assert app.api.handled == []
+
+
+def test_recovery_requires_exact_authorized_failure_and_keeps_unrelated_failures_excluded(tmp_path):
+    app = create_demo(tmp_path)
+    first = app.pending(batch_size=3)
+    failed = finish_one(app, first, fail=True)
+    another = next(task for task in app.store.tasks(first['run_id']) if task['status'] == 'queued')
+    app.collect(first['run_id'], agent_id='second', expected_task_id=another['id'], agent_workflow_key=another['workflow_key'])
+    app.fail(first['run_id'], another['id'], 'synthetic_second_failure')
+    app.close(first['run_id'])
+    current = app.pending(batch_size=2, recovery_request_ids=[failed['request_id'], 'not-in-pending'])
+    assert failed['id'] in current['batch']['task_ids']
+    assert another['id'] not in [task['id'] for task in current['tasks']]
+    assert app.store.get_task(another['id'])['status'] == 'failed'
+    with pytest.raises(ValueError, match='recovery_request_ids_invalid'):
+        app.pending(recovery_request_ids=[''])
+
+
+def test_recovery_does_not_requeue_unknown_or_successful_attempts(tmp_path):
+    app = create_demo(tmp_path)
+    first = app.pending(batch_size=1)
+    task = finish_one(app, first)
+    app.close(first['run_id'])
+    app.store.set_status(task['id'], 'unknown')
+    run = app.pending(recovery_request_ids=[task['request_id']], batch_size=1)
+    assert app.store.get_task(task['id'])['status'] == 'unknown'
+    assert task['id'] not in run['batch']['task_ids']
+
+
 def test_preview_chain_carries_processed_occurrences_across_multiple_conversations(tmp_path):
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)

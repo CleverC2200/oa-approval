@@ -20,7 +20,7 @@ def test_cli_pages_reconstruct_the_complete_material_without_source_changes(tmp_
         page = json.loads(capsys.readouterr().out)
         assert page['status'] == 'ok' and page['coverage'] == 'range_only'
         assert page['material_sha256'] == digest and page['offset'] == offset
-        assert len(page['text']) <= 2000
+        assert len(page['text']) <= 12000
         assert page['end'] == offset + len(page['text'])
         chunks.append(page['text'])
         offset = page['next_offset']
@@ -58,13 +58,13 @@ def test_large_outline_is_also_bounded_and_is_not_reading_coverage(tmp_path, cap
     path.write_text(json.dumps({'declared_fields': [{'path': f'detail[0].row[{i}].field[0]', 'value': str(i)} for i in range(600)]}))
     assert cli.main(['read', str(path), '--view', 'outline', '--format', 'json', '--page-offset', '0']) == 0
     page = json.loads(capsys.readouterr().out)
-    assert page['coverage'] == 'navigation_range_only' and page['next_offset'] == 2000
-    assert len(page['text']) == 2000
+    assert page['coverage'] == 'navigation_range_only' and page['next_offset'] == 12000
+    assert len(page['text']) == 12000
 
 
 @pytest.mark.parametrize('options', [
     {'offset': -1}, {'offset': 999}, {'offset': 0, 'page_chars': 0},
-    {'offset': 0, 'page_chars': 2001}, {'offset': 0, 'pointer': '/missing'},
+    {'offset': 0, 'page_chars': 16001}, {'offset': 0, 'pointer': '/missing'},
     {'offset': 0, 'pointer': '/array/-1'}, {'offset': 0, 'pointer': '/array/01'},
 ])
 def test_invalid_page_or_pointer_is_rejected_without_writes(tmp_path, options):
@@ -76,3 +76,49 @@ def test_invalid_page_or_pointer_is_rejected_without_writes(tmp_path, options):
     with pytest.raises(ValueError):
         read_page(path, **options)
     assert path.read_bytes() == raw
+
+
+def test_nested_json_order_pointer_keeps_raw_values_and_origin(tmp_path):
+    from apps.oa.materials.read import read_page
+
+    path = tmp_path / 'material.json'
+    order = {'amount': '001.00', 'guests': ['甲', '乙'], 'unknown': None}
+    raw_order = json.dumps({'order_detail': order}, ensure_ascii=False)
+    path.write_text(json.dumps({'authority_facts': [{'value': raw_order}]}))
+    original = path.read_bytes()
+    page = read_page(path, offset=0, pointer='/authority_facts/0/value/order_detail')
+    assert json.loads(page['text']) == order
+    assert page['decoded_pointers'] == ['/authority_facts/0/value']
+    assert read_page(path, offset=0, pointer='/authority_facts/0/value')['text'] == raw_order
+    assert path.read_bytes() == original
+
+
+def test_progress_preserves_gaps_versions_and_navigation_scope(tmp_path, capsys):
+    path = tmp_path / 'material.json'
+    path.write_text(json.dumps({'value': 'abcdefgh'}))
+    progress = tmp_path / 'read-progress.json'
+    for offset in [4, 0, 0]:
+        assert cli.main(['read', str(path), '--format', 'json', '--pointer', '/value',
+            '--page-offset', str(offset), '--page-chars', '2',
+            '--expected-sha256', hashlib.sha256(path.read_bytes()).hexdigest(), '--progress-file', str(progress)]) == 0
+        capsys.readouterr()
+    saved = json.loads(progress.read_text())
+    assert saved['coverage'] == 'supplied_ranges_only'
+    assert saved['documents'][0]['ranges'] == [[0, 2], [4, 6]]
+    assert saved['documents'][0]['next_offset'] == 2
+    path.write_text(json.dumps({'value': 'changed'}))
+    assert cli.main(['read', str(path), '--format', 'json', '--page-offset', '0', '--progress-file', str(progress)]) == 0
+    capsys.readouterr()
+    assert len(json.loads(progress.read_text())['documents']) == 2
+
+
+def test_progress_cannot_overwrite_the_source_or_an_existing_unrelated_file(tmp_path, capsys):
+    path = tmp_path / 'material.json'
+    original = '{"value":"abc"}'
+    path.write_text(original)
+    other = tmp_path / 'other.json'
+    other.write_text(original)
+    for progress in [path, other]:
+        assert cli.main(['read', str(path), '--format', 'json', '--page-offset', '0', '--progress-file', str(progress)]) == 1
+        capsys.readouterr()
+        assert progress.read_text() == original
