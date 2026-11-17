@@ -107,16 +107,30 @@ def _sheet_images(drawing, blips, name):
                 shapes.append((options >> 4, value))
             elif kind == 0xf00b:
                 count = options >> 4
-                if options & 15 != 3 or len(value) != count * 6:
+                if options & 15 != 3 or len(value) < count * 6:
                     raise ValueError('legacy_spreadsheet_property_incomplete')
+                complex_end = count * 6
                 for index in range(count):
                     property_id, number = struct.unpack_from('<HI', value, index * 6)
+                    if property_id & 0x3fff == 0x105:
+                        if property_id & 0x8000:
+                            if number % 2 or complex_end + number > len(value):
+                                raise ValueError('legacy_spreadsheet_property_incomplete')
+                            name_data = bytes(value[complex_end:complex_end + number]).decode('utf-16le')
+                            if name_data and not name_data.endswith('\0'):
+                                raise ValueError('legacy_spreadsheet_property_incomplete')
+                            complex_end += number
+                        elif number:
+                            raise ValueError('legacy_spreadsheet_property_incomplete')
+                        continue
                     if property_id & 0x8000 or property_id & 0x4000 and property_id != 0x4104:
                         raise ValueError('legacy_spreadsheet_property_unsupported')
                     if property_id & 0x3fff == 0x104:
                         if property_id != 0x4104:
                             raise ValueError('legacy_spreadsheet_blip_unsupported')
                         properties.append(number)
+                if complex_end != len(value):
+                    raise ValueError('legacy_spreadsheet_property_incomplete')
             elif kind == 0xf010:
                 anchors.append(value)
             elif kind == 0xf011:

@@ -43,7 +43,7 @@ def compound(workbook):
     return bytes(header) + stream + directory.ljust(512, b'\0') + fat
 
 
-def legacy_book(path, *, defect=None, continued=False):
+def legacy_book(path, *, defect=None, continued=False, named=False):
     pixels = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
     pixels.clear_with(255)
     png = pixels.tobytes('png')
@@ -58,7 +58,14 @@ def legacy_book(path, *, defect=None, continued=False):
     sheets = []
     for index in range(2):
         shape = art(0xf00a, struct.pack('<II', 1025 + index, 0xa00), version=2, instance=75)
-        shape += art(0xf00b, struct.pack('<HI', 0x4104, 2 if defect == 'missing_reference' else 1), version=3, instance=1)
+        properties = struct.pack('<HI', 0x4104, 2 if defect == 'missing_reference' else 1)
+        if named:
+            if named == 'simple':
+                properties += struct.pack('<HI', 0x4105, 0)
+            else:
+                image_name = 'synthetic.png\0'.encode('utf-16le')
+                properties += struct.pack('<HI', 0xc105, len(image_name)) + image_name
+        shape += art(0xf00b, properties, version=3, instance=2 if named else 1)
         anchor = struct.pack('<9H', 0, index + 1, 0, index + 2, 0, index + 2, 0, index + 3, 0)
         if defect != 'missing_anchor':
             shape += art(0xf010, anchor)
@@ -227,3 +234,12 @@ def test_prepare_rejects_incomplete_or_unsupported_legacy_images(tmp_path, defec
     result = prepare(files=[source], output_dir=tmp_path / 'prepared')
     assert result['status'] == 'failed'
     assert result['error_code'] == 'attachment_content_incomplete'
+
+
+@pytest.mark.parametrize('named', [True, 'simple'])
+def test_prepare_keeps_images_with_picture_name_metadata(tmp_path, named):
+    source = tmp_path / 'named.xls'
+    legacy_book(source, named=named)
+    result = prepare(files=[source], output_dir=tmp_path / 'prepared')
+    assert result['status'] == 'complete'
+    assert result['images'] == 2
