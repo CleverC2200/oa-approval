@@ -196,7 +196,7 @@ def test_collect_preserves_and_prepares_every_mpo_frame(jpg_original, tmp_path, 
     assert Path(material['resources'][0]['local_readonly_path']).read_bytes() == original
     for image, size in zip(images, [(48, 32), (24, 16)]):
         with Image.open(image['path']) as prepared:
-            assert prepared.format == 'PNG'
+            assert prepared.format == 'JPEG'
             assert prepared.size == size
             prepared.load()
 
