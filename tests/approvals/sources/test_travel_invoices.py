@@ -110,9 +110,9 @@ def test_order_invoice_keeps_oa_detail_links_and_rejects_conflicting_file_identi
         travel_invoices.project(records + [second], [])
 
 
-@pytest.mark.parametrize('declared_count', ['0', '1'])
+@pytest.mark.parametrize('declared_count', ['0', '1', '2'])
 @pytest.mark.parametrize('existing_attachment', [False, True])
-def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_attachment(browser_transport, monkeypatch, tmp_path, declared_count, existing_attachment):
+def test_complete_collection_counts_order_invoices_without_counting_form_mirrors_twice(browser_transport, monkeypatch, tmp_path, declared_count, existing_attachment):
     from zipfile import ZipFile
     from apps.oa.approvals.collection import case, downloads
     from tests.approvals.source_fakes import POLICY
@@ -144,7 +144,7 @@ def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_
         return downloads.DownloadResult(tuple({'resource_id': item['id'], 'path': str(original), 'name': item['name']} for item in targets), (), 'complete')
 
     monkeypatch.setattr(downloads, 'download_resources', download)
-    if declared_count == '1' and not existing_attachment:
+    if declared_count == '2':
         with pytest.raises(case.CollectionFailure, match='travel_attachment_resources_incomplete'):
             case.collect_case('12', oa_api=api, configs=[config], source_policy=POLICY, allow_browser_download=True, attachment_timeout_sec=1)
         assert calls == []
@@ -160,6 +160,37 @@ def test_complete_collection_reads_original_text_and_cannot_hide_missing_manual_
     fact = json.loads(next(item['value'] for item in material['authority_facts'] if item['name'] == '商旅订单发票'))
     assert fact['oa_detail_refs'] == ['detail[0].row[0]']
     assert fact['invoices'][0]['resource_id'] == resource['resource_id']
+
+
+@pytest.mark.parametrize('manual_ids,declared_count,complete', [
+    ({'201', '202'}, 4, True),
+    ({'201'}, 4, False),
+    ({'201', '202'}, 5, False),
+])
+def test_declared_count_includes_deduplicated_order_invoices_and_requires_manual_files(browser_transport, manual_ids, declared_count, complete):
+    payload = order()
+    payload['result']['invoiceList'].append({
+        **payload['result']['invoiceList'][0], 'id': 'invoice-b',
+        'invoiceNo': '00000000000000000002', 'invoiceUrl': '124/invoice-b.ofd',
+    })
+    browser_transport.outcomes[True] = {
+        'expense_rows': [expense(fjList=[
+            {'id': 'attachment-a', 'fjdz': '201/manual-a.pdf', 'fjmc': 'manual-a.pdf'},
+            {'id': 'attachment-b', 'fjdz': '202/manual-b.pdf', 'fjmc': 'manual-b.pdf'},
+        ]), expense(id='expense-b')],
+        'hotel_payload': payload,
+    }
+    evidence = collect_travel(count=str(declared_count))
+    assert evidence.errors == ()
+    assert len(evidence.download_targets) == 4
+    assert len(evidence.attachment_scan_record()['inventory']) == 2
+    coverage = evidence.coverage(
+        source_file_ids=manual_ids,
+        source_resource_count=len(manual_ids),
+        declared_count=declared_count,
+    )
+    assert coverage.complete is complete
+    assert coverage.counts['trusted_source_sighting_count'] == 4
 
 
 def test_missing_expense_source_is_not_treated_as_no_order_invoices(browser_transport):

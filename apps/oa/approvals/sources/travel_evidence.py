@@ -354,6 +354,13 @@ class TravelEvidence:
     ) -> TravelCoverage:
         inventory = (self._scan or {}).get("inventory") or []
         sightings = len(inventory) if inventory else source_resource_count
+        order_invoice_ids = {
+            attachment_id(str(item.get("downloadUrl") or ""))
+            for item in self.download_targets
+            if item.get("_travel_order_invoice")
+        } - {""}
+        additional_order_invoice_ids = order_invoice_ids - source_file_ids
+        sightings += len(additional_order_invoice_ids)
         complete = all(
             item.get("reason") == "empty_placeholder"
             or (
@@ -372,6 +379,8 @@ class TravelEvidence:
                     item.get("reason") == "empty_placeholder" for item in inventory
                 ),
                 "unique_source_resource_count": source_resource_count,
+                "order_invoice_resource_count": len(order_invoice_ids),
+                "additional_order_invoice_count": len(additional_order_invoice_ids),
             },
             tuple(inventory)
             + ({"stage": "attachment_count", "reason": "source_inventory_incomplete"},),
