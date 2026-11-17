@@ -433,7 +433,7 @@ class _InputSnapshot:
             for part, source in parts:
                 if part['kind'] == 'image':
                     result = next(item for item in observed if item['part_id'] == part['part_id'])
-                    if _digest(_read(Path(source['path']))) != result['content_sha256']:
+                    if _digest(_read(Path(source['path']), max_bytes=MAX_SOURCE_BYTES)) != result['content_sha256']:
                         raise ValueError('attachment_page_changed')
         for source in self.sources:
             if _source_digest(Path(source['path'])) != source['sha256']:
@@ -560,7 +560,7 @@ class _RecognitionSession:
     def _image_blocks(self, source: dict):
         current, selection = self._current, self.options.selection
         current.update(rotate=selection.rotate, source_image_path=str(source['path']))
-        raw = _read(Path(source['path']))
+        raw = _read(Path(source['path']), max_bytes=MAX_SOURCE_BYTES)
         digest = _digest(raw)
         if source.get('content_sha256') and digest != source['content_sha256']:
             raise ValueError('attachment_page_changed')
@@ -637,7 +637,7 @@ class _RecognitionSession:
             except ValueError:
                 self.report['failed_response'] = diagnostic
                 if diagnostic['finish_reason'] == 'length' and depth < 3:
-                    raw = _read(Path(self._current['source_image_path']))
+                    raw = _read(Path(self._current['source_image_path']), max_bytes=MAX_SOURCE_BYTES)
                     if _digest(raw) != self._current['content_sha256']:
                         raise ValueError('attachment_page_changed')
                     with _open_image(_png_reading_copy(raw)) as image:
