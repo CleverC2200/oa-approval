@@ -56,8 +56,6 @@ def progress_summary(material_file, material_sha256):
                    and item['material_sha256'] == material_sha256]
         return {'status': 'recorded' if matches else 'material_version_mismatch', 'progress_file': str(path),
                 'updated_at': saved['updated_at'], 'coverage': saved['coverage'],
-                'documents': len(documents), 'material_ranges': [
-                    {key: item[key] for key in ('source_pointer', 'view', 'total_chars', 'next_offset')}
-                    | {'supplied_chars': sum(end - start for start, end in item['ranges'])} for item in matches]}
+                'documents': len(documents), 'material_documents': len(matches)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return {'status': 'invalid', 'progress_file': str(path)}
