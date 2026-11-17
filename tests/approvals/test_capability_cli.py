@@ -13,6 +13,31 @@ from apps.oa.approvals.demo import create_demo
 PROJECT = Path(__file__).resolve().parents[2]
 
 
+def test_status_exposes_version_bound_read_progress_without_completing_review(tmp_path):
+    from apps.oa.approvals.client import query
+    from apps.oa.materials.read import read_page
+    from apps.oa.materials.read_progress import save_progress
+
+    app = create_demo(tmp_path)
+    run = app.pending(batch_size=1)
+    task = run['tasks'][0]
+    collected = app.collect(run['run_id'], agent_id='reviewer', expected_task_id=task['id'],
+                            agent_workflow_key=task['workflow_key'])
+    material = Path(collected['material_file'])
+    page = read_page(material, offset=0, page_chars=20)
+    progress = material.parent / 'read-progress.json'
+    save_progress(progress, page)
+    status = query(tmp_path, 'status', run_id=run['run_id'], view='batch')
+    entry = status['review_progress'][0]
+    assert entry['task_id'] == task['id'] and entry['agent_id'] == 'reviewer'
+    assert entry['status'] == 'recorded' and entry['coverage'] == 'supplied_ranges_only'
+    assert entry['material_ranges'][0]['next_offset'] == 20
+    assert status['batch']['inflight'] == 1
+    assert app.store.get_task(task['id'])['status'] == 'reviewing'
+    assert app.store.details(task['id'])['review_assessments'] == []
+    assert app.api.handled == []
+
+
 @pytest.mark.parametrize('held_status', ['preview', 'queued', 'reviewed'])
 def test_reviewed_delivery_requires_scoped_authorization_and_fresh_collection(tmp_path, held_status):
     app = create_demo(tmp_path)

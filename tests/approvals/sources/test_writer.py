@@ -14,6 +14,32 @@ from apps.oa.approvals.sources.writer import FrozenWriterApi
 from apps.oa.approvals.sources.writer import SUBMIT_ENDPOINT
 
 
+def test_writer_stops_after_current_receipt_without_reading_unrelated_history(monkeypatch):
+    reads = []
+
+    def transport(request, **kwargs):
+        path = urlparse(request.full_url).path
+        reads.append(path)
+        if path == SUBMIT_ENDPOINT:
+            result = {'code': 'SUCCESS'}
+        elif path == TODO_ENDPOINT:
+            result = {'data': []}
+        else:
+            assert path == HANDLED_ENDPOINTS[0]
+            assert parse_qs(request.data.decode())['pageNo'] == ['1']
+            now = datetime.now(ZoneInfo('Asia/Shanghai'))
+            rows = [{'requestId': str(1000 + i), 'operateDate': '2020-01-01', 'operateTime': '00:00:00'} for i in range(100)]
+            rows[0] = {'requestId': '101', 'operateDate': now.strftime('%Y-%m-%d'), 'operateTime': now.strftime('%H:%M:%S')}
+            result = {'data': rows}
+        return BytesIO(json.dumps(result).encode())
+
+    monkeypatch.setattr(safe_http, 'urlopen', transport)
+    writer = FrozenWriterApi('fake-token', 'fake-user', app_id='fake-app', base_url='https://oa.example.test')
+    result = writer.submit_and_verify('101', 'Synthetic opinion')
+    assert result['postcheck_done_hit'] is True
+    assert reads == [SUBMIT_ENDPOINT, HANDLED_ENDPOINTS[0], TODO_ENDPOINT]
+
+
 @pytest.mark.parametrize('target_page', [2, 6])
 def test_writer_finds_current_receipt_after_old_receipt_and_fifth_page(monkeypatch, target_page):
     posts = []

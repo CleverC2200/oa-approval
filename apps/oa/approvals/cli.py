@@ -35,6 +35,7 @@ def main(argv=None):
     pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
     pending.add_argument('--retry-failed', choices=['YES'], help='仅按本次明确授权重试 --request-id 指定的失败投递；小时任务默认排除历史失败')
     pending.add_argument('--retry-reviewed', choices=['YES'], help='仅按本次明确授权重新采集并审核 --request-id 指定的未提交预览或意见；保留旧意见')
+    pending.add_argument('--recover-request-id', action='append', help='按本次明确授权将指定申请的历史失败优先纳入正常批次；可重复指定，接续链内每次投递只重试一次')
     status = commands.add_parser('status', help='只读已有轮次、队列和owner可达性，不刷新OA')
     status.add_argument('--run-id')
     status.add_argument('--full', action='store_true')
@@ -147,7 +148,8 @@ def main(argv=None):
             try:
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
                              batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from,
-                             retry_failed=args.retry_failed == 'YES', retry_reviewed=args.retry_reviewed == 'YES')
+                             retry_failed=args.retry_failed == 'YES', retry_reviewed=args.retry_reviewed == 'YES',
+                             recovery_request_ids=args.recover_request_id)
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import json
 import time
 import urllib.error
@@ -216,8 +218,7 @@ class OaApi:
         *,
         page_size: int = 100,
         max_pages: int | None = 5,
-    ) -> list[dict[str, str]]:
-        cases: list[dict[str, str]] = []
+    ) -> Iterator[dict[str, str]]:
         seen_request_ids: set[str] = set()
         for path in HANDLED_ENDPOINTS:
             previous_page: list[dict[str, Any]] | None = None
@@ -248,12 +249,11 @@ class OaApi:
                     if not request_id or (max_pages is not None and request_id in seen_request_ids):
                         continue
                     seen_request_ids.add(request_id)
-                    cases.append(case)
+                    yield case
                 if len(page) < max(1, int(page_size)):
                     break
                 previous_page = page
                 page_no += 1
-        return cases
 
     def pending_rows(
         self,

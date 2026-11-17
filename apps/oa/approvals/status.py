@@ -8,6 +8,8 @@ from apps.oa.approvals.store import AGENT_CLAIM_LIMIT, INFLIGHT_STATUSES, MAX_IN
 
 
 def batch_status(store, run, tasks, owner):
+    from apps.oa.materials.read_progress import progress_summary
+
     frozen = json.loads(run['summary_json']).get('batch')
     scoped = tasks if frozen is None else [store.get_task(task_id) for task_id in frozen['task_ids']]
     task_ids = {task['id'] for task in scoped}
@@ -60,6 +62,9 @@ def batch_status(store, run, tasks, owner):
                      'complete': complete and not blockers and not queued},
         'alerts': alerts,
         'agents': agents,
+        'review_progress': [{'task_id': task['id'], 'agent_id': task['agent_id'],
+                             **progress_summary(task['material_file'], task['material_sha256'])}
+                            for task in scoped if task['status'] == 'reviewing' and task['material_file']],
         'capacity': {'inflight': occupied, 'available': max(0, MAX_INFLIGHT - occupied), 'limit': MAX_INFLIGHT},
         'batch': {
             'mode': 'all_queue' if frozen is None else 'frozen',

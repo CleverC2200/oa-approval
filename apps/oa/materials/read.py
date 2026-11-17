@@ -10,6 +10,10 @@ from apps.oa.materials.resources import image_locations
 from apps.oa.runtime.paths import PROJECT_ROOT
 
 
+DEFAULT_PAGE_CHARS = 12000
+MAX_PAGE_CHARS = 16000
+
+
 def _argv(operation: str, *arguments: str) -> list[str]:
     return ['bash', str(PROJECT_ROOT / '.codex/python.sh'), '-m', 'apps.oa.materials', operation, *arguments]
 
@@ -152,8 +156,38 @@ def read(material_file: Path, *, view: str = 'full') -> str:
     return _full_text(material, material_file)
 
 
-def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sha256=None, view='full'):
-    if type(offset) is not int or offset < 0 or type(page_chars) is not int or not 1 <= page_chars <= 2000:
+def _json_member_text(text, key):
+    decoder = json.JSONDecoder()
+    whitespace = re.compile(r'\s*')
+    position = whitespace.match(text, 0).end()
+    is_object = text[position] == '{'
+    closing = '}' if is_object else ']'
+    position = whitespace.match(text, position + 1).end()
+    index = 0
+    selected = None
+    while text[position] != closing:
+        if is_object:
+            member, position = decoder.raw_decode(text, position)
+            position = whitespace.match(text, position).end() + 1
+        else:
+            member = str(index)
+        start = whitespace.match(text, position).end()
+        _, end = decoder.raw_decode(text, start)
+        if member == key:
+            if selected is not None:
+                raise ValueError('material_read_pointer_ambiguous')
+            selected = text[start:end]
+        position = whitespace.match(text, end).end()
+        if text[position] == ',':
+            position = whitespace.match(text, position + 1).end()
+        index += 1
+    if selected is None:
+        raise ValueError('material_read_pointer_invalid')
+    return selected
+
+
+def read_page(material_file, *, offset, page_chars=DEFAULT_PAGE_CHARS, pointer='', expected_sha256=None, view='full'):
+    if type(offset) is not int or offset < 0 or type(page_chars) is not int or not 1 <= page_chars <= MAX_PAGE_CHARS:
         raise ValueError('material_read_range_invalid')
     if offset and expected_sha256 is None:
         raise ValueError('material_read_version_required')
@@ -166,7 +200,17 @@ def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sh
     if not isinstance(pointer, str) or pointer and not pointer.startswith('/') or re.search(r'~(?![01])', pointer):
         raise ValueError('material_read_pointer_invalid')
     value = material
+    decoded_pointers = []
+    traversed = ''
+    encoded_value = None
     for segment in pointer.split('/')[1:] if pointer else []:
+        if isinstance(value, str):
+            try:
+                encoded_value = value
+                value = json.loads(value)
+            except ValueError as error:
+                raise ValueError('material_read_pointer_invalid') from error
+            decoded_pointers.append(traversed)
         key = segment.replace('~1', '/').replace('~0', '~')
         if isinstance(value, dict) and key in value:
             value = value[key]
@@ -174,6 +218,9 @@ def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sh
             value = value[int(key)]
         else:
             raise ValueError('material_read_pointer_invalid')
+        if encoded_value is not None:
+            encoded_value = _json_member_text(encoded_value, key)
+        traversed += '/' + segment
     if view == 'outline':
         from apps.oa.materials.navigation import outline
 
@@ -182,6 +229,8 @@ def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sh
         text = _full_text(material, material_file)
     elif isinstance(value, str):
         text = value
+    elif encoded_value is not None:
+        text = encoded_value
     else:
         text = json.dumps(value, ensure_ascii=False, indent=2)
     if offset > len(text):
@@ -190,4 +239,5 @@ def read_page(material_file, *, offset, page_chars=2000, pointer='', expected_sh
     return {'status': 'ok', 'coverage': 'navigation_range_only' if view == 'outline' else 'range_only',
             'view': view, 'material_file': str(material_file),
             'material_sha256': digest, 'source_pointer': pointer, 'offset': offset, 'end': end,
+            'decoded_pointers': decoded_pointers,
             'total_chars': len(text), 'next_offset': end if end < len(text) else None, 'text': text[offset:end]}

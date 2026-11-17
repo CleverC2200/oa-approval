@@ -67,7 +67,7 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 新轮默认排除同一次投递的历史预览，以及已生成意见但没有提交尝试的排队或待提交任务，保留原意见等待明确授权；新的投递身份仍可入队。提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --require-drained --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
 
-明确授权重审已有预览或未提交意见时，使用 `start --request-id <申请ID> --retry-reviewed YES`，重新领取、采集完整材料并审核；旧意见保留。该参数不继承到后续接续，也不授权真实写入。历史技术失败仍单独使用 `--retry-failed YES` 并指定申请。
+明确授权重审已有预览或未提交意见时，使用 `start --request-id <申请ID> --retry-reviewed YES`，重新领取、采集完整材料并审核；旧意见保留。该参数不继承到后续接续，也不授权真实写入。历史失败的精确恢复及正常队列中的优先安排见[失败待办恢复](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md#采集停滞与历史失败)。
 
 批次范围、FIFO、在途数量、Agent 轮换和审核规则统一见[财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)。海外规则见[海外 Skill](.agents/skills/oa-overseas-invoice/SKILL.md)。Python 不替 Agent 形成财务业务结论。
 
