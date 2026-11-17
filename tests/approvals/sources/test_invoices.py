@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.approvals.review_fixtures import collect_for_review
 
 from tests.approvals.source_fakes import POLICY
 
@@ -332,7 +333,7 @@ def test_invoice_failure_persists_safe_diagnostics_before_any_submission(tmp_pat
     try:
         run = app.pending()
         with pytest.raises(CollectionFailure, match='invoice_buyer_read_failed') as captured:
-            app.collect(run['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='general_expense')
+            collect_for_review(app, run['run_id'], agent_id='reviewer', expected_task_id=1, agent_workflow_key='general_expense')
         report = json.loads(Path(captured.value.diagnostics_file).read_text())
         assert report['diagnostics'][-1]['stage'] == 'invoice_detail'
         assert report['diagnostics'][-1]['http_status'] == 500

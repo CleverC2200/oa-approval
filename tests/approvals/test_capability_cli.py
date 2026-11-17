@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 from tests.approvals.review_fixtures import completed_review
 import json
 from pathlib import Path
@@ -19,7 +20,7 @@ def test_public_recovery_candidates_include_only_unsubmitted_failures_in_scope(t
     app = create_demo(tmp_path)
     run = app.pending(batch_size=1)
     task = run['tasks'][0]
-    app.collect(run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    collect_for_review(app, run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
     app.fail(run['run_id'], task['id'], 'synthetic_read_failure')
     original = app.store.get_task(task['id'])['material_file']
     app.close(run['run_id'])
@@ -29,7 +30,7 @@ def test_public_recovery_candidates_include_only_unsubmitted_failures_in_scope(t
     app.close(excluded['run_id'])
     restored = app.pending(workflows=['travel_expense'], batch_size=1,
                            recovery_request_ids=[candidate['request_id'] for candidate in public['recovery_candidates']])
-    fresh = app.collect(restored['run_id'], agent_id='new', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    fresh = collect_for_review(app, restored['run_id'], agent_id='new', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
     assert fresh['material_file'] != original and Path(original).is_file()
     app.fail(restored['run_id'], task['id'], 'synthetic_recovery_still_failed')
     assert query(tmp_path, 'status', run_id=restored['run_id'], view='batch')['recovery_candidates'] == []
@@ -45,10 +46,10 @@ def test_recovery_candidates_never_automatically_resend_an_attempted_submission(
     app = create_demo(tmp_path)
     run = app.pending(batch_size=1)
     task = run['tasks'][0]
-    app.collect(run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+    collect_for_review(app, run['run_id'], agent_id='first', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
     app.writer = type('Rejected', (), {'submit_and_verify': lambda *args, **kwargs: {
         'submit_ok': False, 'done_hit': False, 'postcheck_done_hit': False, 'failure_code': 'writer_submit_rejected'}})()
-    assert app.submit(task['id'], opinion='Synthetic', confirm_write=True,
+    assert deliver_and_submit(app, task['id'], opinion='Synthetic', confirm_write=True,
                       review_assessment=completed_review(app, task['id']))['status'] == 'failed'
     public = query(tmp_path, 'status', run_id=run['run_id'], view='batch')
     assert public['recovery_candidates'] == []
@@ -63,7 +64,7 @@ def test_status_exposes_version_bound_read_progress_without_completing_review(tm
     app = create_demo(tmp_path)
     run = app.pending(batch_size=1)
     task = run['tasks'][0]
-    collected = app.collect(run['run_id'], agent_id='reviewer', expected_task_id=task['id'],
+    collected = collect_for_review(app, run['run_id'], agent_id='reviewer', expected_task_id=task['id'],
                             agent_workflow_key=task['workflow_key'])
     material = Path(collected['material_file'])
     page = read_page(material, offset=0, page_chars=20)
@@ -88,9 +89,9 @@ def test_reviewed_delivery_requires_scoped_authorization_and_fresh_collection(tm
     try:
         first = app.pending(batch_size=1)
         task = first['tasks'][0]
-        material = app.collect(first['run_id'], agent_id='first', expected_task_id=task['id'],
+        material = collect_for_review(app, first['run_id'], agent_id='first', expected_task_id=task['id'],
                                agent_workflow_key=task['workflow_key'])
-        app.submit(task['id'], opinion='Original preview')
+        deliver_and_submit(app, task['id'], opinion='Original preview')
         app.store.set_status(task['id'], held_status)
         original_review = app.inspect(task['id'])['reviews']
         app.close(first['run_id'])
@@ -105,11 +106,11 @@ def test_reviewed_delivery_requires_scoped_authorization_and_fresh_collection(tm
         assert app.inspect(task['id'])['reviews'] == original_review
         assert app.inspect(task['id'])['submissions'] == []
         with pytest.raises(ValueError, match='task_not_reviewable'):
-            app.submit(task['id'], opinion='Must collect again', confirm_write=True, review_assessment=completed_review(app, task['id']))
-        fresh = app.collect(retry['run_id'], agent_id='retry', expected_task_id=task['id'],
+            deliver_and_submit(app, task['id'], opinion='Must collect again', confirm_write=True, review_assessment=completed_review(app, task['id']))
+        fresh = collect_for_review(app, retry['run_id'], agent_id='retry', expected_task_id=task['id'],
                             agent_workflow_key=task['workflow_key'])
         assert fresh['material_file'] != material['material_file']
-        assert app.submit(task['id'], opinion='Fresh review', confirm_write=True, review_assessment=completed_review(app, task['id']))['status'] == 'submitted'
+        assert deliver_and_submit(app, task['id'], opinion='Fresh review', confirm_write=True, review_assessment=completed_review(app, task['id']))['status'] == 'submitted'
         assert len(app.inspect(task['id'])['submissions']) == 1
     finally:
         app.store.connection.close()
@@ -218,8 +219,8 @@ def test_batch_status_separates_frozen_prefix_from_outside_queue(tmp_path, capsy
     started = app.pending(batch_size=2)
     run_id = started['run_id']
     first, second, outside = [task['id'] for task in started['tasks']]
-    app.store.claim(run_id, agent_id='actual-travel-agent', expected_task_id=first,
-                    agent_workflow_key='travel_expense')
+    app.store.claim(run_id,  expected_task_id=first,
+                    )
     assert cli.main(['--root', str(tmp_path), 'status', '--run-id', run_id, '--view', 'batch']) == 0
     status = json.loads(capsys.readouterr().out)
     assert status['batch'] == {
@@ -232,14 +233,13 @@ def test_batch_status_separates_frozen_prefix_from_outside_queue(tmp_path, capsy
         'id': second, 'request_id': '90002', 'workflow_key': 'business_entertainment',
         'received_at': '2026-10-22 10:01:00', 'status': 'queued',
     }
-    app.store.claim(run_id, agent_id='actual-entertainment-agent', expected_task_id=second,
-                    agent_workflow_key='business_entertainment')
+    app.fail(run_id, first, 'read_failed')
+    app.collect(run_id, expected_task_id=second)
     assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
     inflight = json.loads(capsys.readouterr().out)
     assert inflight['next_candidate'] is None
-    assert inflight['batch']['inflight'] == 2
+    assert inflight['batch']['inflight'] == 1
     assert inflight['batch']['queue_exhausted'] is False
-    app.fail(run_id, first, 'read_failed')
     app.fail(run_id, second, 'read_failed')
     app.close(run_id)
     app.store.connection.close()
@@ -269,11 +269,11 @@ def test_batch_status_reports_actual_agent_generation_and_fifo_candidate(tmp_pat
     run_id = started['run_id']
     task_ids = [task['id'] for task in started['tasks']]
     for task_id in task_ids[:5]:
-        assert app.store.claim(run_id, agent_id='actual-native-generation-1', expected_task_id=task_id,
-                               agent_workflow_key='travel_expense')['status'] == 'claimed'
+        collect_for_review(app, run_id, expected_task_id=task_id, agent_id='actual-native-generation-1',
+                           agent_workflow_key='travel_expense')
         app.fail(run_id, task_id, 'read_failed')
-    app.store.claim(run_id, agent_id='actual-native-generation-2', expected_task_id=task_ids[5],
-                    agent_workflow_key='travel_expense')
+    collect_for_review(app, run_id, expected_task_id=task_ids[5], agent_id='actual-native-generation-2',
+                       agent_workflow_key='travel_expense')
     assert cli.main(['--root', str(tmp_path), 'status', '--view', 'batch']) == 0
     status = json.loads(capsys.readouterr().out)
     assert status['agents'] == [
@@ -282,22 +282,30 @@ def test_batch_status_reports_actual_agent_generation_and_fifo_candidate(tmp_pat
         {'agent_id': 'actual-native-generation-2', 'workflow_keys': ['travel_expense'],
          'claimed_count': 1, 'inflight_task_ids': [task_ids[5]], 'busy': True},
     ]
-    assert status['capacity'] == {'inflight': 1, 'available': 2, 'limit': 3}
+    assert {key: status['capacity'][key] for key in ('inflight', 'available', 'limit')} == {'inflight': 1, 'available': 2, 'limit': 3}
     assert status['next_candidate']['request_id'] == '107'
     assert status['batch']['outside_count'] == 1
-    assert app.store.claim(run_id, agent_id='actual-native-generation-2', expected_task_id=task_ids[6],
-                           agent_workflow_key='travel_expense')['reason'] == 'agent_busy'
-    assert app.store.claim(run_id, agent_id='actual-native-generation-1', expected_task_id=task_ids[6],
-                           agent_workflow_key='travel_expense')['status'] == 'claimed'
+    assert collect_for_review(app, run_id, expected_task_id=task_ids[6], agent_id='actual-native-generation-2',
+                              agent_workflow_key='travel_expense')['reason'] == 'agent_busy'
+    assert collect_for_review(app, run_id, expected_task_id=task_ids[6], agent_id='actual-native-generation-1',
+                              agent_workflow_key='travel_expense')['status'] == 'reviewing'
 
 
 def record_submission(store, task_id, *, status=None, result=None, opinion='合成意见'):
-    store.freeze(task_id, {}, 'synthetic-material.json', 'synthetic-digest', {}, 'synthetic-rule.md')
-    review = store.review(task_id, opinion)
-    submission_id = store.begin_submission(task_id, review['id'])
-    if status is not None:
-        store.finish_submission(submission_id, status, result or {})
-    return submission_id
+    from apps.oa.approvals.store import encoded, now
+
+    task = store.get_task(task_id)
+    with store.connection:
+        store.connection.execute("UPDATE tasks SET material_file='synthetic-material.json',material_sha256='synthetic-digest',frozen_json='{}' WHERE id=?", (task_id,))
+        store.connection.execute("INSERT OR IGNORE INTO reviews(task_id,run_id,opinion,recognition_json,material_sha256,material_file,frozen_json,created_at) VALUES (?,?,?,'null','synthetic-digest','synthetic-material.json','{}',?)",
+                                 (task_id, task['last_run_id'], opinion, now()))
+        review_id = store.connection.execute('SELECT id FROM reviews WHERE task_id=? AND opinion=?', (task_id, opinion)).fetchone()[0]
+        cursor = store.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status,result_json,completed_at) VALUES (?,?,?,?,?,?,?)",
+            (task_id, review_id, task['last_run_id'], now(), status or 'started', encoded(result or {}), now() if status else None))
+        store.connection.execute('UPDATE tasks SET status=? WHERE id=?', (status or 'submitting', task_id))
+        if status == 'unknown':
+            store.connection.execute("UPDATE runs SET status='blocked' WHERE id=?", (task['last_run_id'],))
+    return cursor.lastrowid
 
 
 @pytest.mark.parametrize('handled', [True, False])
@@ -679,7 +687,7 @@ def test_orphaned_finish_preserves_unresolved_work(tmp_path, monkeypatch, capsys
     started = app.pending()
     run_id, task_id = started['run_id'], started['tasks'][0]['id']
     if state == 'preparing':
-        app.store.claim(run_id, agent_id='reviewer', expected_task_id=task_id, agent_workflow_key='travel_expense')
+        app.store.claim(run_id,  expected_task_id=task_id, )
     else:
         record_submission(app.store, task_id, status=None if state == 'started' else 'unknown' if state == 'unknown' else 'submitted')
     before = app.store.details(task_id)
@@ -706,7 +714,6 @@ def test_sigterm_closes_owner_and_releases_transport(tmp_path):
 
 @pytest.mark.parametrize('signum', ['SIGTERM', 'SIGHUP'])
 def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkeypatch, capsys, signum):
-    import io
     import os
     import signal
     from apps.oa.approvals import demo
@@ -720,23 +727,14 @@ def test_termination_during_submit_saves_receipt_before_closing(tmp_path, monkey
         return result
 
     monkeypatch.setattr(demo.DemoApi, 'submit_and_verify', submit)
+    from tests.approvals.review_fixtures import review_input
+
     requests = [
-        {'operation': 'collect', 'agent_id': 'reviewer', 'expected_task_id': 1, 'agent_workflow_key': 'travel_expense'},
-        {'operation': 'submit', 'task_id': 1, 'opinion': '合成意见', 'confirm_write': True},
-        {'operation': 'collect', 'agent_id': 'second', 'expected_task_id': 2, 'agent_workflow_key': 'business_entertainment'},
+        {'operation': 'collect_for_review', 'agent_id': 'reviewer', 'expected_task_id': 1, 'agent_workflow_key': 'travel_expense'},
+        {'operation': 'deliver_and_submit', 'task_id': 1, 'opinion': '合成意见', 'confirm_write': True},
+        {'operation': 'collect_for_review', 'agent_id': 'second', 'expected_task_id': 2, 'agent_workflow_key': 'business_entertainment'},
     ]
-    class ReviewInput(io.StringIO):
-        def readline(self, *args):
-            line = super().readline(*args)
-            item = json.loads(line) if line else None
-            if item and item['operation'] == 'submit':
-                from tests.approvals.review_fixtures import completed_review_file
-
-                item['review_assessment'] = json.loads(completed_review_file(tmp_path, item['task_id']).read_text())
-                return json.dumps(item) + '\n'
-            return line
-
-    monkeypatch.setattr(sys, 'stdin', ReviewInput(''.join(json.dumps(item) + '\n' for item in requests)))
+    monkeypatch.setattr(sys, 'stdin', review_input(tmp_path, requests))
     assert cli.main(['--root', str(tmp_path), 'start', '--demo']) == 130
     messages = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert messages[-1]['status'] == 'submitted'
@@ -779,8 +777,7 @@ def test_travel_exception_cli_sends_only_the_explicit_request(tmp_path, monkeypa
     path.write_text(json.dumps(note))
     requests = []
     monkeypatch.setattr(cli, 'send', lambda root, request: requests.append(request) or {'status': 'reviewing'})
-    args = ['--root', str(tmp_path), 'collect', '--agent-id', 'agent',
-            '--expected-task-id', '1', '--agent-workflow-key', 'travel_expense']
+    args = ['--root', str(tmp_path), 'collect', '--expected-task-id', '1']
     assert cli.main([*args, '--travel-read-exception-file', str(path)]) == 0
     assert requests[-1]['travel_read_exception'] == note
     assert cli.main(args) == 0
@@ -792,7 +789,7 @@ def test_travel_exception_identity_rejected_before_claim(tmp_path):
     started = app.pending()
     task = next(task for task in started['tasks'] if task['workflow_key'] == 'travel_expense')
     with pytest.raises(ValueError, match='travel_read_exception_invalid'):
-        app.collect(started['run_id'], agent_id='reviewer', expected_task_id=task['id'],
+        collect_for_review(app, started['run_id'], agent_id='reviewer', expected_task_id=task['id'],
                     agent_workflow_key='travel_expense',
                     travel_read_exception={'request_id': 'different', 'authorization_note': '仅本单'})
     assert app.store.get_task(task['id'])['status'] == 'queued'
@@ -807,7 +804,7 @@ def test_orphaned_finish_accepts_explicit_stopped_collection_only_without_unreso
     app = create_demo(tmp_path)
     started = app.pending()
     run_id, task_id = started['run_id'], started['tasks'][0]['id']
-    app.store.claim(run_id, agent_id='reviewer', expected_task_id=task_id, agent_workflow_key='travel_expense')
+    app.store.claim(run_id,  expected_task_id=task_id, )
     if unresolved_submission:
         record_submission(app.store, started['tasks'][1]['id'], status='unknown')
     before = app.store.details(task_id)
@@ -847,8 +844,8 @@ def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
     try:
         first = app.pending(batch_size=1)
         task = first['tasks'][0]
-        claimed = app.store.claim(first['run_id'], agent_id='first', expected_task_id=task['id'],
-                                  agent_workflow_key=task['workflow_key'])
+        claimed = app.store.claim(first['run_id'],  expected_task_id=task['id'],
+                                  )
         assert claimed['status'] == 'claimed'
         app.store.fail_collection(task['id'], 'synthetic_collection_failure')
         app.close(first['run_id'])
@@ -880,10 +877,9 @@ def test_guarded_finish_drains_before_handoff(tmp_path):
         assert process.poll() is None
         status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
         assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None}
-        collected = subprocess.run([*base, 'collect', '--agent-id', 'reviewer', '--expected-task-id', '1',
-                                    '--agent-workflow-key', 'travel_expense'],
+        collected = subprocess.run([*base, 'collect', '--expected-task-id', '1'],
                                    cwd=PROJECT, capture_output=True, text=True, timeout=10)
-        assert json.loads(collected.stdout)['status'] == 'reviewing'
+        assert json.loads(collected.stdout)['status'] == 'prepared'
         refused = subprocess.run([*base, 'finish', '--run-id', started['run_id'], '--require-drained', '--handoff'],
                                  cwd=PROJECT, capture_output=True, text=True, timeout=5)
         assert refused.returncode == 1
@@ -1082,9 +1078,13 @@ def test_explicit_closed_prewrite_failure_preserves_review_and_never_releases_an
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)
     task = started['tasks'][0]
-    app.collect(started['run_id'], agent_id='legacy', expected_task_id=task['id'],
+    collect_for_review(app, started['run_id'], agent_id='legacy', expected_task_id=task['id'],
                 agent_workflow_key=task['workflow_key'])
-    review = app.store.review(task['id'], 'Synthetic preserved review')
+    current = app.store.get_task(task['id'])
+    app.deliver(task['id'], agent_id=current['agent_id'], material_file=current['material_file'],
+                material_sha256=current['material_sha256'], opinion='Synthetic preserved review',
+                review_assessment=completed_review(app, task['id']))
+    review = app.inspect(task['id'])['reviews'][-1]
     if change == 'attempted':
         app.store.begin_submission(task['id'], review['id'])
         app.store.set_status(task['id'], 'reviewed')

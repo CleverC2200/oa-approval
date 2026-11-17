@@ -136,19 +136,26 @@ def finish_orphaned(root, run_id, *, collection_stopped_note=None):
 def dispatch(approval, run_id, request):
     operation = request['operation']
     if operation == 'collect':
-        return approval.collect(run_id, workflow_key=request.get('workflow_key'), agent_id=request.get('agent_id'),
-                                expected_task_id=request.get('expected_task_id'),
-                                agent_workflow_key=request.get('agent_workflow_key'),
+        return approval.collect(run_id, expected_task_id=request.get('expected_task_id'),
                                 **({'travel_read_exception': request['travel_read_exception']}
                                    if request.get('travel_read_exception') is not None else {}))
     if operation == 'status':
         return {'run_id': run_id, 'status': approval.store.run(run_id)['status']}
+    if operation == 'dispatch-review':
+        return approval.dispatch_review(run_id, expected_task_id=request.get('expected_task_id'),
+            agent_id=request.get('agent_id'), agent_workflow_key=request.get('agent_workflow_key'),
+            recognition=request.get('recognition'))
+    if operation == 'deliver':
+        return approval.deliver(request['task_id'], agent_id=request.get('agent_id'),
+            material_file=request.get('material_file'), material_sha256=request.get('material_sha256'),
+            opinion=request.get('opinion'), recognition=request.get('recognition'),
+            observations=request.get('observations'), review_assessment=request.get('review_assessment'))
     if operation in {'submit', 'preview'}:
-        return approval.submit(request['task_id'], opinion=request.get('opinion'),
-                               recognition=request.get('recognition'), observations=request.get('observations'),
-                               review_assessment=request.get('review_assessment'),
-                               confirm_write=operation == 'submit' and request.get('confirm_write', False),
-                               allow_overseas=request.get('allow_overseas', False))
+        if any(name in request for name in ('opinion', 'recognition', 'observations', 'review_assessment')):
+            raise ValueError('delivery_required')
+        return approval.submit(request['task_id'],
+            confirm_write=operation == 'submit' and request.get('confirm_write', False),
+            allow_overseas=request.get('allow_overseas', False))
     if operation == 'postcheck':
         return approval.postcheck(request['task_id'], confirmation_note=request.get('confirmation_note'),
                                   expected_submission_id=request.get('expected_submission_id'))
@@ -380,6 +387,8 @@ class _RoundSession:
                          'collection': self._collection.status() if self._collection is not None else None})
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
+            elif self._finishing and request.get('operation') == 'dispatch-review':
+                respond({'run_id': self._run_id, 'status': 'blocked', 'reason': 'run_finishing'})
             else:
                 respond(dispatch(self._approval, self._run_id, request))
         except Exception as error:

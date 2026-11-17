@@ -50,26 +50,29 @@ def main(argv=None):
     finish.add_argument('--stop-file', type=Path, help='提前结束的结构化原因及证据；业务待核不能冒充读取失败')
     finish.add_argument('--orphaned', action='store_true', help='显式核对后关闭失联轮次；仅写本地事实，不恢复审核或创建接续')
     finish.add_argument('--collection-stopped-note', help='仅与 --orphaned 使用，记录本次人工确认采集进程已停止的授权及核对依据')
-    collect = commands.add_parser('collect', help='领取当前轮的一单并冻结完整材料')
-    collect.add_argument('--workflow-key')
-    collect.add_argument('--agent-id', required=True)
+    collect = commands.add_parser('collect', help='独立准备当前FIFO的一单，不占审核名额')
     collect.add_argument('--expected-task-id', type=int, required=True)
-    collect.add_argument('--agent-workflow-key', required=True)
-    collect.add_argument('--travel-read-exception-file', type=Path, help='本单明确授权的商旅登录失败受限审核记录，含request_id及authorization_note；不继承到其他单据')
-    submit = commands.add_parser('submit', help='保存意见，显式确认时按计划提交或转办并回查')
+    collect.add_argument('--travel-read-exception-file', type=Path, help='本单独立授权的商旅受限读取记录')
+    dispatch_review = commands.add_parser('dispatch-review', help='将完整待审材料派发给当前真实审核Agent')
+    dispatch_review.add_argument('--expected-task-id', type=int, required=True)
+    dispatch_review.add_argument('--agent-id', required=True)
+    dispatch_review.add_argument('--agent-workflow-key', required=True)
+    dispatch_review.add_argument('--recognition-file', type=Path)
+    deliver = commands.add_parser('deliver', help='原子保存完整审核交付，成功后释放审核名额，不访问OA')
+    deliver.add_argument('--task-id', type=int, required=True)
+    deliver.add_argument('--agent-id', required=True)
+    deliver.add_argument('--material-file', required=True)
+    deliver.add_argument('--material-sha256', required=True)
+    deliver.add_argument('--opinion-file', type=Path)
+    deliver.add_argument('--recognition-file', type=Path)
+    deliver.add_argument('--observations-file', type=Path)
+    deliver.add_argument('--review-file', type=Path, required=True)
+    submit = commands.add_parser('submit', help='消费已保存交付，显式确认时按计划提交或转办并回查')
     submit.add_argument('--task-id', type=int, required=True)
-    submit.add_argument('--opinion-file', type=Path)
-    submit.add_argument('--recognition-file', type=Path, help='海外识别结果或带附件来源的 DeepSeek 报告；可与意见一起保存')
-    submit.add_argument('--observations-file', type=Path)
-    submit.add_argument('--review-file', type=Path, help='绑定task_id和material_sha256的审核完成状态、适用规则及证据；真实提交必需')
     submit.add_argument('--confirm-write', choices=['YES'])
     submit.add_argument('--allow-overseas', choices=['YES'])
-    preview = commands.add_parser('preview', help='保存本地审核并展示意见、处理动作和限定字段计划，不写OA')
+    preview = commands.add_parser('preview', help='预览已保存交付及处理计划，不写OA')
     preview.add_argument('--task-id', type=int, required=True)
-    preview.add_argument('--opinion-file', type=Path)
-    preview.add_argument('--recognition-file', type=Path)
-    preview.add_argument('--observations-file', type=Path)
-    preview.add_argument('--review-file', type=Path)
     check = commands.add_parser('postcheck', help='仅核对未知提交，不重发')
     check.add_argument('--task-id', type=int, required=True)
     check.add_argument('--confirm-not-written', choices=['YES'], help='记录本次用户明确确认未提交成功，不重发；海外仅确认节点，须核对回填字段一致')
@@ -105,8 +108,8 @@ def main(argv=None):
     if args.operation in {'pending', 'start'} and args.continue_from and (
             args.workflow is not None or args.request_id is not None or args.batch_size is not None):
         parser.error('--continue-from preserves the original selection; omit --workflow, --request-id and --batch-size')
-    if args.operation in {'submit', 'preview'} and not (args.opinion_file or args.recognition_file):
-        parser.error('submit requires --opinion-file or --recognition-file')
+    if args.operation == 'deliver' and not (args.opinion_file or args.recognition_file):
+        parser.error('deliver requires --opinion-file or --recognition-file')
     if args.operation == 'fail' and (bool(args.closed_run_id) != (args.expected_review_id is not None)
             or (args.expected_review_id is not None and args.expected_review_id <= 0)):
         parser.error('--closed-run-id and positive --expected-review-id must be supplied together')
@@ -170,10 +173,13 @@ def main(argv=None):
             return 0
         request = {'operation': args.operation}
         if args.operation == 'collect':
-            request.update(workflow_key=args.workflow_key, agent_id=args.agent_id,
-                           expected_task_id=args.expected_task_id, agent_workflow_key=args.agent_workflow_key)
+            request['expected_task_id'] = args.expected_task_id
             if args.travel_read_exception_file:
                 request['travel_read_exception'] = json.loads(args.travel_read_exception_file.read_text())
+        elif args.operation == 'dispatch-review':
+            request.update(expected_task_id=args.expected_task_id, agent_id=args.agent_id,
+                           agent_workflow_key=args.agent_workflow_key,
+                           recognition=json.loads(args.recognition_file.read_text()) if args.recognition_file else None)
         elif args.operation == 'finish':
             request['run_id'] = args.run_id
             request['handoff'] = args.handoff
@@ -181,12 +187,14 @@ def main(argv=None):
             request['stop'] = json.loads(args.stop_file.read_text()) if args.stop_file else None
         else:
             request['task_id'] = args.task_id
-        if args.operation in {'submit', 'preview'}:
-            request.update(opinion=args.opinion_file.read_text() if args.opinion_file else None,
+        if args.operation == 'deliver':
+            request.update(agent_id=args.agent_id, material_file=args.material_file, material_sha256=args.material_sha256,
+                           opinion=args.opinion_file.read_text() if args.opinion_file else None,
                            recognition=json.loads(args.recognition_file.read_text()) if args.recognition_file else None,
                            observations=json.loads(args.observations_file.read_text()) if args.observations_file else None,
-                           review_assessment=json.loads(args.review_file.read_text()) if args.review_file else None,
-                           confirm_write=getattr(args, 'confirm_write', None) == 'YES',
+                           review_assessment=json.loads(args.review_file.read_text()))
+        if args.operation in {'submit', 'preview'}:
+            request.update(confirm_write=getattr(args, 'confirm_write', None) == 'YES',
                            allow_overseas=getattr(args, 'allow_overseas', None) == 'YES')
         if args.operation == 'fail':
             request['reason'] = args.reason

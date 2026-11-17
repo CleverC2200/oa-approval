@@ -3,6 +3,7 @@ import hashlib
 import math
 
 from apps.oa.approvals.status import closeout_blockers, submission_acceptance
+from apps.oa.approvals.store import UNFINISHED_STATUSES
 
 
 def validate_stop(store, run_id, value, *, handoff=False):
@@ -63,7 +64,7 @@ def close_execution(store, run, tasks, stop):
                             for t in scoped if t['status'] != 'failed' for a in store.review_assessments(t['id']))
     preview = sum(t['status'] == 'preview' for t in scoped)
     verified = sum(t['verified_attempt_count'] > 0 for t in acceptance['tasks'])
-    unfinished = sum(t['status'] in {'preparing', 'reviewing', 'reviewed'} for t in scoped)
+    unfinished = sum(t['status'] in UNFINISHED_STATUSES for t in scoped)
     unverified = sum(t['status'] == 'submitted' and not t['verified_attempt_count'] for t in acceptance['tasks'])
     if queued and stop is None:
         stop = {'kind': 'unexplained', 'reason': 'batch_closed_before_queue_drained'}

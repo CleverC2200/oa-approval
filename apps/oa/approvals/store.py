@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 import json
+import hashlib
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
@@ -10,8 +11,13 @@ from uuid import uuid4
 from apps.oa.materials.reports import review_contents
 
 
-MAX_INFLIGHT = 3
-INFLIGHT_STATUSES = ("preparing", "reviewing", "reviewed", "submitting")
+REVIEW_SLOTS = 3
+PREPARATION_BUFFER = 1
+RESULT_BACKPRESSURE = 3
+RESULT_CAPACITY = RESULT_BACKPRESSURE + REVIEW_SLOTS
+REVIEW_STATUSES = ("reviewing",)
+RESULT_STATUSES = ("reviewed", "submitting")
+UNFINISHED_STATUSES = ("preparing", "prepared", *REVIEW_STATUSES, *RESULT_STATUSES)
 
 
 def now():
@@ -63,7 +69,7 @@ class Store:
                 first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL,
                 error TEXT, failure_count INTEGER NOT NULL DEFAULT 0,
                 material_file TEXT, material_sha256 TEXT, frozen_json TEXT,
-                rule_file TEXT, material_json TEXT);
+                rule_file TEXT, material_json TEXT, recognition_json TEXT);
             CREATE INDEX IF NOT EXISTS task_queue ON tasks(last_run_id,status,received_at);
             CREATE TABLE IF NOT EXISTS attachments (
                 id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks,
@@ -81,7 +87,7 @@ class Store:
                 run_id TEXT NOT NULL REFERENCES runs, opinion TEXT NOT NULL,
                 recognition_json TEXT NOT NULL, material_sha256 TEXT NOT NULL,
                 material_file TEXT NOT NULL, frozen_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
+                created_at TEXT NOT NULL, delivery_json TEXT NOT NULL DEFAULT '{}',
                 UNIQUE(task_id,opinion,recognition_json,material_sha256));
             CREATE TABLE IF NOT EXISTS submissions (
                 id INTEGER PRIMARY KEY, task_id INTEGER NOT NULL REFERENCES tasks,
@@ -94,6 +100,34 @@ class Store:
                 assessment_json TEXT NOT NULL, created_at TEXT NOT NULL,
                 UNIQUE(task_id,material_sha256,assessment_json));
         """)
+
+        for table, column, definition in (
+                ('tasks', 'recognition_json', 'TEXT'),
+                ('reviews', 'delivery_json', "TEXT NOT NULL DEFAULT '{}'")):
+            if column not in {row['name'] for row in self.connection.execute(f'PRAGMA table_info({table})')}:
+                self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+
+    def require_dispatchable(self, run_id):
+        if self.run(run_id)['status'] != 'running':
+            raise ValueError('run_blocked')
+        if self.connection.execute("SELECT 1 FROM tasks WHERE status='unknown'").fetchone() or self.connection.execute(
+                "SELECT 1 FROM submissions s JOIN runs r ON r.id=s.run_id WHERE s.status='unknown' OR s.status='started' AND r.status!='running'").fetchone():
+            if self.connection.in_transaction:
+                self.connection.execute("UPDATE runs SET status='blocked' WHERE id=? AND status='running'", (run_id,))
+            else:
+                with self.connection:
+                    self.connection.execute("UPDATE runs SET status='blocked' WHERE id=? AND status='running'", (run_id,))
+            raise ValueError('submission_unresolved')
+
+    def pipeline_capacity(self, tasks):
+        reviewing = sum(task['status'] in REVIEW_STATUSES for task in tasks)
+        results = sum(task['status'] in RESULT_STATUSES for task in tasks)
+        preparation = sum(task['status'] in {'preparing', 'prepared'} for task in tasks)
+        return {'reviewing': reviewing, 'review_available': max(0, REVIEW_SLOTS - reviewing),
+                'review_limit': REVIEW_SLOTS, 'preparation': preparation, 'preparation_limit': PREPARATION_BUFFER,
+                'results': results, 'result_reserved': reviewing, 'result_capacity': RESULT_CAPACITY,
+                'result_backpressure_threshold': RESULT_BACKPRESSURE,
+                'backpressure': results >= RESULT_BACKPRESSURE or results + reviewing >= RESULT_CAPACITY}
 
     def requests(self):
         return [dict(row) for row in self.connection.execute("SELECT * FROM requests ORDER BY request_id")]
@@ -175,7 +209,7 @@ class Store:
                 self.connection.execute("""INSERT INTO tasks(request_id,occurrence,operator_id,received_at,workflow_key,
                     last_run_id,first_seen_at,last_seen_at) VALUES (?,?,?,?,?,?,?,?)
                     ON CONFLICT(occurrence) DO UPDATE SET last_run_id=excluded.last_run_id,last_seen_at=excluded.last_seen_at,
-                    status=CASE WHEN tasks.status IN ('queued','preparing','reviewing','reviewed','failed','preview')
+                    status=CASE WHEN tasks.status IN ('queued','preparing','prepared','reviewing','reviewed','failed','preview')
                     THEN 'queued' ELSE tasks.status END,agent_id=NULL,
                     error=CASE WHEN tasks.status='submitted' THEN 'submitted_pending_confirmation' ELSE tasks.error END""",
                     (request_id,occurrence,operator,received,workflow,run_id,timestamp,timestamp))
@@ -186,6 +220,8 @@ class Store:
             if recovery_request_ids:
                 stored['recovery'] = {'request_ids': recovery_request_ids, 'task_ids': recovery_tasks}
             self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored),run_id))
+            if self.connection.execute("SELECT 1 FROM tasks WHERE status='unknown'").fetchone():
+                self.connection.execute("UPDATE runs SET status='blocked' WHERE id=?", (run_id,))
         return run_id
 
     def tasks(self, run_id):
@@ -209,50 +245,79 @@ class Store:
             raise ValueError("task_not_found")
         return dict(row)
 
-    def claim(self, run_id, workflow_key=None, agent_id=None, *, expected_task_id=None, agent_workflow_key=None, authorize=None):
+    def claim(self, run_id, *, expected_task_id=None, authorize=None):
         with self.connection:
-            self.connection.execute("BEGIN IMMEDIATE")
-            run = self.run(run_id)
+            self.connection.execute('BEGIN IMMEDIATE')
             tasks = self.tasks(run_id)
-
-            def unclaimed(status, reason):
-                return {"run_id":run_id,"status":status,"reason":reason,
-                        "summary":dict(Counter(task["status"] for task in tasks))}
-
-            if run["status"] != "running":
-                return unclaimed("blocked", "run_blocked")
-            if (type(expected_task_id) is not int or expected_task_id < 1
-                    or not isinstance(agent_workflow_key,str) or not agent_workflow_key.strip()):
-                return unclaimed("refused", "claim_guards_required")
-            if not isinstance(agent_id,str) or not agent_id.strip():
-                return unclaimed("refused", "agent_identity_required")
-            busy = [task for task in tasks if task["status"] in INFLIGHT_STATUSES]
-            if len(busy) >= MAX_INFLIGHT:
-                return unclaimed("waiting", "inflight_limit")
-            if any(task["agent_id"] == agent_id for task in busy):
-                return unclaimed("waiting", "agent_busy")
-            batch = json.loads(run["summary_json"]).get("batch")
-            queued = [task for task in tasks if task["status"] == "queued"
-                and (batch is None or task["id"] in batch["task_ids"])]
-            candidate = next((task for task in queued
-                if not workflow_key or task["workflow_key"] == workflow_key), None)
-            if candidate is None:
-                if queued:
-                    return unclaimed("waiting", "workflow_unavailable")
-                if busy:
-                    return unclaimed("waiting", "in_flight")
-                return unclaimed("done", "batch_exhausted" if batch is not None else "queue_exhausted")
-            if candidate["id"] != expected_task_id:
-                return unclaimed("refused", "expected_task_changed")
-            if candidate["workflow_key"] != agent_workflow_key:
-                return unclaimed("refused", "agent_workflow_mismatch")
-            previous = [task for task in tasks if task["agent_id"] == agent_id]
-            if any(task["workflow_key"] != agent_workflow_key for task in previous):
-                return unclaimed("refused", "agent_generation_workflow_mismatch")
+            def decision(status, reason):
+                return {'run_id': run_id, 'status': status, 'reason': reason,
+                        'summary': dict(Counter(task['status'] for task in tasks))}
+            try:
+                self.require_dispatchable(run_id)
+            except ValueError as error:
+                if str(error) == 'run_not_found':
+                    raise
+                return decision('blocked', str(error))
+            if type(expected_task_id) is not int or expected_task_id < 1:
+                return decision('refused', 'claim_guards_required')
+            if self.pipeline_capacity(tasks)['preparation'] >= PREPARATION_BUFFER:
+                return decision('waiting', 'preparation_buffer_full')
+            batch = json.loads(self.run(run_id)['summary_json']).get('batch')
+            queued = [task for task in tasks if task['status'] == 'queued'
+                      and (batch is None or task['id'] in batch['task_ids'])]
+            if not queued:
+                if any(task['status'] in UNFINISHED_STATUSES for task in tasks):
+                    return decision('waiting', 'in_flight')
+                return decision('done', 'batch_exhausted' if batch is not None else 'queue_exhausted')
+            candidate = queued[0]
+            if candidate['id'] != expected_task_id:
+                return decision('refused', 'expected_task_changed')
             authorization = authorize(candidate) if authorize is not None else None
-            self.connection.execute("UPDATE tasks SET status='preparing',agent_id=? WHERE id=?", (agent_id,candidate["id"]))
-            return {"run_id":run_id,"status":"claimed","task":self.get_task(candidate["id"]),
+            self.connection.execute("UPDATE tasks SET status='preparing',agent_id=NULL,recognition_json=NULL WHERE id=?",
+                                    (candidate['id'],))
+            return {'run_id': run_id, 'status': 'claimed', 'task': self.get_task(candidate['id']),
                     **({'authorization': authorization} if authorize is not None else {})}
+
+    def dispatch_review(self, run_id, *, expected_task_id=None, agent_id=None, agent_workflow_key=None, recognition=None):
+        from apps.oa.approvals.review import validate_readiness
+
+        with self.connection:
+            self.connection.execute('BEGIN IMMEDIATE')
+            tasks = self.tasks(run_id)
+            def decision(status, reason):
+                return {'run_id': run_id, 'status': status, 'reason': reason,
+                        'summary': dict(Counter(task['status'] for task in tasks))}
+            try:
+                self.require_dispatchable(run_id)
+            except ValueError as error:
+                if str(error) == 'run_not_found':
+                    raise
+                return decision('blocked', str(error))
+            if (type(expected_task_id) is not int or expected_task_id < 1
+                    or not isinstance(agent_workflow_key, str) or not agent_workflow_key.strip()):
+                return decision('refused', 'claim_guards_required')
+            if not isinstance(agent_id, str) or not agent_id.strip():
+                return decision('refused', 'agent_identity_required')
+            capacity = self.pipeline_capacity(tasks)
+            if not capacity['review_available']:
+                return decision('waiting', 'inflight_limit')
+            if any(task['agent_id'] == agent_id and task['status'] in REVIEW_STATUSES for task in tasks):
+                return decision('waiting', 'agent_busy')
+            if capacity['backpressure']:
+                return decision('waiting', 'result_backpressure')
+            candidate = next((task for task in tasks if task['status'] == 'prepared'), None)
+            if candidate is None:
+                return decision('waiting', 'materials_not_ready')
+            if candidate['id'] != expected_task_id:
+                return decision('refused', 'expected_task_changed')
+            if candidate['workflow_key'] != agent_workflow_key:
+                return decision('refused', 'agent_workflow_mismatch')
+            if any(task['agent_id'] == agent_id and task['workflow_key'] != agent_workflow_key for task in tasks):
+                return decision('refused', 'agent_generation_workflow_mismatch')
+            validate_readiness(candidate, recognition)
+            self.connection.execute("UPDATE tasks SET status='reviewing',agent_id=?,recognition_json=? WHERE id=?",
+                                    (agent_id, encoded(recognition), candidate['id']))
+            return {'run_id': run_id, 'status': 'claimed', 'task': self.get_task(candidate['id'])}
 
     def fail(self, task_id, error, *, run_id=None, review_assessment=None):
         with self.connection:
@@ -263,7 +328,7 @@ class Store:
                 raise ValueError("run_blocked")
             if task["last_run_id"] != run_id:
                 raise ValueError("task_run_mismatch")
-            if task["status"] not in {"preparing","reviewing"}:
+            if task["status"] not in {"preparing","prepared","reviewing"}:
                 raise ValueError("task_not_failable")
             if review_assessment is not None:
                 from apps.oa.approvals.review import validate_assessment
@@ -311,7 +376,7 @@ class Store:
                     "parent_resource_id":item.get("parent_resource_id"),"local_readonly_path":item.get("path")}
         with self.connection:
             self.connection.execute("""UPDATE tasks SET material_file=?,material_sha256=?,frozen_json=?,
-                material_json=?,rule_file=?,status=CASE WHEN status='preparing' THEN 'reviewing' ELSE status END,
+                material_json=?,rule_file=?,status=CASE WHEN status='preparing' THEN 'prepared' ELSE status END,
                 error=CASE WHEN status='preparing' THEN NULL ELSE error END WHERE id=?""",
                 (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),task_id))
             ids = {}
@@ -337,27 +402,76 @@ class Store:
         self.connection.execute("INSERT OR IGNORE INTO attachment_contents(attachment_id,locator,source,content,status,metadata_json) VALUES (?,?,?,?,?,?)",
             (attachment_id,locator,source,content,status,encoded(metadata)))
 
-    def review(self, task_id, opinion, recognition=None, observations=None):
-        task = self.get_task(task_id)
-        recognized = encoded(recognition)
-        contents = [*review_contents(recognition), *(observations or [])]
+    def deliver(self, task_id, *, agent_id, material_file, material_sha256, opinion, assessment, recognition=None, observations=None):
+        from apps.oa.approvals.review import validate_assessment, validate_delivery_identity, verify_saved_delivery
+
         with self.connection:
-            self.connection.execute("INSERT OR IGNORE INTO reviews(task_id,run_id,opinion,recognition_json,material_sha256,material_file,frozen_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
-                (task_id,task["last_run_id"],opinion,recognized,task["material_sha256"],task["material_file"],task["frozen_json"],now()))
-            for item in contents:
-                attachment = self.connection.execute("SELECT id FROM attachments WHERE task_id=? AND resource_id=? ORDER BY id DESC LIMIT 1",(task_id,str(item["resource_id"]))).fetchone()
+            self.connection.execute('BEGIN IMMEDIATE')
+            task = self.get_task(task_id)
+            self.require_dispatchable(task['last_run_id'])
+            if task['status'] in {'reviewed', 'preview'}:
+                review = self.latest_review(task_id)
+                saved = verify_saved_delivery(review)
+                normalized = validate_assessment(task, assessment)
+                same_assessment = ({key: value for key, value in normalized.items() if key not in {'evidence_files', 'evidence_sha256'}}
+                    == {key: value for key, value in saved['assessment'].items() if key not in {'evidence_files', 'evidence_sha256'}}
+                    and [normalized['evidence_sha256'][name] for name in normalized['evidence_files']]
+                    == [saved['assessment']['evidence_sha256'][name] for name in saved['assessment']['evidence_files']])
+                if (saved['agent_id'] != agent_id or saved['material_file'] != material_file
+                        or saved['material_sha256'] != material_sha256 or review['opinion'] != opinion
+                        or review['recognition_json'] != encoded(recognition) or not same_assessment
+                        or saved['observations_sha256'] != hashlib.sha256(encoded(observations).encode()).hexdigest()):
+                    raise ValueError('review_delivery_changed')
+                return review
+            validate_delivery_identity(task, agent_id, material_file, material_sha256)
+            assessment = validate_assessment(task, assessment)
+            if assessment['status'] not in {'complete', 'business_pending'}:
+                raise ValueError('review_not_complete')
+            if not isinstance(opinion, str) or not opinion.strip():
+                raise ValueError('opinion_required')
+            if any(item['run_id'] == task['last_run_id'] and item['material_sha256'] == material_sha256
+                    and item['assessment']['status'] in {'technical_failure', 'incomplete'}
+                    for item in self.review_assessments(task_id)):
+                raise ValueError('review_failure_unresolved')
+            self._insert_assessment(task, assessment)
+            recognized = encoded(recognition)
+            delivery = {'agent_id': agent_id, 'task_id': task_id, 'material_file': material_file,
+                        'material_sha256': material_sha256, 'assessment': assessment,
+                        'observations_sha256': hashlib.sha256(encoded(observations).encode()).hexdigest()}
+            self.connection.execute("INSERT INTO reviews(task_id,run_id,opinion,recognition_json,material_sha256,material_file,frozen_json,created_at,delivery_json) VALUES (?,?,?,?,?,?,?,?,?)",
+                (task_id, task['last_run_id'], opinion, recognized, material_sha256, material_file, task['frozen_json'], now(), encoded(delivery)))
+            review_id = self.connection.execute('SELECT last_insert_rowid()').fetchone()[0]
+            for item in [*review_contents(recognition), *(observations or [])]:
+                attachment = self.connection.execute('SELECT id FROM attachments WHERE task_id=? AND resource_id=? ORDER BY id DESC LIMIT 1',
+                                                     (task_id, str(item['resource_id']))).fetchone()
                 if attachment is None:
-                    raise ValueError("observation_resource_unbound")
-                self._content(attachment[0],str(item["locator"]),str(item.get("source") or "agent"),str(item["content"]),str(item.get("status") or "read"),item)
+                    raise ValueError('observation_resource_unbound')
+                self._content(attachment[0], str(item['locator']), str(item.get('source') or 'agent'), str(item['content']),
+                              str(item.get('status') or 'read'), item)
             self.connection.execute("UPDATE tasks SET status='reviewed' WHERE id=?", (task_id,))
-        return dict(self.connection.execute("SELECT * FROM reviews WHERE task_id=? AND opinion=? AND recognition_json=? AND material_sha256=?",
-            (task_id,opinion,recognized,task["material_sha256"])).fetchone())
+        return dict(self.connection.execute('SELECT * FROM reviews WHERE id=?', (review_id,)).fetchone())
+
+    def latest_review(self, task_id):
+        row = self.connection.execute('SELECT * FROM reviews WHERE task_id=? ORDER BY id DESC LIMIT 1', (task_id,)).fetchone()
+        if row is None:
+            raise ValueError('review_delivery_required')
+        return dict(row)
 
     def begin_submission(self, task_id, review_id, *, result=None):
-        task = self.get_task(task_id)
         with self.connection:
+            self.connection.execute("BEGIN IMMEDIATE")
+            task = self.get_task(task_id)
+            self.require_dispatchable(task["last_run_id"])
+            if self.connection.execute("SELECT 1 FROM submissions WHERE status='started'").fetchone():
+                raise ValueError("writer_busy")
             if task["status"] in {"submitting","submitted","unknown"}:
                 raise ValueError("submission_already_started")
+            if task['status'] not in {'reviewed', 'preview'}:
+                raise ValueError('task_not_reviewable')
+            review = self.latest_review(task_id)
+            if (review['id'] != review_id or review['run_id'] != task['last_run_id']
+                    or review['material_sha256'] != task['material_sha256']):
+                raise ValueError('review_mismatch')
             cursor = self.connection.execute("INSERT INTO submissions(task_id,review_id,run_id,started_at,status,result_json) VALUES (?,?,?,?,'started',?)",
                 (task_id,review_id,task["last_run_id"],now(),encoded(result or {})))
             self.connection.execute("UPDATE tasks SET status='submitting' WHERE id=?", (task_id,))
@@ -388,8 +502,16 @@ class Store:
             "SELECT * FROM submissions WHERE run_id=? ORDER BY id", (run_id,))]
 
     def assess_review(self, task, assessment):
+        self.require_dispatchable(task['last_run_id'])
         with self.connection:
-            self._insert_assessment(task, assessment)
+            self.connection.execute('BEGIN IMMEDIATE')
+            current = self.get_task(task['id'])
+            self.require_dispatchable(current['last_run_id'])
+            if current['status'] != 'reviewing':
+                raise ValueError('task_not_reviewable')
+            if current['last_run_id'] != task['last_run_id'] or current['material_sha256'] != task['material_sha256']:
+                raise ValueError('review_material_mismatch')
+            self._insert_assessment(current, assessment)
 
     def _insert_assessment(self, task, assessment):
         self.connection.execute('INSERT OR IGNORE INTO review_assessments(task_id,run_id,material_sha256,assessment_json,created_at) VALUES (?,?,?,?,?)',
@@ -403,7 +525,7 @@ class Store:
                 for row in self.connection.execute('SELECT * FROM review_assessments WHERE task_id=? ORDER BY id', (task_id,))]
 
     def _handoff(self, run, tasks, stored):
-        if run['status'] != 'running' or any(task['status'] in (*INFLIGHT_STATUSES, 'unknown') for task in tasks):
+        if run['status'] != 'running' or any(task['status'] in (*UNFINISHED_STATUSES, 'unknown') for task in tasks):
             return {'status':'blocked', 'reason':'continuation_unresolved_tasks'}
         from apps.oa.approvals.status import submission_acceptance
 

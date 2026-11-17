@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from tests.approvals.review_fixtures import review_cli, deliver_cli
+
 import json
 import io
 from pathlib import Path
@@ -156,12 +158,16 @@ def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pendi
     monkeypatch.setattr(auth, 'credentials', unexpected)
     monkeypatch.setattr(official_sql, '_query_rows', unexpected)
 
-    monkeypatch.setattr(sys, 'stdin', io.StringIO(
-        '{"operation":"collect","agent_id":"travel-reviewer","expected_task_id":1,"agent_workflow_key":"travel_expense"}\n'
-        f'{{"operation":"{operation}","task_id":1,"opinion":"合成离线演示意见。"}}\n'
-        '{"operation":"finish"}\n'))
+    from tests.approvals.review_fixtures import review_input
+
+    monkeypatch.setattr(sys, 'stdin', review_input(tmp_path, [
+        {'operation': 'collect_for_review', 'agent_id': 'travel-reviewer', 'expected_task_id': 1,
+         'agent_workflow_key': 'travel_expense'},
+        {'operation': 'deliver_and_submit', 'task_id': 1, 'opinion': '合成离线演示意见。', 'writer_operation': operation},
+        {'operation': 'finish'}]))
     assert cli.main(['--root', str(tmp_path), 'pending', '--demo']) == 0
-    started, collected, preview = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    started, collected, dispatched, saved, preview = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert dispatched['status'] == 'reviewing' and saved['status'] == 'reviewed'
     assert started['total'] == started['shown'] == 3
     assert started['truncated'] is False
     assert collected['request_id'] == '90001'
@@ -172,19 +178,13 @@ def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pendi
 
 
 def command(root, *arguments):
-    if '--confirm-write' in arguments and '--review-file' not in arguments:
-        from tests.approvals.review_fixtures import completed_review_file
-
-        task_id = int(arguments[arguments.index('--task-id') + 1])
-        arguments = (*arguments, '--review-file', str(completed_review_file(root, task_id)))
     return [sys.executable, '-m', 'apps.oa.approvals.cli', '--root', str(root), *arguments]
 
 
 @pytest.mark.parametrize('arguments', [(), ('--agent-id', 'reviewer'),
-    ('--agent-id', 'reviewer', '--expected-task-id', '1'),
     ('--expected-task-id', '1', '--agent-workflow-key', 'travel_expense')])
 def test_collect_cli_requires_all_guards_before_connecting(tmp_path, arguments):
-    result = subprocess.run(command(tmp_path, 'collect', *arguments), cwd=PROJECT,
+    result = subprocess.run(command(tmp_path, 'dispatch-review', *arguments), cwd=PROJECT,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == 2
     assert 'required' in result.stderr
@@ -214,12 +214,11 @@ def test_collect_json_transports_refuse_missing_guards_without_consuming_task(tm
             process.stdin.flush()
             return json.loads(process.stdout.readline())
 
-        assert invoke({'operation': 'collect', **options}) == {
+        assert invoke({'operation': 'dispatch-review', **options}) == {
             'run_id': started['run_id'], 'status': 'refused', 'reason': reason, 'summary': {'queued': 3}}
         queued = started['tasks'][0]
-        collected = invoke({'operation': 'collect', 'agent_id': 'reviewer',
-                            'expected_task_id': queued['id'], 'agent_workflow_key': queued['workflow_key']})
-        assert collected['status'] == 'reviewing'
+        collected = invoke({'operation': 'collect', 'expected_task_id': queued['id']})
+        assert collected['status'] == 'prepared'
         assert collected['task_id'] == queued['id']
         process.stdin.write('{"operation":"finish"}\n')
         process.stdin.flush()
@@ -273,11 +272,8 @@ def test_public_cli_handoff_starts_fresh_owners_until_preview_backlog_is_drained
             status = invoke('status','--run-id',started['run_id'],'--view','batch')
             task = status['next_candidate']
             seen.append(task['id'])
-            assert invoke('collect','--agent-id',f"reviewer-{started['run_id']}",
-                          '--expected-task-id',str(task['id']),
-                          '--agent-workflow-key',task['workflow_key'])['status'] == 'reviewing'
-            assert invoke('preview','--task-id',str(task['id']),
-                          '--opinion-file',str(opinion))['status'] == 'preview'
+            assert review_cli(tmp_path, invoke, str(task['id']), f"reviewer-{started['run_id']}", task['workflow_key'])['status'] == 'reviewing'
+            assert deliver_cli(tmp_path, invoke, str(task['id']), str(opinion) ,operation='preview')['status'] == 'preview'
             closed = invoke('finish','--run-id',started['run_id'],'--handoff')
             process.wait(timeout=10)
             status = invoke('status','--run-id',started['run_id'],'--view','batch')
@@ -311,9 +307,7 @@ def test_demo_runs_collect_preview_submit_and_postcheck(tmp_path, monkeypatch):
             assert result.returncode == 0, result.stdout + result.stderr
             return json.loads(result.stdout)
 
-        task = invoke('collect', '--agent-id', 'travel-reviewer',
-                      '--expected-task-id', str(started['tasks'][0]['id']),
-                      '--agent-workflow-key', started['tasks'][0]['workflow_key'])
+        task = review_cli(tmp_path, invoke, str(started['tasks'][0]['id']), 'travel-reviewer', started['tasks'][0]['workflow_key'])
         assert task['workflow_key'] == 'travel_expense'
         material = json.loads(Path(task['material_file']).read_text())
         assert len(material['prepared']['images']) == 1
@@ -327,8 +321,7 @@ def test_demo_runs_collect_preview_submit_and_postcheck(tmp_path, monkeypatch):
         report = attachment_recognition.recognize(material_file=Path(task['material_file']),
                                                   output_dir=tmp_path / 'recognized')
         assert report['status'] == 'complete'
-        preview = invoke('submit', '--task-id', str(task['task_id']), '--opinion-file', str(opinion),
-                         '--recognition-file', report['report_file'])
+        preview = deliver_cli(tmp_path, invoke, str(task['task_id']), str(opinion) ,recognition_file=report['report_file'])
         assert preview['status'] == 'preview'
         with sqlite3.connect(tmp_path / 'approval.sqlite3') as database:
             contents = database.execute('''SELECT a.resource_id,c.locator,c.content,c.source FROM attachment_contents c
@@ -339,18 +332,15 @@ def test_demo_runs_collect_preview_submit_and_postcheck(tmp_path, monkeypatch):
             assert {row[3] for row in contents} == {'deepseek', 'parser'}
             assert {row[0] for row in contents} == {'demo-pdf'}
             assert database.execute('SELECT COUNT(*) FROM submissions').fetchone()[0] == 0
-        submitted = invoke('submit', '--task-id', str(task['task_id']), '--opinion-file', str(opinion),
-                           '--confirm-write', 'YES')
+        submitted = deliver_cli(tmp_path, invoke, str(task['task_id']), str(opinion) ,confirm_write=True)
         assert submitted['status'] == 'submitted'
         assert invoke('postcheck', '--task-id', str(task['task_id']))['status'] == 'submitted'
         for queued in started['tasks'][1:]:
             workflow = queued['workflow_key']
-            following = invoke('collect', '--agent-id', workflow + '-reviewer',
-                               '--expected-task-id', str(queued['id']), '--agent-workflow-key', workflow)
+            following = review_cli(tmp_path, invoke, str(queued['id']), workflow + '-reviewer', workflow)
             assert following['workflow_key'] == workflow
-            assert invoke('submit', '--task-id', str(following['task_id']), '--opinion-file', str(opinion),
-                          '--confirm-write', 'YES')['status'] == 'submitted'
-        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['status'] == 'done'
+            assert deliver_cli(tmp_path, invoke, str(following['task_id']), str(opinion) ,confirm_write=True)['status'] == 'submitted'
+        assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['status'] == 'done'
         process.stdin.write('{"operation":"finish"}\n')
         process.stdin.flush()
         process.wait(timeout=10)
@@ -383,21 +373,17 @@ def test_fail_command_records_review_failure_and_rejects_preview_without_overwri
                                     capture_output=True, text=True, timeout=10)
             return result.returncode, json.loads(result.stdout)
 
-        _, task = invoke('collect', '--agent-id', 'native-reviewer',
-                         '--expected-task-id', str(started['tasks'][0]['id']),
-                         '--agent-workflow-key', started['tasks'][0]['workflow_key'])
+        _, task = review_cli(tmp_path, invoke, str(started['tasks'][0]['id']), 'native-reviewer', started['tasks'][0]['workflow_key'])
         code, failed = invoke('fail', '--task-id', str(task['task_id']), '--reason', 'native_agent_failed')
         assert code == 0
         assert failed == {'run_id':started['run_id'], 'task_id':task['task_id'], 'status':'failed',
                           'reason':'native_agent_failed', 'failure_count':1}
         assert invoke('fail', '--task-id', str(task['task_id']), '--reason', 'repeat') == (
             1, {'status':'failed', 'error':'task_not_failable'})
-        _, following = invoke('collect', '--agent-id', 'native-next-reviewer',
-                              '--expected-task-id', str(started['tasks'][1]['id']),
-                              '--agent-workflow-key', started['tasks'][1]['workflow_key'])
+        _, following = review_cli(tmp_path, invoke, str(started['tasks'][1]['id']), 'native-next-reviewer', started['tasks'][1]['workflow_key'])
         opinion = tmp_path / 'opinion.txt'
         opinion.write_text('合成离线意见。')
-        assert invoke('submit', '--task-id', str(following['task_id']), '--opinion-file', str(opinion))[1]['status'] == 'preview'
+        assert deliver_cli(tmp_path, invoke, str(following['task_id']), str(opinion))[1]['status'] == 'preview'
         assert invoke('fail', '--task-id', str(following['task_id']), '--reason', 'too_late') == (
             1, {'status':'failed', 'error':'task_not_failable'})
         process.stdin.write('{"operation":"finish"}\n')
@@ -424,21 +410,18 @@ def test_socket_collect_guards_batch_independently_of_pending_display_limit(tmp_
                                     capture_output=True, text=True, timeout=10)
             return result.returncode, json.loads(result.stdout)
 
-        assert invoke('collect', '--agent-id', 'actual-native-agent', '--expected-task-id', '1',
-                      '--agent-workflow-key', 'general_expense') == (
+        assert review_cli(tmp_path, invoke, '1', 'actual-native-agent', 'general_expense') == (
             1, {'run_id':started['run_id'], 'status':'refused', 'reason':'agent_workflow_mismatch',
-                'summary':{'queued':3}})
-        code, first = invoke('collect', '--agent-id', 'actual-native-agent', '--expected-task-id', '1',
-                             '--agent-workflow-key', 'travel_expense')
+                'summary':{'prepared':1,'queued':2}})
+        code, first = review_cli(tmp_path, invoke, '1', 'actual-native-agent', 'travel_expense')
         assert code == 0
         assert first['task_id'] == 1
         assert invoke('fail', '--task-id', '1', '--reason', 'read_failed')[1]['status'] == 'failed'
-        code, second = invoke('collect', '--agent-id', 'actual-next-native-agent', '--expected-task-id', '2',
-                              '--agent-workflow-key', 'business_entertainment')
+        code, second = review_cli(tmp_path, invoke, '2', 'actual-next-native-agent', 'business_entertainment')
         assert code == 0
         assert second['task_id'] == 2
         assert invoke('fail', '--task-id', '2', '--reason', 'read_failed')[1]['status'] == 'failed'
-        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense') == (
+        assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense') == (
             0, {'run_id':started['run_id'], 'status':'done', 'reason':'batch_exhausted',
                 'summary':{'failed':2,'queued':1}})
         process.stdin.write('{"operation":"finish"}\n')
@@ -520,8 +503,7 @@ if __name__ == '__main__':
                                     capture_output=True, text=True, timeout=10)
             return json.loads(result.stdout)
 
-        first = invoke('collect', '--agent-id', 'first', '--expected-task-id', str(started['tasks'][0]['id']),
-                       '--agent-workflow-key', started['tasks'][0]['workflow_key'])
+        first = review_cli(tmp_path, invoke, str(started['tasks'][0]['id']), 'first', started['tasks'][0]['workflow_key'])
         client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         client.settimeout(15)
         client.connect(started['socket'])
@@ -546,16 +528,15 @@ def test_socket_submit_finishes_while_another_collection_is_blocked(blocked_coll
     process, started, first, invoke, client, channel = blocked_collection
     opinion = tmp_path / 'opinion.txt'
     opinion.write_text('合成离线意见。')
-    submitted = invoke('submit', '--task-id', str(first['task_id']), '--opinion-file', str(opinion),
-                       '--confirm-write', 'YES')
+    submitted = deliver_cli(tmp_path, invoke, str(first['task_id']), str(opinion) ,confirm_write=True)
     assert submitted['status'] == 'submitted'
     assert invoke('postcheck', '--task-id', str(first['task_id']))['status'] == 'submitted'
-    assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['status'] == 'waiting'
+    assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['status'] == 'waiting'
     from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     assert [task['status'] for task in app.store.tasks(started['run_id'])] == ['submitted', 'preparing', 'queued']
     channel.sendall(b'r')
-    assert json.loads(client.makefile().readline())['status'] == 'reviewing'
+    assert json.loads(client.makefile().readline())['status'] == 'prepared'
     process.stdin.close()
     process.wait(timeout=15)
     assert process.returncode == 0, process.stderr.read()
@@ -591,21 +572,19 @@ def test_unknown_blocks_refill_and_other_write_without_discarding_collection(blo
     (tmp_path / 'unknown').touch()
     opinion = tmp_path / 'opinion.txt'
     opinion.write_text('合成离线意见。')
-    assert invoke('submit', '--task-id', '1', '--opinion-file', str(opinion),
-                  '--confirm-write', 'YES')['status'] == 'unknown'
-    assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['status'] == 'blocked'
+    assert deliver_cli(tmp_path, invoke, '1', str(opinion) ,confirm_write=True)['status'] == 'unknown'
+    assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['status'] == 'blocked'
     channel.sendall(action)
     result = json.loads(client.makefile().readline())
-    assert result['status'] == ('reviewing' if action == b'r' else 'failed')
+    assert result['status'] == ('prepared' if action == b'r' else 'failed')
     from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
-    assert task['status'] == ('reviewing' if action == b'r' else 'failed')
+    assert task['status'] == ('prepared' if action == b'r' else 'failed')
     assert task['failure_count'] == (0 if action == b'r' else 1)
     assert app.store.run(started['run_id'])['status'] == 'blocked'
-    assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['status'] == 'blocked'
-    assert invoke('submit', '--task-id', '2', '--opinion-file', str(opinion),
-                  '--confirm-write', 'YES')['error'] in {'run_blocked', 'task_not_reviewable'}
+    assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['status'] == 'blocked'
+    assert deliver_cli(tmp_path, invoke, '2', str(opinion) ,confirm_write=True)['error'] in {'run_blocked', 'task_not_reviewable'}
     assert app.inspect(3)['task']['status'] == 'queued'
     assert app.inspect(2)['submissions'] == []
     process.stdin.close()
@@ -631,7 +610,7 @@ def test_exit_waits_for_disconnected_collection_and_keeps_lock(blocked_collectio
     from apps.oa.approvals.operations import Approval
     app = Approval(tmp_path)
     task = app.inspect(2)['task']
-    assert task['status'] == 'reviewing'
+    assert task['status'] == 'prepared'
     assert Path(task['material_file']).is_file()
     assert app.store.run(started['run_id'])['status'] == 'closed'
     assert not Path(started['socket']).exists()
@@ -653,7 +632,7 @@ def test_collection_process_crash_marks_preparing_task_failed_once(blocked_colle
     task = app.inspect(2)['task']
     assert task['status'] == 'failed'
     assert task['failure_count'] == 1
-    assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3', '--agent-workflow-key', 'general_expense')['task_id'] == 3
+    assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['task_id'] == 3
     process.stdin.close()
     process.wait(timeout=15)
     assert process.returncode == 0, process.stderr.read()
@@ -668,21 +647,20 @@ def test_socket_finish_waits_for_collection_and_refuses_new_claims(blocked_colle
         finishing.connect(started['socket'])
         finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
         assert invoke('pending', '--demo')['status'] == 'already_running'
-        refused = invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
-                         '--agent-workflow-key', 'general_expense')
+        refused = review_cli(tmp_path, invoke, '3', 'third', 'general_expense')
         assert refused == {'run_id': started['run_id'], 'status': 'blocked', 'reason': 'run_finishing'}
         channel.sendall(b'r')
-        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        assert json.loads(collector.makefile().readline())['status'] == 'prepared'
         assert json.loads(finishing.makefile().readline())['status'] == 'closed'
     process.wait(timeout=15)
     assert process.returncode == 0, process.stderr.read()
     status = invoke('status')
     assert status['run']['status'] == 'closed'
-    assert status['summary'] == {'reviewing': 2, 'queued': 1}
+    assert status['summary'] == {'reviewing': 1, 'prepared': 1, 'queued': 1}
     assert not Path(started['socket']).exists()
 
 
-def test_all_finish_clients_receive_closed_after_collection_drains(blocked_collection):
+def test_all_finish_clients_receive_closed_after_collection_drains(blocked_collection, tmp_path):
     import socket
 
     process, started, first, invoke, collector, channel = blocked_collection
@@ -693,10 +671,9 @@ def test_all_finish_clients_receive_closed_after_collection_drains(blocked_colle
             client.connect(started['socket'])
             client.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
             assert invoke('status')['owner']['reachable'] is True
-        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
-                      '--agent-workflow-key', 'general_expense')['reason'] == 'run_finishing'
+        assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['reason'] == 'run_finishing'
         channel.sendall(b'r')
-        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        assert json.loads(collector.makefile().readline())['status'] == 'prepared'
         closed = [json.loads(client.makefile().readline()) for client in finishers]
         assert closed[0] == closed[1]
         assert closed[0]['status'] == 'closed'
@@ -718,8 +695,7 @@ def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blo
         finishing.settimeout(2)
         finishing.connect(started['socket'])
         finishing.sendall((json.dumps({'operation': 'finish', 'run_id': started['run_id']}) + '\n').encode())
-        assert invoke('collect', '--agent-id', 'third', '--expected-task-id', '3',
-                      '--agent-workflow-key', 'general_expense')['reason'] == 'run_finishing'
+        assert review_cli(tmp_path, invoke, '3', 'third', 'general_expense')['reason'] == 'run_finishing'
         process.stdin.write(json.dumps({'operation': 'collect', 'agent_id': 'third',
             'expected_task_id': 3, 'agent_workflow_key': 'general_expense'}) + '\n')
         process.stdin.flush()
@@ -735,7 +711,7 @@ def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blo
         else:
             pytest.fail('owner did not begin draining the blocked worker for stdin')
         channel.sendall(b'r')
-        assert json.loads(collector.makefile().readline())['status'] == 'reviewing'
+        assert json.loads(collector.makefile().readline())['status'] == 'prepared'
         assert json.loads(finishing.makefile().readline())['status'] == 'closed'
     process.wait(timeout=5)
     assert process.returncode == 0, process.stderr.read()
@@ -743,7 +719,7 @@ def test_socket_finish_does_not_dispatch_stdin_collect_after_draining_worker(blo
     assert not Path(started['socket']).exists()
     status = invoke('status')
     assert status['run']['status'] == 'closed'
-    assert status['summary'] == {'reviewing': 2, 'queued': 1}
+    assert status['summary'] == {'reviewing': 1, 'prepared': 1, 'queued': 1}
     assert invoke('show', '--task-id', '3')['task']['status'] == 'queued'
     reopened = subprocess.run(command(tmp_path, 'start', '--demo'), cwd=PROJECT,
                               input='{"operation":"finish"}\n', capture_output=True, text=True, timeout=10)
@@ -807,8 +783,8 @@ def test_partial_collection_reply_cannot_block_deadline(tmp_path, monkeypatch):
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)
     task = started['tasks'][0]
-    app.store.claim(started['run_id'], agent_id='partial', expected_task_id=task['id'],
-                    agent_workflow_key=task['workflow_key'])
+    app.store.claim(started['run_id'],  expected_task_id=task['id'],
+                    )
     context = multiprocessing.get_context('spawn')
     incoming, output = context.Pipe(duplex=False)
     process = context.Process(target=_partial_collection_result, args=(output,))
@@ -871,7 +847,7 @@ def test_browser_cleanup_deadline_does_not_wait_for_collection_total(blocked_col
     assert result['error'] == 'collection_deadline'
     assert result['stage'] == 'synthetic_browser_cleanup'
     assert result['task_id'] == 2 and result['run_id'] == started['run_id']
-    assert result['agent_id'] == 'second'
+    assert result['agent_id'] is None
     report = json.loads(Path(result['diagnostics_file']).read_text())
     assert report['stage'] == result['stage'] and report['task_id'] == 2
     reads = json.loads(Path(report['read_results_file']).read_text())
