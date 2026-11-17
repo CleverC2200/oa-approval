@@ -95,6 +95,20 @@ def test_recovery_does_not_requeue_unknown_or_successful_attempts(tmp_path):
     assert task['id'] not in run['batch']['task_ids']
 
 
+def test_ready_continuation_can_prioritize_newly_authorized_failure_once(tmp_path):
+    app = create_demo(tmp_path)
+    first = app.pending(batch_size=1)
+    failed = finish_one(app, first, fail=True)
+    assert app.close(first['run_id'], handoff=True)['handoff']['status'] == 'ready'
+    recovery = app.pending(continue_from=first['run_id'], recovery_request_ids=[failed['request_id']])
+    assert recovery['batch']['task_ids'] == [failed['id']]
+    assert finish_one(app, recovery, fail=True)['id'] == failed['id']
+    assert app.close(recovery['run_id'], handoff=True)['handoff']['status'] == 'ready'
+    following = app.pending(continue_from=recovery['run_id'], recovery_request_ids=[failed['request_id']])
+    assert failed['id'] not in following['batch']['task_ids']
+    assert app.store.get_task(failed['id'])['failure_count'] == 2
+
+
 def test_preview_chain_carries_processed_occurrences_across_multiple_conversations(tmp_path):
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)

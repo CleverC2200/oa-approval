@@ -107,15 +107,16 @@ class Approval:
 
     def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None, retry_failed=False, retry_reviewed=False,
                 recovery_request_ids=None):
-        continuation = self.store.continuation_options(continue_from)
-        if continuation is not None:
-            if retry_failed or retry_reviewed or any(value is not None for value in (workflows, batch_size, request_ids, recovery_request_ids)):
-                raise ValueError('continuation_selection_changed')
-            workflows, batch_size, request_ids = (continuation[key] for key in ('workflows', 'batch_size', 'request_ids'))
-            recovery_request_ids = continuation.get('recovery_request_ids')
         if recovery_request_ids is not None and (not isinstance(recovery_request_ids, list)
                 or not recovery_request_ids or any(not isinstance(value, str) or not value.strip() for value in recovery_request_ids)):
             raise ValueError('recovery_request_ids_invalid')
+        continuation = self.store.continuation_options(continue_from)
+        if continuation is not None:
+            if retry_failed or retry_reviewed or any(value is not None for value in (workflows, batch_size, request_ids)):
+                raise ValueError('continuation_selection_changed')
+            workflows, batch_size, request_ids = (continuation[key] for key in ('workflows', 'batch_size', 'request_ids'))
+            recovery_request_ids = list(dict.fromkeys([*(continuation.get('recovery_request_ids') or []),
+                                                      *(recovery_request_ids or [])])) or None
         if retry_failed and not request_ids:
             raise ValueError("retry_failed_requires_request_ids")
         if retry_reviewed and not request_ids:

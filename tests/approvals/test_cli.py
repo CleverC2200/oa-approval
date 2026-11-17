@@ -129,6 +129,19 @@ def test_pending_request_filter_freezes_only_fresh_matching_requests(pending_out
     assert [task['request_id'] for task in started['tasks']] == ['101', '103']
 
 
+def test_pending_cli_prioritizes_only_the_authorized_historical_failure(tmp_path, pending_output):
+    from apps.oa.approvals.operations import Approval
+
+    pending_output()
+    app = Approval(tmp_path)
+    app.store.set_status(1, 'failed')
+    app.store.set_status(2, 'failed')
+    result = pending_output('--recover-request-id', '123', '--batch-size', '1')
+    assert result['batch']['task_ids'] == [1]
+    assert result['tasks'][0]['request_id'] == '123'
+    assert app.store.get_task(2)['status'] == 'failed'
+
+
 @pytest.mark.parametrize('operation', ['submit', 'preview'])
 @pytest.mark.parametrize('finance_policy', [False, True])
 def test_pending_summary_keeps_stdin_collect_and_default_preview(tmp_path, pending_output, monkeypatch, capsys, operation, finance_policy):

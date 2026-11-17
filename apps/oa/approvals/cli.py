@@ -103,7 +103,7 @@ def main(argv=None):
     if args.operation in {'pending', 'start'} and args.batch_size is not None and args.batch_size < 0:
         parser.error('--batch-size must be non-negative')
     if args.operation in {'pending', 'start'} and args.continue_from and (
-            args.workflow is not None or args.request_id is not None or args.batch_size is not None or args.recover_request_id is not None):
+            args.workflow is not None or args.request_id is not None or args.batch_size is not None):
         parser.error('--continue-from preserves the original selection; omit --workflow, --request-id and --batch-size')
     if args.operation in {'submit', 'preview'} and not (args.opinion_file or args.recognition_file):
         parser.error('submit requires --opinion-file or --recognition-file')
