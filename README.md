@@ -49,21 +49,32 @@ export OA_RUNTIME_ROOT="$PWD/runtime/demo"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" start --demo
 ```
 
-start 是持有锁和 socket 的前台 owner。保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`；另一个终端使用同一绝对 root 调用其他操作。正常收尾通过 finish，等待采集落盘和 owner 退出。失联轮次的显式核对和关闭见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md#失联轮次核对)。
+start 是持有锁和 socket 的前台 owner。保持原工具会话的标准输入打开，例如使用 `exec_command` 的 `tty=true`；另一个终端使用同一绝对 root 调用其他操作。正常收尾通过 finish，等待采集、Writer 落盘和 owner 退出。失联轮次的显式核对和关闭见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md#失联轮次核对)。
 
 ```bash
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --view batch
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" show --task-id "$OA_TASK_ID"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" collect \
-  --agent-id "$OA_REVIEW_AGENT_ID" \
-  --expected-task-id "$OA_TASK_ID" --agent-workflow-key "$OA_WORKFLOW_KEY"
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" preview --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt
+  --expected-task-id "$OA_TASK_ID"
+```
+
+完成本流程适用的材料识别后派发审核。`OA_RECOGNITION_FILE` 使用完整识别报告；无适用报告时省略该选项。
+
+```bash
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" dispatch-review \
+  --expected-task-id "$OA_TASK_ID" --agent-id "$OA_REVIEW_AGENT_ID" \
+  --agent-workflow-key "$OA_WORKFLOW_KEY" --recognition-file "$OA_RECOGNITION_FILE"
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" deliver \
+  --task-id "$OA_TASK_ID" --agent-id "$OA_REVIEW_AGENT_ID" \
+  --material-file "$OA_MATERIAL_FILE" --material-sha256 "$OA_MATERIAL_SHA256" \
+  --opinion-file /absolute/path/opinion.txt --review-file /absolute/path/review.json
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" preview --task-id "$OA_TASK_ID"
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish --run-id "$OA_RUN_ID" --require-drained
 ```
 
 变量取本次工具返回的实际 Agent、任务、流程和轮次身份。真实 start 仅允许干净、已发布且与 origin/main 一致的 main，启动前 fetch 核对；运行中的 checkout 不自动更新。真实运行将 root 设为本项目 runtime 的绝对路径。默认目录不受启动 cwd 影响，锁与账本按所选 root 协调。
 
-真实提交同时提供 `--review-file`，记录本次实际审核完成状态、材料版本及证据；格式和失败分支见[提交前审核结果](.agents/skills/oa-finance-preaudit/references/review-assessment.md)。提前关闭的原因通过 `finish --stop-file` 保存，最终汇报读取 `status --view batch` 的 `execution`，不能只依据提交回执判断整轮正常。异常及业务待核材料保留，已验证提交不解除其保留条件。
+`deliver` 必须提供 `--review-file`，记录本次实际审核完成状态、材料版本及证据，保存成功才释放审核槽。`submit` 与 `preview` 只消费已保存结果；格式和失败分支见[提交前审核结果](.agents/skills/oa-finance-preaudit/references/review-assessment.md)。提前关闭的原因通过 `finish --stop-file` 保存，最终汇报读取 `status --view batch` 的 `execution`，不能只依据提交回执判断整轮正常。异常及业务待核材料保留，已验证提交不解除其保留条件。
 
 新轮默认排除同一次投递的历史预览，以及已生成意见但没有提交尝试的排队或待提交任务，保留原意见等待明确授权；新的投递身份仍可入队。提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --require-drained --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
 

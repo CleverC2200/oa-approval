@@ -68,7 +68,8 @@ def close_execution(store, run, tasks, stop):
     unverified = sum(t['status'] == 'submitted' and not t['verified_attempt_count'] for t in acceptance['tasks'])
     if queued and stop is None:
         stop = {'kind': 'unexplained', 'reason': 'batch_closed_before_queue_drained'}
-    if closeout_blockers(acceptance) or review_incomplete:
+    unresolved = store.unresolved_writes()
+    if run['status'] == 'blocked' or unresolved or closeout_blockers(acceptance) or review_incomplete:
         status = 'blocked'
     elif failed:
         status = 'partial_failure' if verified else 'failed'
@@ -88,7 +89,7 @@ def close_execution(store, run, tasks, stop):
             'remaining_count': remaining, 'selected_remaining_count': selected_remaining,
             'preview_count': preview, 'unclaimed_count': queued,
             'unfinished_count': unfinished, 'unverified_count': unverified,
-            'unknown_count': acceptance['unknown_attempt_count'] + acceptance['unfinished_attempt_count'], 'stop': stop,
+            'unknown_count': len(unresolved), 'stop': stop,
             'archive_eligible': status == 'success' and not queued and not preview}
 
 
@@ -102,7 +103,8 @@ def execution_headline(execution):
         label = '部分失败' if verified else '失败'
         return f'❌ {label}｜成功 {verified} 单，失败 {failed} 单'
     if state == 'blocked':
-        pending = execution['unclaimed_count'] + execution['unfinished_count'] + execution['unverified_count']
+        pending = max(execution.get('unknown_count', 0),
+                      execution['unclaimed_count'] + execution['unfinished_count'] + execution['unverified_count'])
         return f'❌ 阻断｜成功 {verified} 单，未处理 {pending} 单'
     if state == 'no_eligible':
         remaining = execution.get('selected_remaining_count')

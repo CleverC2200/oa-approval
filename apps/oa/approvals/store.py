@@ -497,6 +497,14 @@ class Store:
             "reviews":[dict(row) for row in self.connection.execute("SELECT * FROM reviews WHERE task_id=? ORDER BY id",(task_id,))],
             "submissions":[dict(row) for row in self.connection.execute("SELECT * FROM submissions WHERE task_id=? ORDER BY id",(task_id,))]}
 
+    def unresolved_writes(self):
+        return [dict(row) for row in self.connection.execute(
+            """SELECT t.id AS task_id,t.last_run_id AS run_id,t.status AS task_status,
+                s.id AS submission_id,s.run_id AS submission_run_id,s.status AS submission_status
+                FROM tasks t LEFT JOIN submissions s ON s.task_id=t.id AND s.status IN ('started','unknown')
+                WHERE t.status IN ('unknown','submitting') OR s.id IS NOT NULL
+                ORDER BY t.id,s.id""")]
+
     def submissions(self, run_id):
         return [dict(row) for row in self.connection.execute(
             "SELECT * FROM submissions WHERE run_id=? ORDER BY id", (run_id,))]

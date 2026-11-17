@@ -1,3 +1,4 @@
+import pytest
 from apps.oa.approvals.store import Store
 from tests.approvals.test_store import pending
 
@@ -317,3 +318,33 @@ def test_late_failure_assessment_cannot_change_a_blocked_or_delivered_review(tmp
     with pytest.raises(ValueError, match='run_blocked'):
         app.store.assess_review(task, failure)
     assert app.inspect(1) == before
+
+
+@pytest.mark.parametrize('state', ['unknown', 'started'])
+def test_global_unresolved_submission_blocks_empty_run_closeout(tmp_path, state):
+    from apps.oa.approvals.client import query
+    from apps.oa.approvals.store import Store
+    from tests.approvals.test_capability_cli import record_submission
+
+    store = Store(tmp_path / 'approval.sqlite3')
+    try:
+        previous = store.start_run([pending('101')])
+        if state == 'unknown':
+            store.set_status(1, 'unknown')
+        else:
+            record_submission(store, 1)
+        store.close(previous)
+        run = store.start_run([])
+        assert store.run(run)['status'] == 'blocked'
+        closed = store.close(run)
+        assert closed['execution']['status'] == 'blocked'
+        public = query(tmp_path, 'status', run_id=run, view='batch')
+        assert public['execution']['status'] == 'blocked'
+        assert public['execution']['archive_eligible'] is False
+        assert public['closeout']['complete'] is False
+        assert 'submission_unresolved' in public['closeout']['blockers']
+        assert any(alert['code'] == 'submission_unresolved' for alert in public['alerts'])
+        assert public['runtime_unresolved'][0]['task_id'] == 1
+        assert public['runtime_unresolved'][0]['run_id'] == previous
+    finally:
+        store.connection.close()
