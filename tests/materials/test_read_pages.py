@@ -93,6 +93,28 @@ def test_nested_json_order_pointer_keeps_raw_values_and_origin(tmp_path):
     assert path.read_bytes() == original
 
 
+@pytest.mark.parametrize('amount', ['9007199254740993.01', '0.12345678901234567890', '1e400'])
+def test_nested_json_preserves_numeric_tokens_and_original_whitespace(tmp_path, amount):
+    from apps.oa.materials.read import read_page
+
+    path = tmp_path / 'material.json'
+    order = '{\n  "amount" : ' + amount + ', "lines": [{"qty": 1.00}]\n}'
+    path.write_text(json.dumps({'authority_facts': [{'value': '{"order_detail": ' + order + '}'}]}))
+    page = read_page(path, offset=0, pointer='/authority_facts/0/value/order_detail')
+    assert page['text'] == order
+    nested = read_page(path, offset=0, pointer='/authority_facts/0/value/order_detail/lines/0/qty')
+    assert nested['text'] == '1.00'
+
+
+def test_nested_json_rejects_ambiguous_duplicate_member(tmp_path):
+    from apps.oa.materials.read import read_page
+
+    path = tmp_path / 'material.json'
+    path.write_text(json.dumps({'value': '{"amount": 1, "amount": 2}'}))
+    with pytest.raises(ValueError, match='material_read_pointer_ambiguous'):
+        read_page(path, offset=0, pointer='/value/amount')
+
+
 def test_progress_preserves_gaps_versions_and_navigation_scope(tmp_path, capsys):
     path = tmp_path / 'material.json'
     path.write_text(json.dumps({'value': 'abcdefgh'}))

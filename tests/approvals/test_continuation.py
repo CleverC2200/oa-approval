@@ -109,6 +109,29 @@ def test_ready_continuation_can_prioritize_newly_authorized_failure_once(tmp_pat
     assert app.store.get_task(failed['id'])['failure_count'] == 2
 
 
+def test_unclaimed_recovery_keeps_priority_across_multiple_small_batches(tmp_path):
+    app = create_demo(tmp_path)
+    recovery_ids = [row['request_id'] for row in app.api.rows[1:]]
+    original = app.pending(request_ids=recovery_ids)
+    failed_ids = []
+    for index, task in enumerate(original['tasks']):
+        app.collect(original['run_id'], agent_id=f'original-{index}', expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
+        app.fail(original['run_id'], task['id'], 'synthetic_read_failure')
+        failed_ids.append(task['id'])
+    app.close(original['run_id'])
+    run = app.pending(batch_size=1, recovery_request_ids=recovery_ids)
+    first = finish_one(app, run, fail=True)
+    assert first['id'] == failed_ids[0]
+    assert app.close(run['run_id'], handoff=True)['handoff']['status'] == 'ready'
+    successor = app.pending(continue_from=run['run_id'])
+    assert successor['batch']['task_ids'] == [failed_ids[1]]
+    assert finish_one(app, successor, fail=True)['id'] == failed_ids[1]
+    assert app.close(successor['run_id'], handoff=True)['handoff']['status'] == 'ready'
+    normal = app.pending(continue_from=successor['run_id'])
+    assert all(task['id'] not in failed_ids for task in normal['tasks'])
+    assert normal['tasks'][0]['request_id'] == app.api.rows[0]['request_id']
+
+
 def test_preview_chain_carries_processed_occurrences_across_multiple_conversations(tmp_path):
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)

@@ -128,10 +128,12 @@ class Store:
             recovery_tasks = []
             processed = set()
             recovered = set()
+            pending_recovery = set()
             if continue_from is not None:
                 previous = json.loads(self.run(continue_from)['summary_json'])
                 processed.update(previous['handoff']['processed_occurrences'])
                 recovered.update(previous['handoff'].get('recovered_occurrences', []))
+                pending_recovery.update(previous.get('recovery', {}).get('task_ids', []))
                 stored['continuation'] = {'previous_run_id':continue_from, 'processed_occurrences':sorted(processed),
                                           'recovered_occurrences': sorted(recovered)}
                 previous['handoff'].update(status='started', next_run_id=run_id)
@@ -153,8 +155,9 @@ class Store:
                         EXISTS(SELECT 1 FROM reviews WHERE task_id=tasks.id)
                         AND NOT EXISTS(SELECT 1 FROM submissions WHERE task_id=tasks.id) AS unsubmitted_review
                     FROM tasks WHERE occurrence=?""", (occurrence,)).fetchone()
-                recovering = (previous_task is not None and previous_task['status'] == 'failed'
-                              and request_id in (recovery_request_ids or []) and occurrence not in recovered)
+                recovering = (previous_task is not None and request_id in (recovery_request_ids or [])
+                              and occurrence not in recovered and (previous_task['status'] == 'failed'
+                              or previous_task['status'] == 'queued' and previous_task['id'] in pending_recovery))
                 if occurrence in processed and not recovering:
                     pending['excluded'].append({'request_id': request_id, 'reason': 'continuation_processed'})
                     continue

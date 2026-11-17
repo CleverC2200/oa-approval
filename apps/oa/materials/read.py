@@ -156,6 +156,36 @@ def read(material_file: Path, *, view: str = 'full') -> str:
     return _full_text(material, material_file)
 
 
+def _json_member_text(text, key):
+    decoder = json.JSONDecoder()
+    whitespace = re.compile(r'\s*')
+    position = whitespace.match(text, 0).end()
+    is_object = text[position] == '{'
+    closing = '}' if is_object else ']'
+    position = whitespace.match(text, position + 1).end()
+    index = 0
+    selected = None
+    while text[position] != closing:
+        if is_object:
+            member, position = decoder.raw_decode(text, position)
+            position = whitespace.match(text, position).end() + 1
+        else:
+            member = str(index)
+        start = whitespace.match(text, position).end()
+        _, end = decoder.raw_decode(text, start)
+        if member == key:
+            if selected is not None:
+                raise ValueError('material_read_pointer_ambiguous')
+            selected = text[start:end]
+        position = whitespace.match(text, end).end()
+        if text[position] == ',':
+            position = whitespace.match(text, position + 1).end()
+        index += 1
+    if selected is None:
+        raise ValueError('material_read_pointer_invalid')
+    return selected
+
+
 def read_page(material_file, *, offset, page_chars=DEFAULT_PAGE_CHARS, pointer='', expected_sha256=None, view='full'):
     if type(offset) is not int or offset < 0 or type(page_chars) is not int or not 1 <= page_chars <= MAX_PAGE_CHARS:
         raise ValueError('material_read_range_invalid')
@@ -172,9 +202,11 @@ def read_page(material_file, *, offset, page_chars=DEFAULT_PAGE_CHARS, pointer='
     value = material
     decoded_pointers = []
     traversed = ''
+    encoded_value = None
     for segment in pointer.split('/')[1:] if pointer else []:
         if isinstance(value, str):
             try:
+                encoded_value = value
                 value = json.loads(value)
             except ValueError as error:
                 raise ValueError('material_read_pointer_invalid') from error
@@ -186,6 +218,8 @@ def read_page(material_file, *, offset, page_chars=DEFAULT_PAGE_CHARS, pointer='
             value = value[int(key)]
         else:
             raise ValueError('material_read_pointer_invalid')
+        if encoded_value is not None:
+            encoded_value = _json_member_text(encoded_value, key)
         traversed += '/' + segment
     if view == 'outline':
         from apps.oa.materials.navigation import outline
@@ -195,6 +229,8 @@ def read_page(material_file, *, offset, page_chars=DEFAULT_PAGE_CHARS, pointer='
         text = _full_text(material, material_file)
     elif isinstance(value, str):
         text = value
+    elif encoded_value is not None:
+        text = encoded_value
     else:
         text = json.dumps(value, ensure_ascii=False, indent=2)
     if offset > len(text):
