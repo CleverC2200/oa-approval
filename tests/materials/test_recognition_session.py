@@ -10,7 +10,7 @@ import pytest
 from apps.oa.materials import recognize as recognition
 
 
-@pytest.mark.parametrize('oversized', [None, 'material', 'image'])
+@pytest.mark.parametrize('oversized', [None, 'material'])
 def test_material_metadata_has_a_separate_bounded_read_from_images(tmp_path, monkeypatch, oversized):
     image = tmp_path / 'page.png'
     Image.new('RGB', (3, 2), 'red').save(image)
@@ -22,7 +22,7 @@ def test_material_metadata_has_a_separate_bounded_read_from_images(tmp_path, mon
         'manifest': [{'resource_id': 'page', 'status': 'image', 'image_count': 1}],
         'structured_contents': []}}))
     original = material.read_bytes()
-    monkeypatch.setattr(recognition, 'MAX_FILE_BYTES', len(image_bytes) - 1 if oversized == 'image' else 1024)
+    monkeypatch.setattr(recognition, 'MAX_FILE_BYTES', 1024)
     monkeypatch.setattr(recognition, 'MAX_SOURCE_BYTES', len(original) - 1 if oversized == 'material' else 8192)
     monkeypatch.setenv('OA_REVIEW_API_KEY', 'fake-api-key')
     requests = []

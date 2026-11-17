@@ -53,9 +53,8 @@ def test_collection_cache_follows_runtime_root_across_working_directories(tmp_pa
         try:
             run = approval.pending()
             task = next(item for item in run['tasks'] if item['status'] == 'queued')
-            result = approval.collect(run['run_id'], agent_id=f'agent-{index}',
-                expected_task_id=task['id'], agent_workflow_key=task['workflow_key'])
-            assert result['status'] == 'reviewing'
+            result = approval.collect(run['run_id'], expected_task_id=task['id'])
+            assert result['status'] == 'prepared'
             assert Path(result['material_file']).is_relative_to(root)
             assert (root / 'attachment-cache.sqlite3').is_file()
             assert not (cwd / 'runtime').exists()
@@ -122,9 +121,8 @@ def test_collection_preserves_cache_overrides_and_restores_context(
     approval = Approval(root, api=api, configs=[], collector=collect, source_policy=POLICY)
     try:
         run = approval.pending()
-        result = approval.collect(run['run_id'], agent_id='synthetic-agent',
-            expected_task_id=run['tasks'][0]['id'], agent_workflow_key=workflow)
-        assert result['status'] == 'reviewing'
+        result = approval.collect(run['run_id'], expected_task_id=run['tasks'][0]['id'])
+        assert result['status'] == 'prepared'
         assert receipts == [{'enabled': cache_setting != 'off', 'ok': True}]
         assert (root / 'attachment-cache.sqlite3').exists() == (cache_setting == 'default')
         assert shared.exists() == (cache_setting == 'shared')

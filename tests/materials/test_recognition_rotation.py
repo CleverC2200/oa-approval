@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 
 from tests.approvals.source_fakes import POLICY
 
@@ -161,7 +162,7 @@ def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_
                     'manifest': [], 'structured_contents': [
                         {'resource_id': 'a:invoice.pdf', 'parent_resource_id': 'a', 'text': '原件 25.00'}]}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material, source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     baseline = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'baseline')
@@ -186,7 +187,7 @@ def test_material_rotation_preserves_duplicate_attachment_identity_and_text(tmp_
     assert source.read_bytes() == original
     assert material_file.read_bytes() == frozen
 
-    assert app.submit(task['task_id'], opinion='离线测试意见', recognition=report)['status'] == 'preview'
+    assert deliver_and_submit(app, task['task_id'], opinion='离线测试意见', recognition=report)['status'] == 'preview'
     details = app.inspect(task['task_id'])
     saved = [json.loads(row['metadata_json']) for row in details['contents'] if row['source'] == 'deepseek']
     saved_images = [p for p in saved if p.get('kind') == 'image']
@@ -343,7 +344,7 @@ def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
                     'path': str(jpeg_source), 'content_sha256': hashlib.sha256(original).hexdigest()}],
                     'manifest': [], 'structured_contents': []}}
     app = Approval(tmp_path / 'approval', api=FakeOA(), configs=[], collector=lambda *args, **kwargs: material, source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     material_file = Path(task['material_file'])
     frozen = material_file.read_bytes()
     monkeypatch.setattr(attachment_recognition, 'MAX_FILE_BYTES', byte_limit)
@@ -357,7 +358,7 @@ def test_material_tiles_split_again_when_rotation_increases_encoded_bytes(
     assert_rotated_tiles(report, requests, jpeg_source, byte_limit)
     assert jpeg_source.read_bytes() == original
     assert material_file.read_bytes() == frozen
-    assert app.submit(task['task_id'], opinion='离线测试意见', recognition=report)['status'] == 'preview'
+    assert deliver_and_submit(app, task['task_id'], opinion='离线测试意见', recognition=report)['status'] == 'preview'
     details = app.inspect(task['task_id'])
     saved = [json.loads(row['metadata_json']) for row in details['contents'] if row['source'] == 'deepseek']
     assert [(p['resource_id'], p['prepared_resource_id'], p['rotate']) for p in saved] == [
@@ -531,7 +532,7 @@ def test_selected_observations_keep_sources_and_bind_to_real_attachments(
     _, material, _ = selected_material
     api = FakeOA()
     app = Approval(tmp_path / 'approval', api=api, configs=[], collector=lambda *args, **kwargs: material, source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
     report = attachment_recognition.recognize(
         material_file=Path(task['material_file']), resource_id='b', prompt='读取原始金额',
         output_dir=tmp_path / 'selected')
@@ -547,7 +548,7 @@ def test_selected_observations_keep_sources_and_bind_to_real_attachments(
         assert observation['prompt'] == '读取原始金额'
         assert observation['coverage'] == 'selected_resource'
     assert json.loads(Path(report['report_file']).read_text()) == report
-    assert app.submit(task['task_id'], opinion='离线测试意见', observations=observations)['status'] == 'preview'
+    assert deliver_and_submit(app, task['task_id'], opinion='离线测试意见', observations=observations)['status'] == 'preview'
     details = app.inspect(task['task_id'])
     attachment_ids = {item['resource_id']: item['id'] for item in details['attachments']}
     saved = [item for item in details['contents'] if json.loads(item['metadata_json']).get('report_file') == report['report_file']]

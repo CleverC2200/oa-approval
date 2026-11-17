@@ -136,19 +136,26 @@ def finish_orphaned(root, run_id, *, collection_stopped_note=None):
 def dispatch(approval, run_id, request):
     operation = request['operation']
     if operation == 'collect':
-        return approval.collect(run_id, workflow_key=request.get('workflow_key'), agent_id=request.get('agent_id'),
-                                expected_task_id=request.get('expected_task_id'),
-                                agent_workflow_key=request.get('agent_workflow_key'),
+        return approval.collect(run_id, expected_task_id=request.get('expected_task_id'),
                                 **({'travel_read_exception': request['travel_read_exception']}
                                    if request.get('travel_read_exception') is not None else {}))
     if operation == 'status':
         return {'run_id': run_id, 'status': approval.store.run(run_id)['status']}
+    if operation == 'dispatch-review':
+        return approval.dispatch_review(run_id, expected_task_id=request.get('expected_task_id'),
+            agent_id=request.get('agent_id'), agent_workflow_key=request.get('agent_workflow_key'),
+            recognition=request.get('recognition'))
+    if operation == 'deliver':
+        return approval.deliver(request['task_id'], agent_id=request.get('agent_id'),
+            material_file=request.get('material_file'), material_sha256=request.get('material_sha256'),
+            opinion=request.get('opinion'), recognition=request.get('recognition'),
+            observations=request.get('observations'), review_assessment=request.get('review_assessment'))
     if operation in {'submit', 'preview'}:
-        return approval.submit(request['task_id'], opinion=request.get('opinion'),
-                               recognition=request.get('recognition'), observations=request.get('observations'),
-                               review_assessment=request.get('review_assessment'),
-                               confirm_write=operation == 'submit' and request.get('confirm_write', False),
-                               allow_overseas=request.get('allow_overseas', False))
+        if any(name in request for name in ('opinion', 'recognition', 'observations', 'review_assessment')):
+            raise ValueError('delivery_required')
+        return approval.submit(request['task_id'],
+            confirm_write=operation == 'submit' and request.get('confirm_write', False),
+            allow_overseas=request.get('allow_overseas', False))
     if operation == 'postcheck':
         return approval.postcheck(request['task_id'], confirmation_note=request.get('confirmation_note'),
                                   expected_submission_id=request.get('expected_submission_id'))
@@ -179,6 +186,85 @@ def collect_process(root, demo, run_id, request, output, source_policy, phase_fi
         output.send(result)
     finally:
         output.close()
+
+
+def writer_process(root, demo, run_id, request, output, source_policy):
+    from apps.oa.approvals.operations import Approval
+
+    approval = None
+    try:
+        if demo:
+            from apps.oa.approvals.demo import create_demo
+            approval = create_demo(root)
+        else:
+            approval = Approval(root, source_policy=source_policy)
+        result = dispatch(approval, run_id, request)
+    except Exception as error:
+        result = failure(error)
+    finally:
+        if approval is not None:
+            approval.store.connection.close()
+    try:
+        output.send(result)
+    finally:
+        output.close()
+
+
+def preserve_unfinished_writer(store, run_id, reason):
+    result = None
+    for submission in store.submissions(run_id):
+        if submission['status'] == 'started':
+            receipt = json.loads(submission['result_json']) | {'failure_code': reason}
+            store.finish_submission(submission['id'], 'unknown', receipt)
+            result = {'task_id': submission['task_id'], 'status': 'unknown', **receipt}
+    return result
+
+
+class _Writer:
+    def __init__(self, process, incoming, respond, store, run_id, request):
+        self.process = process
+        self.incoming = incoming
+        self._respond = respond
+        self._store = store
+        self._run_id = run_id
+        self._request = request
+        self.started = time.monotonic()
+
+    @classmethod
+    def start(cls, root, demo, run_id, request, respond, store, source_policy):
+        context = multiprocessing.get_context('spawn')
+        receiver, output = context.Pipe(duplex=False)
+        process = context.Process(target=writer_process, args=(root, demo, run_id, request, output, source_policy))
+        try:
+            process.start()
+        except Exception:
+            receiver.close()
+            output.close()
+            process.close()
+            raise
+        output.close()
+        return cls(process, receiver, respond, store, run_id, request)
+
+    def status(self):
+        return {'pid': self.process.pid, 'operation': self._request['operation'],
+                'task_id': self._request['task_id'],
+                'elapsed_seconds': round(time.monotonic() - self.started, 1)}
+
+    def complete(self):
+        try:
+            try:
+                result = self.incoming.recv()
+            except (EOFError, OSError):
+                result = {'status': 'failed', 'error': 'writer_process_failed'}
+            self.process.join()
+            unresolved = preserve_unfinished_writer(self._store, self._run_id, 'writer_process_failed')
+            if unresolved is not None:
+                result = unresolved
+        finally:
+            self.incoming.close()
+            self.process.close()
+        self._respond(result)
+
 
 def reply(client, result):
     try:
@@ -329,6 +415,7 @@ class _RoundSession:
         self._demo = demo
         self._close_transport = close_transport
         self._collection = None
+        self._writer = None
         self._finishing = False
         self._finish_responders = []
         self._closed_result = None
@@ -342,12 +429,22 @@ class _RoundSession:
         return self._collection.incoming if self._collection is not None else None
 
     @property
+    def writer_pipe(self):
+        return self._writer.incoming if self._writer is not None else None
+
+    @property
     def closed(self):
         return self._closed_result is not None
 
     def handle(self, receive_request, *, source, respond):
         if source == 'stdin':
-            self.collection_ready()
+            self._drain_collection()
+            self._drain_writer()
+            self._close_if_drained()
+        elif self._writer is not None and not self._writer.process.is_alive():
+            self.writer_ready()
+        if self._writer is None:
+            preserve_unfinished_writer(self._approval.store, self._run_id, 'writer_interrupted')
         if self.closed:
             return
         try:
@@ -364,7 +461,9 @@ class _RoundSession:
                     store = self._approval.store
                     blockers = closeout_blockers(
                         submission_acceptance(store, self._run_id, store.tasks(self._run_id)),
-                        collection_active=self._collection is not None)
+                        collection_active=self._collection is not None, writer_active=self._writer is not None)
+                    if store.unresolved_writes() and 'submission_unresolved' not in blockers:
+                        blockers.append('submission_unresolved')
                     if blockers:
                         respond({'run_id': self._run_id, 'status': 'refused',
                                  'reason': 'run_not_drained', 'blockers': blockers})
@@ -377,9 +476,14 @@ class _RoundSession:
             elif request.get('operation') == 'status':
                 respond({**dispatch(self._approval, self._run_id, request),
                          'phase': 'finishing' if self._finishing else 'running',
-                         'collection': self._collection.status() if self._collection is not None else None})
+                         'collection': self._collection.status() if self._collection is not None else None,
+                         'writer': self._writer.status() if self._writer is not None else None})
             elif source == 'socket' and request.get('operation') == 'collect':
                 self._collect(request, respond)
+            elif source == 'socket' and request.get('operation') in {'submit', 'preview', 'postcheck'}:
+                self._write(request, respond)
+            elif self._finishing and request.get('operation') == 'dispatch-review':
+                respond({'run_id': self._run_id, 'status': 'blocked', 'reason': 'run_finishing'})
             else:
                 respond(dispatch(self._approval, self._run_id, request))
         except Exception as error:
@@ -397,13 +501,31 @@ class _RoundSession:
             self._collection = _Collection.start(self._root, self._demo, self._run_id, request,
                                                  respond, self._approval.store, self._approval.source_policy)
 
+    def _write(self, request, respond):
+        if self._finishing and request['operation'] != 'postcheck':
+            respond({'run_id': self._run_id, 'status': 'blocked', 'reason': 'run_finishing'})
+        elif self._writer is not None:
+            respond({'run_id': self._run_id, 'status': 'waiting', 'reason': 'writer_in_progress'})
+        else:
+            self._writer = _Writer.start(self._root, self._demo, self._run_id, request,
+                                         respond, self._approval.store, self._approval.source_policy)
+
+    def _drain_writer(self):
+        if self._writer is not None:
+            writer, self._writer = self._writer, None
+            writer.complete()
+
+    def writer_ready(self):
+        self._drain_writer()
+        self._close_if_drained()
+
     def _drain_collection(self):
         if self._collection is not None:
             collection, self._collection = self._collection, None
             collection.complete()
 
     def _close_if_drained(self):
-        if self._finishing and self._collection is None:
+        if self._finishing and self._collection is None and self._writer is None:
             self.shutdown()
 
     def check_deadline(self):
@@ -423,7 +545,11 @@ class _RoundSession:
             return self._closed_result
         self._finishing = True
         try:
-            self._drain_collection()
+            try:
+                self._drain_collection()
+            finally:
+                self._drain_writer()
+                preserve_unfinished_writer(self._approval.store, self._run_id, 'writer_interrupted')
         finally:
             self._close_attempted = True
             try:
@@ -526,32 +652,36 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                 with selectors.DefaultSelector() as selector:
                     selector.register(server, selectors.EVENT_READ, 'socket')
                     selector.register(sys.stdin, selectors.EVENT_READ, 'stdin')
-                    watched_pipe = None
+                    watched_pipes = {}
                     while not session.closed:
                         if stopping.is_set():
                             return 130
                         session.check_deadline()
                         if session.closed:
                             return 0
-                        incoming = session.collection_pipe
-                        current_pipe = incoming.fileno() if incoming is not None else None
-                        if current_pipe != watched_pipe:
-                            if watched_pipe is not None:
-                                selector.unregister(watched_pipe)
-                            if current_pipe is not None:
-                                selector.register(current_pipe, selectors.EVENT_READ, 'collection')
-                            watched_pipe = current_pipe
+                        for kind, incoming in (('collection', session.collection_pipe), ('writer', session.writer_pipe)):
+                            watched = watched_pipes.get(kind)
+                            if incoming is not (watched.fileobj if watched is not None else None):
+                                if watched is not None:
+                                    selector.unregister(watched.fd)
+                                watched_pipes[kind] = (selector.register(incoming, selectors.EVENT_READ, (kind, incoming))
+                                                       if incoming is not None else None)
                         for selected, _events in selector.select(timeout=0.5):
                             if stopping.is_set():
                                 return 130
                             if selected.data == 'stdin':
                                 session.handle(_read_stdin, source='stdin', respond=emit)
-                            elif selected.data == 'collection':
-                                if selected.fd != watched_pipe:
+                            elif isinstance(selected.data, tuple):
+                                kind, incoming = selected.data
+                                current = session.collection_pipe if kind == 'collection' else session.writer_pipe
+                                if incoming is not current:
                                     continue
-                                selector.unregister(watched_pipe)
-                                watched_pipe = None
-                                session.collection_ready()
+                                selector.unregister(selected.fd)
+                                watched_pipes[kind] = None
+                                if kind == 'collection':
+                                    session.collection_ready()
+                                else:
+                                    session.writer_ready()
                             else:
                                 client = server.accept()[0]
                                 session.handle(lambda: _read_socket(client), source='socket',

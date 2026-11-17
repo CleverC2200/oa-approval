@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 from tests.approvals.review_fixtures import completed_review
 
 from tests.approvals.source_fakes import POLICY
@@ -55,7 +56,7 @@ def rule_case(tmp_path, monkeypatch):
             source.write_text('Synthetic rule-package fixture.')
             return {'request_id': request_id, 'workflow_key': workflow_key,
                     'resources': [{'resource_id': 'synthetic', 'local_readonly_path': str(source)}],
-                    'prepared': {'images': [], 'structured_contents': [], 'manifest': []}}
+                    'prepared': {'images': [], 'structured_contents': [{'resource_id': 'synthetic', 'text': 'Synthetic rule-package fixture.'}], 'manifest': []}}
 
         app = Approval(tmp_path / 'runtime', api=RuleApi(), configs=[], collector=collect, source_policy=POLICY)
         started = app.pending()
@@ -68,7 +69,7 @@ def rule_case(tmp_path, monkeypatch):
 def test_collect_freezes_only_current_flow_rules(rule_case):
     app, run_id, guards = rule_case('travel_expense')
     try:
-        collected = app.collect(run_id, **guards)
+        collected = collect_for_review(app, run_id, **guards)
         root = Path(collected['rules_root'])
         assert {path.name for path in root.rglob('flows/*.md')} == {'travel-expense.md'}
         assert not (root / '.agents/skills/oa-finance-preaudit/SKILL.md').exists()
@@ -86,7 +87,7 @@ def test_collect_freezes_only_current_flow_rules(rule_case):
 def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workflow_key):
     app, run_id, guards = rule_case(workflow_key)
     try:
-        collected = app.collect(run_id, **guards)
+        collected = collect_for_review(app, run_id, **guards)
         root = Path(collected['rules_root'])
         expected = set() if workflow_key in {'overseas_invoice', 'dealer_closure'} else {workflow_key.replace('_', '-') + '.md'}
         assert {path.name for path in root.rglob('flows/*.md')} == expected
@@ -133,7 +134,7 @@ def test_missing_required_rules_fail_collection(rule_case, tmp_path, monkeypatch
     app, run_id, guards = rule_case(workflow)
     try:
         with pytest.raises(ValueError, match='rule_dependency_missing'):
-            app.collect(run_id, **guards)
+            collect_for_review(app, run_id, **guards)
         task = app.inspect(guards['expected_task_id'])['task']
         assert task['status'] == 'failed'
         assert not task['material_file']
@@ -154,7 +155,7 @@ def test_new_cross_flow_link_cannot_expand_or_leave_incomplete_rule_package(rule
     app, run_id, guards = rule_case('travel_expense')
     try:
         with pytest.raises(ValueError, match='rule_dependency_out_of_scope'):
-            app.collect(run_id, **guards)
+            collect_for_review(app, run_id, **guards)
         assert app.inspect(guards['expected_task_id'])['task']['status'] == 'failed'
     finally:
         app.store.connection.close()
@@ -163,11 +164,11 @@ def test_new_cross_flow_link_cannot_expand_or_leave_incomplete_rule_package(rule
 def test_changed_frozen_rule_cannot_be_reviewed_or_submitted(rule_case):
     app, run_id, guards = rule_case('travel_expense')
     try:
-        collected = app.collect(run_id, **guards)
+        collected = collect_for_review(app, run_id, **guards)
         rule = Path(collected['rule_file'])
         rule.write_text(rule.read_text() + '\nChanged after collection.\n')
         with pytest.raises(ValueError, match='frozen_material_changed'):
-            app.submit(collected['task_id'], opinion='Synthetic offline opinion.', confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
+            deliver_and_submit(app, collected['task_id'], opinion='Synthetic offline opinion.', confirm_write=True, review_assessment=completed_review(app, collected['task_id']))
         details = app.inspect(collected['task_id'])
         assert not details['reviews']
         assert not details['submissions']

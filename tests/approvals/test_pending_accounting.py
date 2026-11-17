@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 import json
 
 from apps.oa.approvals.client import query
@@ -8,7 +9,7 @@ from tests.approvals.review_fixtures import completed_review
 def test_excluded_failure_is_still_pending_and_not_archivable(tmp_path):
     app, api = service(tmp_path)
     original = app.pending()['run_id']
-    app.collect(original, agent_id='first', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, original, agent_id='first', expected_task_id=1, agent_workflow_key='travel_expense')
     app.fail(original, 1, 'synthetic_read_failure')
     app.close(original)
     api.rows.append({**api.rows[0], 'request_id': '102', 'workflow_key': 'training'})
@@ -33,13 +34,13 @@ def test_excluded_failure_is_still_pending_and_not_archivable(tmp_path):
 def test_retry_counts_real_submissions_without_erasing_old_snapshot(tmp_path):
     app, _ = service(tmp_path)
     original = app.pending()['run_id']
-    app.collect(original, agent_id='first', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, original, agent_id='first', expected_task_id=1, agent_workflow_key='travel_expense')
     app.fail(original, 1, 'synthetic_read_failure')
     app.close(original)
     before = json.loads(app.store.run(original)['summary_json'])
     retry = app.pending(request_ids=['101'], retry_failed=True, batch_size=40)
-    app.collect(retry['run_id'], agent_id='second', expected_task_id=1, agent_workflow_key='travel_expense')
-    app.submit(1, opinion='Synthetic completed', review_assessment=completed_review(app, 1), confirm_write=True)
+    collect_for_review(app, retry['run_id'], agent_id='second', expected_task_id=1, agent_workflow_key='travel_expense')
+    deliver_and_submit(app, 1, opinion='Synthetic completed', review_assessment=completed_review(app, 1), confirm_write=True)
     app.close(retry['run_id'])
     status = query(tmp_path, 'status', run_id=retry['run_id'], view='batch')
     assert status['execution']['remaining_count'] == 0

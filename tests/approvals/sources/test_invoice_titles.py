@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review
 from datetime import datetime
 import json
 import ssl
@@ -193,8 +194,7 @@ def test_reference_is_frozen_by_complete_collection_and_original_cannot_change_i
     monkeypatch.setattr(case, '_authority_facts', lambda **_kwargs: [])
     monkeypatch.setattr(case, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
     app = Approval(tmp_path, api=api, configs=[config], source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
-                       agent_workflow_key='general_expense')
+    task = app.collect(app.pending()['run_id'], expected_task_id=1)
     material_file = Path(task['material_file'])
     material = json.loads(material_file.read_text())
     assert material['invoice_title_reference']['rows'] == ROWS
@@ -219,7 +219,7 @@ def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch)
                                 'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester'}]
     app = Approval(tmp_path, api=api, configs=[config], source_policy=POLICY)
     with pytest.raises(CollectionFailure, match='invoice_title_reference_read_failed') as captured:
-        app.collect(app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
+        collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
                     agent_workflow_key='general_expense')
     assert captured.value.diagnostics[0]['stage'] == 'bootstrap'
     assert captured.value.diagnostics[0]['reason'] == 'session_missing'

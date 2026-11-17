@@ -775,6 +775,40 @@ def _conversion_source(item: dict) -> _ConversionSource:
         _file_sha256(path) if path.exists() else '', suffix)
 
 
+def _mpo_jpeg_frame(source: Path, image, index: int) -> bytes:
+    image.seek(index)
+    size = image.mpinfo[0xB002][index]['Size']
+    if size < 4 or size > source.stat().st_size - image.offset:
+        raise ValueError('attachment_mpo_frame_invalid')
+    with source.open('rb') as stream:
+        stream.seek(image.offset)
+        raw = stream.read(size)
+    if len(raw) != size or not raw.startswith(b'\xff\xd8') or not raw.endswith(b'\xff\xd9'):
+        raise ValueError('attachment_mpo_frame_invalid')
+    offset = 2
+    while offset + 4 <= len(raw):
+        start = offset
+        if raw[offset] != 255:
+            break
+        while offset < len(raw) and raw[offset] == 255:
+            offset += 1
+        if offset + 3 > len(raw):
+            break
+        marker = raw[offset]
+        offset += 1
+        length = int.from_bytes(raw[offset:offset + 2], 'big')
+        if length < 2 or offset + length > len(raw):
+            break
+        if marker == 0xDA:
+            return raw
+        if marker == 0xE2 and raw[offset + 2:offset + 6] == b'MPF\0':
+            raw = raw[:start] + raw[offset + length:]
+            offset = start
+        else:
+            offset += length
+    raise ValueError('attachment_mpo_frame_invalid')
+
+
 def _convert_image(source: _ConversionSource, *, out_dir: Path) -> _ConversionResult:
     image_path, status = source.path, 'image'
     digest = source.source_content_sha256
@@ -787,12 +821,13 @@ def _convert_image(source: _ConversionSource, *, out_dir: Path) -> _ConversionRe
             if image.format == 'MPO':
                 images = []
                 for index in range(image.n_frames):
-                    image.seek(index)
-                    image.load()
-                    frame = out_dir / f'{safe_name(source.resource_id, source.path.stem)}_frame{index + 1}.png'
-                    output = BytesIO()
-                    image.save(output, format='PNG')
-                    material_store.write_bytes(frame, output.getvalue(),
+                    raw = _mpo_jpeg_frame(source.path, image, index)
+                    with Image.open(BytesIO(raw)) as extracted:
+                        extracted.load()
+                        if extracted.format != 'JPEG' or extracted.size != image.size:
+                            raise ValueError('attachment_mpo_frame_invalid')
+                    frame = out_dir / f'{safe_name(source.resource_id, source.path.stem)}_frame{index + 1}.jpg'
+                    material_store.write_bytes(frame, raw,
                         source={'resource_id': source.resource_id, 'kind': 'mpo_frame'})
                     images.append(source.image(frame, f'image_frame_{index + 1}', _file_sha256(frame)))
                 return source.result('image_converted', images=images,
@@ -834,7 +869,8 @@ def _convert_spreadsheet(source: _ConversionSource, *, out_dir: Path, compact: b
     try:
         extracted = spreadsheet_images.extract(source.path, out_dir,
                     safe_name(source.resource_id, source.path.stem), compact=compact)
-        fact = spreadsheet_fact(source.path)
+        fact = (spreadsheet_fact(source.path) if _is_ooxml_spreadsheet(source.path)
+                else legacy_spreadsheet_fact(source.path))
         for number, (path, cell) in enumerate(extracted, 1):
             images.append(source.image(path, f'spreadsheet_image_{number}', _file_sha256(path),
                                        spreadsheet_cell=cell))
@@ -864,7 +900,6 @@ def _convert_docx(source: _ConversionSource, *, out_dir: Path) -> _ConversionRes
 
 
 _STRUCTURED_READERS = {
-    '.xls': (legacy_spreadsheet_fact, 'legacy_spreadsheet_read', 'legacy_spreadsheet_unsupported'),
     '.xml': (xml_invoice_fact, 'xml_invoice_read', 'xml_failed'),
     '.ofd': (ofd_invoice_fact, 'ofd_invoice_read', 'ofd_failed'),
 }
@@ -891,7 +926,7 @@ def _convert_attachment(source: _ConversionSource, *, out_dir: Path,
             'document_type': 'office_owner_file', 'summary': 'Office临时锁定文件，原件保留，不作为业务凭据。',
             'key_text': ['此文件只记录Office编辑锁定信息；业务内容以同目录的对应工作簿为准。']}],
             path=str(source.path), image_count=0, reason='office_owner_file')
-    if suffix in SPREADSHEET_EXTS or (suffix in LEGACY_SPREADSHEET_EXTS and _is_ooxml_spreadsheet(source.path)):
+    if suffix in SPREADSHEET_EXTS | LEGACY_SPREADSHEET_EXTS:
         return _convert_spreadsheet(source, out_dir=out_dir, compact=compact_spreadsheet)
     if suffix in DOCX_EXTS:
         return _convert_docx(source, out_dir=out_dir)

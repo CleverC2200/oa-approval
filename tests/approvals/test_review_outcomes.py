@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 import json
 from pathlib import Path
 
@@ -20,18 +21,18 @@ def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
     app, api = service(tmp_path)
     api.rows += [{**api.rows[0], 'request_id': str(i)} for i in [102, 103, 104]]
     run = app.pending(batch_size=3)['run_id']
-    claimed = app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    claimed = collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     evidence = Path(claimed['material_file']).parent / 'reread.json'
     evidence.write_text('{"synthetic_conflict":true}')
     review = assessment(app, status='business_pending')
     review['evidence_files'].append(str(evidence))
-    result = app.submit(1, opinion='Synthetic unknown value', review_assessment=review, confirm_write=True)
+    result = deliver_and_submit(app, 1, opinion='Synthetic unknown value', review_assessment=review, confirm_write=True)
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
     assert Path(claimed['material_file']).is_file() and evidence.is_file()
-    assert app.collect(run, agent_id='a', expected_task_id=2, agent_workflow_key='travel_expense')['task_id'] == 2
-    app.submit(2, opinion='Synthetic completed', review_assessment=assessment(app, 2), confirm_write=True)
-    app.collect(run, agent_id='a', expected_task_id=3, agent_workflow_key='travel_expense')
-    app.submit(3, opinion='Synthetic completed', review_assessment=assessment(app, 3), confirm_write=True)
+    assert collect_for_review(app, run, agent_id='a', expected_task_id=2, agent_workflow_key='travel_expense')['task_id'] == 2
+    deliver_and_submit(app, 2, opinion='Synthetic completed', review_assessment=assessment(app, 2), confirm_write=True)
+    collect_for_review(app, run, agent_id='a', expected_task_id=3, agent_workflow_key='travel_expense')
+    deliver_and_submit(app, 3, opinion='Synthetic completed', review_assessment=assessment(app, 3), confirm_write=True)
     app.close(run, handoff=True)
     status = query(tmp_path, 'status', run_id=run, view='batch')
     assert status['execution']['status'] == 'success'
@@ -40,7 +41,7 @@ def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
     assert status['batch']['outside_count'] == 1
     assert retention.cleanup(app.store, execute=True)['files'] == 0
     assert evidence.is_file()
-    assert app.submit(1, opinion='Never resend', confirm_write=True)['status'] == 'submitted'
+    assert deliver_and_submit(app, 1, opinion='Never resend', confirm_write=True)['status'] == 'submitted'
     assert len(api.posts) == 3
 
 
@@ -48,13 +49,13 @@ def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
 def test_unfinished_review_is_recorded_but_never_written(tmp_path, state):
     app, api = service(tmp_path)
     run = app.pending()['run_id']
-    app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     with pytest.raises(ValueError, match='review_not_complete'):
-        app.submit(1, opinion='Must not submit', review_assessment=assessment(app, status=state), confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Must not submit', review_assessment=assessment(app, status=state), confirm_write=True)
     assert api.posts == []
     assert app.inspect(1)['review_assessments'][0]['assessment']['status'] == state
     with pytest.raises(ValueError, match='review_failure_unresolved'):
-        app.submit(1, opinion='Do not bypass unfinished review', review_assessment=assessment(app), confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Do not bypass unfinished review', review_assessment=assessment(app), confirm_write=True)
     app.fail(run, 1, 'synthetic_read_failed')
     app.close(run)
     status = query(tmp_path, 'status', run_id=run, view='batch')
@@ -65,12 +66,12 @@ def test_unfinished_review_is_recorded_but_never_written(tmp_path, state):
 def test_missing_or_wrong_material_assessment_cannot_write(tmp_path):
     app, api = service(tmp_path)
     run = app.pending()['run_id']
-    app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     with pytest.raises(ValueError, match='review_assessment_required'):
-        app.submit(1, opinion='Missing assessment', confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Missing assessment', confirm_write=True)
     wrong = {**assessment(app), 'material_sha256': '0' * 64}
     with pytest.raises(ValueError, match='review_material_mismatch'):
-        app.submit(1, opinion='Wrong assessment', review_assessment=wrong, confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Wrong assessment', review_assessment=wrong, confirm_write=True)
     assert api.posts == []
 
 
@@ -99,13 +100,13 @@ def test_early_close_counts_are_stable_after_next_continuation(tmp_path):
     app, api = service(tmp_path)
     api.rows += [{**api.rows[0], 'request_id': str(i)} for i in [102, 103]]
     run = app.pending()['run_id']
-    app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
-    app.submit(1, opinion='Synthetic completed', review_assessment=assessment(app), confirm_write=True)
+    collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    deliver_and_submit(app, 1, opinion='Synthetic completed', review_assessment=assessment(app), confirm_write=True)
     app.close(run, handoff=True)
     before = query(tmp_path, 'status', run_id=run, view='batch')['execution']
     following = app.pending(continue_from=run)['run_id']
-    app.collect(following, agent_id='a', expected_task_id=2, agent_workflow_key='travel_expense')
-    app.submit(2, opinion='Synthetic completed', review_assessment=assessment(app, 2), confirm_write=True)
+    collect_for_review(app, following, agent_id='a', expected_task_id=2, agent_workflow_key='travel_expense')
+    deliver_and_submit(app, 2, opinion='Synthetic completed', review_assessment=assessment(app, 2), confirm_write=True)
     assert query(tmp_path, 'status', run_id=run, view='batch')['execution'] == before
     assert json.loads(app.store.run(run)['summary_json'])['execution']['unclaimed_count'] == 2
 
@@ -121,33 +122,33 @@ def test_early_close_counts_are_stable_after_next_continuation(tmp_path):
 def test_explicit_read_failure_cannot_be_overridden_by_complete_assessment(tmp_path, report, observations, state):
     app, api = service(tmp_path)
     run = app.pending()['run_id']
-    app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     with pytest.raises(ValueError, match='recognition_not_complete'):
-        app.submit(1, opinion='Must not write', review_assessment=assessment(app),
+        deliver_and_submit(app, 1, opinion='Must not write', review_assessment=assessment(app),
                    recognition=report, observations=observations, confirm_write=True)
     assert api.posts == [] and app.inspect(1)['submissions'] == []
     recorded = app.inspect(1)['review_assessments']
     assert recorded[-1]['assessment']['status'] == state
     with pytest.raises(ValueError, match='review_failure_unresolved'):
-        app.submit(1, opinion='Must not bypass by omitting report', review_assessment=assessment(app), confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Must not bypass by omitting report', review_assessment=assessment(app), confirm_write=True)
     assert api.posts == []
 
 
 def test_changed_frozen_material_failure_is_recorded_and_stays_blocked(tmp_path):
     app, api = service(tmp_path)
     run = app.pending()['run_id']
-    collected = app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    collected = collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     original = Path(collected['material_file'])
     before = original.read_bytes()
     original.unlink()
     with pytest.raises(ValueError, match='frozen_material_changed'):
-        app.submit(1, opinion='Cannot write', review_assessment=assessment(app), confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Cannot write', review_assessment=assessment(app), confirm_write=True)
     record = app.inspect(1)['review_assessments'][-1]['assessment']
     assert record['status'] == 'technical_failure'
     assert Path(record['evidence_files'][0]).is_file()
     original.write_bytes(before)
     with pytest.raises(ValueError, match='review_failure_unresolved'):
-        app.submit(1, opinion='Restoring bytes is not a new review', review_assessment=assessment(app), confirm_write=True)
+        deliver_and_submit(app, 1, opinion='Restoring bytes is not a new review', review_assessment=assessment(app), confirm_write=True)
     assert api.posts == []
 
 
@@ -179,7 +180,7 @@ def test_user_stop_cannot_create_continuation(tmp_path):
 def test_closed_inflight_review_is_counted_as_unfinished(tmp_path):
     app, _ = service(tmp_path)
     run = app.pending()['run_id']
-    app.collect(run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
+    collect_for_review(app, run, agent_id='a', expected_task_id=1, agent_workflow_key='travel_expense')
     app.close(run)
     execution = query(tmp_path, 'status', run_id=run, view='batch')['execution']
     assert execution['unfinished_count'] == 1

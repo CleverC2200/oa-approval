@@ -4,7 +4,7 @@
 
 ## 采集与提交
 
-`collect` 完整采集并冻结当前单据材料及适用规则，审核 Agent 读取本次材料和规则，交回最终意见文本。`submit` 保存意见，当前授权明确时提交并回查。
+`collect` 独立采集并冻结当前单据材料及规则。完成本流程适用准备和识别后，`dispatch-review` 绑定真实审核 Agent；完整审核后，`deliver` 原子保存意见与证据并释放审核槽。`submit` / `preview` 消费已保存交付，当前授权明确时提交并回查。主 Agent 按批次执行规则处理容量、补位和关闭。
 
 ## 读取结果与未完成审核
 
@@ -24,7 +24,7 @@
 
 财务和包装入口使用最终意见文本及可选附件观察、识别报告。固定审核项、顺序、状态、证据含义和原值计算要求由 Agent 完整执行，公开意见格式见[共享结果接口](result-contract.md)。代码不替 Agent 形成业务判断，也不自动把过长意见改写成结论。
 
-附件观察通过 `submit --observations-file /absolute/path/observations.json` 交回。文件顶层是 JSON 数组，每项绑定当前任务已有的附件资源，例如：
+附件观察通过 `deliver --observations-file /absolute/path/observations.json` 交回。文件顶层是 JSON 数组，每项绑定当前任务已有的附件资源，例如：
 
 ```json
 [
@@ -44,11 +44,13 @@
 - 表单和商旅权威事实使用完整 `declared_fields.path`、`authority_facts` 中的来源路径及本次工作上下文定位。没有真实附件归属的字段事实不编造附件 ID，也不强行塞入附件观察。
 - DeepSeek 工具生成的整份原始报告可通过 `--recognition-file` 一起保存；其原始回答和来源保持原样，Agent 的补充判断另放附件观察。已有工具生成的观察数组也可直接传入。
 
-默认预览的保存示例，`OA_RUNTIME_ROOT` 沿用本轮 start 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
+本地交付的保存示例，成功后再按授权预览或提交，`OA_RUNTIME_ROOT` 沿用本轮 start 启动时实际使用的绝对根目录，`OA_TASK_ID` 使用本单实际任务 ID：
 
 ```bash
-bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" submit \
-  --task-id "$OA_TASK_ID" --opinion-file /absolute/path/opinion.txt \
+bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" deliver \
+  --task-id "$OA_TASK_ID" --agent-id "$OA_REVIEW_AGENT_ID" \
+  --material-file "$OA_MATERIAL_FILE" --material-sha256 "$OA_MATERIAL_SHA256" \
+  --opinion-file /absolute/path/opinion.txt --review-file /absolute/path/review.json \
   --observations-file /absolute/path/observations.json
 ```
 

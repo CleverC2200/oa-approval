@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
 
 import json
 
@@ -137,7 +138,7 @@ def test_outline_of_frozen_collection_keeps_rules_and_submission_integrity(tmp_p
 
     app, api = service(tmp_path)
     run = app.pending()
-    task = app.collect(run['run_id'], agent_id='travel-agent', expected_task_id=1,
+    task = collect_for_review(app, run['run_id'], agent_id='travel-agent', expected_task_id=1,
                        agent_workflow_key='travel_expense')
     from pathlib import Path
 
@@ -151,7 +152,7 @@ def test_outline_of_frozen_collection_keeps_rules_and_submission_integrity(tmp_p
     assert outline['counts']['logical_resources'] == 1
     assert outline['counts']['structured_contents'] == 1
     assert (material_file.read_bytes(), rule_file.read_bytes()) == before
-    assert app.submit(task['task_id'], opinion='AI审核结论：需人工判断 ⚠️')['status'] == 'preview'
+    assert deliver_and_submit(app, task['task_id'], opinion='AI审核结论：需人工判断 ⚠️')['status'] == 'preview'
     assert api.posts == []
 
 
@@ -243,7 +244,7 @@ def test_real_collection_outline_keeps_archive_sources_and_page_counts(tmp_path,
 
     app = Approval(tmp_path / 'runtime', api=ArchiveOA('138024', '业务招待费报销申请流程'),
                    configs=FLOW_CONFIGS, source_policy=POLICY)
-    task = app.collect(app.pending()['run_id'], agent_id='archive-agent', expected_task_id=1,
+    task = collect_for_review(app, app.pending()['run_id'], agent_id='archive-agent', expected_task_id=1,
                        agent_workflow_key='business_entertainment')
     material_file = Path(task['material_file'])
     material = json.loads(material_file.read_text())
@@ -278,7 +279,7 @@ def test_real_collection_outline_keeps_archive_sources_and_page_counts(tmp_path,
             assert target['source_resource_id'] == rid + suffix
             assert target['source_path'] == child['original_path']
     assert (material_file.read_bytes(), Path(task['rule_file']).read_bytes()) == before
-    assert app.submit(task['task_id'], opinion='合成材料预览')['status'] == 'preview'
+    assert deliver_and_submit(app, task['task_id'], opinion='合成材料预览')['status'] == 'preview'
     Path(resources['archive-a::3']['original_path']).write_text('changed synthetic source')
     with pytest.raises(ValueError, match='frozen_material_changed'):
-        app.submit(task['task_id'], opinion='合成材料预览')
+        deliver_and_submit(app, task['task_id'], opinion='合成材料预览')

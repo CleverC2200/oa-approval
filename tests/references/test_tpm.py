@@ -92,7 +92,7 @@ def test_collect_includes_local_reference_in_frozen_material(tmp_path: Path) -> 
     app = Approval(tmp_path, api=api, configs=[], collector=lambda request_id, **kwargs: {
         **_material(), "request_id": request_id, "workflow_key": "tpm_small_marketing_fee",
         "resources": [], "prepared": {"images": [], "structured_contents": []}}, source_policy=POLICY)
-    task = app.collect(app.pending()["run_id"], agent_id='agent-a', expected_task_id=1, agent_workflow_key='tpm_small_marketing_fee')
+    task = app.collect(app.pending()["run_id"], expected_task_id=1)
     frozen = json.loads(Path(task["material_file"]).read_text())["tpm_price_reference"]
     assert frozen["status"] == "ready"
     assert frozen["rows"] == catalog["rows"]

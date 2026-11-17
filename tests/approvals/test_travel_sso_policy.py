@@ -1,3 +1,4 @@
+from tests.approvals.review_fixtures import deliver_and_submit
 import copy
 import io
 import json
@@ -39,8 +40,7 @@ def sso_case(tmp_path, monkeypatch, travel_source):
 
 
 def collect_cli(app, task_id, capsys):
-    result = cli.main(['--root', str(app.root), 'collect', '--agent-id', 'synthetic-reviewer',
-                       '--expected-task-id', str(task_id), '--agent-workflow-key', 'travel_expense'])
+    result = cli.main(['--root', str(app.root), 'collect', '--expected-task-id', str(task_id)])
     return result, json.loads(capsys.readouterr().out)
 
 
@@ -54,10 +54,14 @@ def submit_cli(app, collected, capsys, *, status='business_pending', recognition
         'evidence_files': [task['material_file'], *([recognition_file] if recognition_file else [])]}))
     opinion = directory / 'opinion.txt'
     opinion.write_text('SSO account unavailable; travel details remain unverified. Hand off for manual review.')
-    result = cli.main(['--root', str(app.root), 'submit', '--task-id', str(task['id']),
-                       '--opinion-file', str(opinion), '--review-file', str(review), '--confirm-write', 'YES',
-                       *(['--recognition-file', recognition_file] if recognition_file else [])])
-    return result, json.loads(capsys.readouterr().out)
+    from tests.approvals.review_fixtures import deliver_cli
+
+    def invoke(*arguments):
+        code = cli.main(['--root', str(app.root), *arguments])
+        return code, json.loads(capsys.readouterr().out)
+    return deliver_cli(app.root, invoke, task['id'], opinion, review_file=review,
+                       recognition_file=recognition_file, confirm_write=True)
+
 
 
 @pytest.mark.parametrize('reason', ['travel_sso_account_missing', 'travel_sso_company_missing'])
@@ -224,7 +228,7 @@ def test_sso_handoff_reads_known_attachments_and_keeps_each_resource_before_subm
         assert code == 1 and collected['status'] == 'failed'
         assert app.store.get_task(1)['status'] == 'failed'
         with pytest.raises(ValueError, match='task_not_reviewable'):
-            app.submit(1, opinion='Cannot submit unread materials', confirm_write=True)
+            deliver_and_submit(app, 1, opinion='Cannot submit unread materials', confirm_write=True)
         assert api.posts == []
         return
     assert code == 0, collected

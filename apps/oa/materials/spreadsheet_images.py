@@ -23,6 +23,35 @@ def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) ->
 
     output = []
     total_bytes = 0
+
+    def save(content: bytes, suffix: str, cell: str) -> None:
+        if len(output) >= 1000:
+            raise ValueError("spreadsheet_image_limit")
+        if suffix not in {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff', '.webp'}:
+            raise ValueError("spreadsheet_image_unsupported")
+        with fitz.open(stream=content) as image:
+            if image.is_pdf or image.page_count != 1 or image[0].rect.get_area() > 100_000_000:
+                raise ValueError("spreadsheet_image_unreadable")
+            image[0].get_pixmap()
+        if compact and suffix == '.png' and len(content) > 256 * 1024:
+            pixels = fitz.Pixmap(content)
+            if not pixels.alpha and pixels.colorspace.n == 3:
+                jpeg = pixels.tobytes('jpeg', jpg_quality=95)
+                if len(jpeg) < len(content):
+                    content, suffix = jpeg, '.jpg'
+        destination = out_dir / f'{prefix}_excel_{len(output)+1}{suffix}'
+        material_store.write_bytes(destination, content, source={'resource_id': prefix, 'kind': 'spreadsheet_image'})
+        output.append((destination, cell))
+
+    if path.suffix.lower() == '.xls' and not zipfile.is_zipfile(path):
+        from apps.oa.materials.legacy_spreadsheet_images import images
+
+        for content, suffix, cell in images(path):
+            total_bytes += len(content)
+            if len(content) > 50_000_000 or total_bytes > 300_000_000:
+                raise ValueError('spreadsheet_image_limit')
+            save(bytes(content), suffix, cell)
+        return output
     with zipfile.ZipFile(path) as archive:
         infos = archive.infolist()
         if (len(infos) > 10000 or sum(info.file_size for info in infos) > 300_000_000
@@ -69,25 +98,7 @@ def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) ->
             return target
 
         def emit(member: str, cell: str) -> None:
-            if len(output) >= 1000:
-                raise ValueError("spreadsheet_image_limit")
-            suffix = Path(member).suffix.lower()
-            if suffix not in {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tif', '.tiff', '.webp'}:
-                raise ValueError("spreadsheet_image_unsupported")
-            content = read(member, 50_000_000)
-            with fitz.open(stream=content) as image:
-                if image.is_pdf or image.page_count != 1 or image[0].rect.get_area() > 100_000_000:
-                    raise ValueError("spreadsheet_image_unreadable")
-                image[0].get_pixmap()
-            if compact and suffix == '.png' and len(content) > 256 * 1024:
-                pixels = fitz.Pixmap(content)
-                if not pixels.alpha and pixels.colorspace.n == 3:
-                    jpeg = pixels.tobytes('jpeg', jpg_quality=95)
-                    if len(jpeg) < len(content):
-                        content, suffix = jpeg, '.jpg'
-            destination = out_dir / f'{prefix}_excel_{len(output)+1}{suffix}'
-            material_store.write_bytes(destination, content, source={'resource_id': prefix, 'kind': 'spreadsheet_image'})
-            output.append((destination, cell))
+            save(read(member, 50_000_000), Path(member).suffix.lower(), cell)
 
         cell_images = {}
         if 'xl/cellimages.xml' in names:
