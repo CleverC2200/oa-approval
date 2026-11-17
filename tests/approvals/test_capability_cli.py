@@ -73,7 +73,9 @@ def test_status_exposes_version_bound_read_progress_without_completing_review(tm
     entry = status['review_progress'][0]
     assert entry['task_id'] == task['id'] and entry['agent_id'] == 'reviewer'
     assert entry['status'] == 'recorded' and entry['coverage'] == 'supplied_ranges_only'
-    assert entry['material_ranges'][0]['next_offset'] == 20
+    assert entry['documents'] == entry['material_documents'] == 1
+    assert 'material_ranges' not in entry
+    assert json.loads(Path(entry['progress_file']).read_text())['documents'][0]['next_offset'] == 20
     assert status['batch']['inflight'] == 1
     assert app.store.get_task(task['id'])['status'] == 'reviewing'
     assert app.store.details(task['id'])['review_assessments'] == []

@@ -7,6 +7,29 @@ from apps.oa.materials import cli
 from apps.oa.materials.read import read
 
 
+def test_progress_summary_keeps_large_record_coverage_in_the_progress_file(tmp_path):
+    from apps.oa.materials.read import read_page
+    from apps.oa.materials.read_progress import progress_summary, save_progress
+
+    material = tmp_path / 'material.json'
+    material.write_text(json.dumps({'records': ['source record'] * 512}))
+    progress = tmp_path / 'read-progress.json'
+    for index in range(512):
+        page = read_page(material, offset=0, pointer=f'/records/{index}')
+        save_progress(progress, page)
+    original = progress.read_bytes()
+    summary = progress_summary(material, page['material_sha256'])
+    assert summary['status'] == 'recorded'
+    assert len(json.dumps(summary)) < 1000
+    assert summary['documents'] == summary['material_documents'] == 512
+    assert 'material_ranges' not in summary
+    assert progress.read_bytes() == original
+    documents = json.loads(original)['documents']
+    assert len(documents) == 512
+    assert [item['source_pointer'] for item in documents] == [f'/records/{index}' for index in range(512)]
+    assert all(item['ranges'] == [[0, len('source record')]] and item['next_offset'] is None for item in documents)
+
+
 def test_cli_pages_reconstruct_the_complete_material_without_source_changes(tmp_path, capsys):
     path = tmp_path / 'material.json'
     path.write_text(json.dumps({'declared_fields': [{'path': 'main[0].field[0]', 'value': '001.00'}],
