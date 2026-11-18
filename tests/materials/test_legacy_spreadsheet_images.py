@@ -43,7 +43,7 @@ def compound(workbook):
     return bytes(header) + stream + directory.ljust(512, b'\0') + fat
 
 
-def legacy_book(path, *, defect=None, continued=False, named=False):
+def legacy_book(path, *, defect=None, continued=False, named=False, shape_metadata=()):
     pixels = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
     pixels.clear_with(255)
     png = pixels.tobytes('png')
@@ -59,13 +59,18 @@ def legacy_book(path, *, defect=None, continued=False, named=False):
     for index in range(2):
         shape = art(0xf00a, struct.pack('<II', 1025 + index, 0xa00), version=2, instance=75)
         properties = struct.pack('<HI', 0x4104, 2 if defect == 'missing_reference' else 1)
+        property_count = 1 + len(shape_metadata)
+        properties += b''.join(struct.pack('<HI', identifier, len(value)) for identifier, value in shape_metadata)
+        complex_values = b''.join(value for _, value in shape_metadata)
         if named:
+            property_count += 1
             if named == 'simple':
                 properties += struct.pack('<HI', 0x4105, 0)
             else:
                 image_name = 'synthetic.png\0'.encode('utf-16le')
-                properties += struct.pack('<HI', 0xc105, len(image_name)) + image_name
-        shape += art(0xf00b, properties, version=3, instance=2 if named else 1)
+                properties += struct.pack('<HI', 0xc105, len(image_name))
+                complex_values += image_name
+        shape += art(0xf00b, properties + complex_values, version=3, instance=property_count)
         anchor = struct.pack('<9H', 0, index + 1, 0, index + 2, 0, index + 2, 0, index + 3, 0)
         if defect != 'missing_anchor':
             shape += art(0xf010, anchor)
@@ -243,3 +248,34 @@ def test_prepare_keeps_images_with_picture_name_metadata(tmp_path, named):
     result = prepare(files=[source], output_dir=tmp_path / 'prepared')
     assert result['status'] == 'complete'
     assert result['images'] == 2
+
+
+@pytest.mark.parametrize('bid_flag', [0, 0x4000])
+def test_prepare_keeps_images_with_shape_name_and_description(tmp_path, bid_flag):
+    source = tmp_path / 'shape-metadata.xls'
+    png = legacy_book(source, shape_metadata=(
+        (0x8380 | bid_flag, 'synthetic\0'.encode('utf-16le')),
+        (0x8381 | bid_flag, '\0'.encode('utf-16le')),
+    ))
+    result = prepare(files=[source], output_dir=tmp_path / 'prepared')
+    assert result['status'] == 'complete'
+    assert result['structured_contents'] == 1
+    material = json.loads(Path(result['material_file']).read_text())
+    images = material['prepared']['images']
+    assert {image['spreadsheet_cell'] for image in images} == {'First!B3', 'Second!C4'}
+    assert all(Path(image['path']).read_bytes() == png for image in images)
+
+
+@pytest.mark.parametrize(('identifier', 'value'), [
+    (0x8380, b''),
+    (0x8381, b'\0'),
+    (0x8380, 'unterminated'.encode('utf-16le')),
+    (0x8381, 'description\0trailing\0'.encode('utf-16le')),
+    (0x8382, b'\0\0'),
+])
+def test_prepare_rejects_invalid_or_unknown_complex_shape_metadata(tmp_path, identifier, value):
+    source = tmp_path / 'invalid-shape-metadata.xls'
+    legacy_book(source, shape_metadata=((identifier, value),))
+    result = prepare(files=[source], output_dir=tmp_path / 'prepared')
+    assert result['status'] == 'failed'
+    assert result['error_code'] == 'attachment_content_incomplete'
