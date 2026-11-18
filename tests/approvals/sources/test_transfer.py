@@ -63,11 +63,27 @@ def test_transfer_readback_requires_new_recipient_and_exact_opinion(api):
     assert transfer.verify(api, '101', '另一份意见', NOW, context)['done_hit'] is False
 
 
-@pytest.mark.parametrize('change', ['old_recipient', 'old_log', 'wrong_person', 'wrong_node',
-                                    'no_recipient', 'no_log', 'pending', 'old_time', 'external_user', 'source_pending'])
-def test_transfer_readback_does_not_accept_partial_or_unrelated_evidence(api, change):
+@pytest.mark.parametrize('source_time_missing', [False, True])
+def test_transfer_readback_accepts_dated_transfer_log_when_source_time_is_blank(api, source_time_missing):
     context = transfer.prepare(api, '101', DELIVERY)
     api.transferred()
+    api.logs[0]['logtype'] = 'h'
+    if source_time_missing:
+        api.rows[0].update(isremark=2, operatedate='', operatetime='')
+    result = transfer.verify(api, '101', '合成意见\n金额 < 100', NOW, context)
+    assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
+
+
+@pytest.mark.parametrize('source_time_missing', [False, True])
+@pytest.mark.parametrize('change', ['old_recipient', 'old_log', 'wrong_person', 'wrong_node',
+                                    'no_recipient', 'no_log', 'pending', 'old_time', 'external_user', 'source_pending',
+                                    'recipient_missing_id'])
+def test_transfer_readback_does_not_accept_partial_or_unrelated_evidence(api, change, source_time_missing):
+    context = transfer.prepare(api, '101', DELIVERY)
+    api.transferred()
+    api.logs[0]['logtype'] = 'h'
+    if source_time_missing:
+        api.rows[0].update(isremark=2, operatedate='', operatetime='')
     if change == 'old_recipient':
         context['previous_operator_ids'].append('101')
     elif change == 'old_log':
@@ -86,8 +102,36 @@ def test_transfer_readback_does_not_accept_partial_or_unrelated_evidence(api, ch
         api.logs[0]['operatedate'] = '2000-01-01'
     elif change == 'external_user':
         api.rows[-1]['userType'] = 1
+    elif change == 'recipient_missing_id':
+        api.rows[-1].pop('id')
     else:
         api.rows[0]['isremark'] = 0
+    assert transfer.verify(api, '101', '合成意见\n金额 < 100', NOW, context)['postcheck_done_hit'] is False
+
+
+@pytest.mark.parametrize('source_fields,logtype', [
+    ({'operatedate': '', 'operatetime': ''}, 'f'),
+    ({'operatedate': '', 'operatetime': '12:00:00'}, 'h'),
+    ({'operatedate': '2000-01-01', 'operatetime': '12:00:00'}, 'h'),
+])
+def test_transfer_readback_requires_transfer_log_for_blank_source_time(api, source_fields, logtype):
+    context = transfer.prepare(api, '101', DELIVERY)
+    api.transferred()
+    api.rows[0].update(source_fields)
+    api.logs[0]['logtype'] = logtype
+    assert transfer.verify(api, '101', '合成意见\n金额 < 100', NOW, context)['postcheck_done_hit'] is False
+
+
+@pytest.mark.parametrize('duplicate', ['recipient', 'log'])
+def test_blank_source_time_requires_unambiguous_transfer_evidence(api, duplicate):
+    context = transfer.prepare(api, '101', DELIVERY)
+    api.transferred()
+    api.rows[0].update(isremark=2, operatedate='', operatetime='')
+    api.logs[0]['logtype'] = 'h'
+    if duplicate == 'recipient':
+        api.rows.append({**api.rows[-1], 'id': 102})
+    else:
+        api.logs.append({**api.logs[-1], 'id': 202})
     assert transfer.verify(api, '101', '合成意见\n金额 < 100', NOW, context)['postcheck_done_hit'] is False
 
 

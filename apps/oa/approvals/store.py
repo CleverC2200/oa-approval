@@ -483,7 +483,14 @@ class Store:
             self.connection.execute("UPDATE submissions SET status=?,result_json=?,completed_at=? WHERE id=?",(status,encoded(result),now(),submission_id))
             self.connection.execute("UPDATE tasks SET status=?,error=? WHERE id=?",(status,result.get("failure_code"),row[0]))
             if status == "unknown":
-                self.connection.execute("UPDATE runs SET status='blocked' WHERE id=(SELECT run_id FROM submissions WHERE id=?)",(submission_id,))
+                self.connection.execute(
+                    "UPDATE runs SET status='blocked' WHERE id=(SELECT run_id FROM submissions WHERE id=?) AND ended_at IS NULL",
+                    (submission_id,))
+            elif status == "submitted":
+                self.connection.execute("""UPDATE runs SET status='closed'
+                    WHERE id=(SELECT run_id FROM submissions WHERE id=?)
+                    AND status='blocked' AND ended_at IS NOT NULL AND json_type(summary_json,'$.execution')='object'""",
+                    (submission_id,))
 
     def set_status(self, task_id, status):
         with self.connection:
