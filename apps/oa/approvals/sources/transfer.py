@@ -92,22 +92,26 @@ def _text(value):
 
 def verify(api, request_id, opinion, started_at, delivery, *, submit_ok=None):
     rows = _operators(api, request_id)
-    source_done = any(str(row.get('id')) == delivery['source_operator_id']
-        and str(row.get('userid')) == delivery['operator_id'] and str(row.get('userType')) == '0'
-        and str(row.get('nodeid')) == delivery['source_node_id'] and str(row.get('isremark')) in {'2', 'h'}
-        and _since(row.get('operatedate'), row.get('operatetime'), started_at) for row in rows)
-    recipient = any(str(row.get('id')) not in delivery['previous_operator_ids']
+    recipients = [row for row in rows
+        if row.get('id') and str(row['id']) not in delivery['previous_operator_ids']
         and str(row.get('userid')) == delivery['recipient_id'] and str(row.get('userType')) == '0'
         and str(row.get('nodeid')) == delivery['source_node_id'] and str(row.get('isremark')) == '0'
-        and _since(row.get('receivedate'), row.get('receivetime'), started_at) for row in rows)
-    logged = any(str(row.get('id')) not in delivery['previous_log_ids']
+        and _since(row.get('receivedate'), row.get('receivetime'), started_at)]
+    matching_logs = [row for row in _logs(api, request_id)
+        if str(row.get('id')) not in delivery['previous_log_ids']
         and str(row.get('operator')) == delivery['operator_id'] and str(row.get('operatortype')) == '0'
         and str(row.get('nodeid')) == delivery['source_node_id']
         and str(row.get('receivedPersonids') or '').strip() == delivery['recipient_id']
         and _since(row.get('operatedate'), row.get('operatetime'), started_at)
-        and _text(row.get('remarkHtml')) == _text(html.escape(opinion))
-        for row in _logs(api, request_id))
+        and _text(row.get('remarkHtml')) == _text(html.escape(opinion))]
+    dated_transfer_log = sum(row.get('logtype') == 'h' for row in matching_logs) == 1
+    source_done = any(str(row.get('id')) == delivery['source_operator_id']
+        and str(row.get('userid')) == delivery['operator_id'] and str(row.get('userType')) == '0'
+        and str(row.get('nodeid')) == delivery['source_node_id'] and str(row.get('isremark')) in {'2', 'h'}
+        and (_since(row.get('operatedate'), row.get('operatetime'), started_at)
+             or (dated_transfer_log and len(recipients) == 1 and row.get('operatedate') in (None, '')
+                 and row.get('operatetime') in (None, ''))) for row in rows)
     pending = any(str(row.get('request_id')) == request_id for row in api.pending_rows())
-    result = receipts.verification_result(source_done and recipient and logged, pending, submit_ok=submit_ok)
+    result = receipts.verification_result(source_done and bool(recipients) and bool(matching_logs), pending, submit_ok=submit_ok)
     return {**result, 'delivery': delivery,
             'failure_code': None if result['postcheck_done_hit'] else receipts.POSTCHECK_TIMEOUT}

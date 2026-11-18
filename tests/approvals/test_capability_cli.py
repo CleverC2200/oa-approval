@@ -310,7 +310,9 @@ def record_submission(store, task_id, *, status=None, result=None, opinion='åˆæ
 
 @pytest.mark.parametrize('handled', [True, False])
 @pytest.mark.parametrize('stale_socket', [False, True])
-def test_postcheck_reconciles_closed_owner_without_resubmitting(tmp_path, monkeypatch, capsys, request, handled, stale_socket):
+@pytest.mark.parametrize('prior_close', ['closed', 'legacy_blocked', 'interrupted'])
+def test_postcheck_reconciles_closed_owner_without_resubmitting(tmp_path, monkeypatch, capsys, request,
+                                                               handled, stale_socket, prior_close):
     import socket
 
     from apps.oa.approvals import owner
@@ -320,11 +322,24 @@ def test_postcheck_reconciles_closed_owner_without_resubmitting(tmp_path, monkey
     monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path / 'project')
     monkeypatch.setattr(owner, 'require_production_main', lambda: None)
     app = create_demo(tmp_path / 'round')
-    started = app.pending()
+    started = app.pending(batch_size=1)
     task = started['tasks'][0]
     record_submission(app.store, task['id'], status='unknown')
     submission = app.store.details(task['id'])['submissions'][0]
-    app.close(started['run_id'])
+    evidence = app.root / 'readback.json'
+    evidence.write_text('{}', encoding='utf-8')
+    stop = {'kind': 'execution_incomplete', 'reason': 'Synthetic unknown submission', 'evidence_file': str(evidence)}
+    if prior_close != 'interrupted':
+        app.close(started['run_id'], stop=stop)
+    else:
+        with app.store.connection:
+            app.store.connection.execute('UPDATE runs SET ended_at=? WHERE id=?',
+                                         (submission['started_at'], started['run_id']))
+    closed_summary = app.store.run(started['run_id'])['summary_json']
+    closed_at = app.store.run(started['run_id'])['ended_at']
+    if prior_close == 'legacy_blocked':
+        with app.store.connection:
+            app.store.connection.execute("UPDATE runs SET status='blocked' WHERE id=?", (started['run_id'],))
     if stale_socket:
         path = socket_path(app.root)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
@@ -350,10 +365,24 @@ def test_postcheck_reconciles_closed_owner_without_resubmitting(tmp_path, monkey
     assert result['submit_ok'] is handled
     assert result['done_hit'] is handled
     assert result['postcheck_done_hit'] is handled
-    assert app.store.run(started['run_id'])['status'] == ('closed' if handled else 'blocked')
-    assert app.store.run(started['run_id'])['ended_at'] is not None
+    is_closed = prior_close == 'closed' or (prior_close == 'legacy_blocked' and handled)
+    assert app.store.run(started['run_id'])['status'] == ('closed' if is_closed else 'blocked')
+    assert app.store.run(started['run_id'])['ended_at'] == closed_at
     assert app.store.latest_run()['id'] == started['run_id']
     assert len(app.store.details(task['id'])['submissions']) == 1
+    if handled and is_closed:
+        assert cli.main(['--root', str(app.root), 'status', '--view', 'batch']) == 0
+        status = json.loads(capsys.readouterr().out)
+        assert status['batch']['outside_count'] > 0
+        assert status['closeout']['complete'] is True
+        assert status['runtime_unresolved'] == []
+        assert status['alerts'] == [{'code': 'batch_stopped_early', 'severity': 'warning'}]
+        assert status['execution']['status'] == 'success'
+        assert status['execution']['verified_count'] == 1
+        assert status['execution']['unknown_count'] == 0
+        assert status['execution']['archive_eligible'] is False
+        assert status['execution']['stop'] == json.loads(closed_summary)['execution']['stop']
+        assert app.store.run(started['run_id'])['summary_json'] == closed_summary
     if handled:
         reads.clear()
         assert cli.main(['--root', str(app.root), 'postcheck', '--task-id', str(task['id'])]) == 0

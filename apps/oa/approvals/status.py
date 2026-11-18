@@ -8,6 +8,7 @@ from apps.oa.approvals.store import REVIEW_STATUSES, REVIEW_SLOTS, UNFINISHED_ST
 
 
 def batch_status(store, run, tasks, owner):
+    from apps.oa.approvals.execution import close_execution, execution_headline
     from apps.oa.materials.read_progress import progress_summary
 
     frozen = json.loads(run['summary_json']).get('batch')
@@ -40,12 +41,19 @@ def batch_status(store, run, tasks, owner):
                       and owner['run_id'] != run['id'])
     complete = run['status'] == 'closed' and owner_released
     execution = json.loads(run['summary_json']).get('execution')
+    stop = execution.get('stop') if execution else None
+    recovered = (complete and not blockers and not queued and acceptance['all_verified']
+                 and execution is not None and execution.get('unknown_count', 0) > 0
+                 and (stop is None or stop['kind'] == 'execution_incomplete'))
+    if recovered:
+        execution = {**close_execution(store, run, tasks, None),
+                     'stop': stop, 'archive_eligible': False}
     alerts = status_alerts(run, owner, all_acceptance, blockers, dict(Counter(task['status'] for task in tasks)))
     if any(item['run_id'] != run['id'] or item['submission_run_id'] not in {None, run['id']} for item in unresolved):
         if not any(alert['code'] == 'submission_unresolved' for alert in alerts):
             alerts.append({'code': 'submission_unresolved', 'severity': 'blocked'})
-    if execution and execution.get('stop') and execution['stop']['kind'] in {'unexplained', 'execution_incomplete'}:
-        alerts.append({'code': 'batch_stopped_early', 'severity': 'blocked'})
+    if stop and stop['kind'] in {'unexplained', 'execution_incomplete'}:
+        alerts.append({'code': 'batch_stopped_early', 'severity': 'warning' if recovered else 'blocked'})
     if execution:
         execution = {**execution, 'archive_eligible': execution['archive_eligible'] and owner_released and not blockers}
         if unresolved:
@@ -57,8 +65,6 @@ def batch_status(store, run, tasks, owner):
     else:
         execution = {'status': 'in_progress' if run['status'] != 'closed' else 'legacy_unverified',
                      'archive_eligible': False}
-    from apps.oa.approvals.execution import execution_headline
-
     execution['headline'] = (execution_headline(execution) if owner_released
                              else '收尾待验｜等待执行进程退出')
     return {
