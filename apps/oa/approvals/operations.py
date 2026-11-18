@@ -301,6 +301,10 @@ class Approval:
             opinion = business.build_plan(material, recognition)['remark']
         if not isinstance(opinion, str) or not opinion.strip():
             raise ValueError('opinion_required')
+        if task['workflow_key'] == 'travel_expense':
+            from apps.oa.approvals.travel_mileage import validate_uploader_opinion
+
+            validate_uploader_opinion(material, recognition, observations, opinion)
         directory = Path(material_file).parent / 'deliveries' / uuid4().hex
         directory.mkdir(parents=True)
         files = []
