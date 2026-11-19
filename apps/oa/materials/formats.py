@@ -19,6 +19,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 import zlib
 
+from apps.oa.materials import spreadsheet_images
 from apps.oa.runtime import files as material_store
 
 import fitz
@@ -320,16 +321,6 @@ def spreadsheet_fact(path: Path) -> Dict[str, Any]:
         "summary": summary,
         "key_text": key_text,
     }
-
-
-def _is_ooxml_spreadsheet(path: Path) -> bool:
-    try:
-        with zipfile.ZipFile(path) as archive:
-            archive.getinfo("[Content_Types].xml")
-            archive.getinfo("xl/workbook.xml")
-    except (KeyError, OSError, zipfile.BadZipFile):
-        return False
-    return True
 
 
 def legacy_spreadsheet_fact(path: Path) -> Dict[str, Any]:
@@ -775,13 +766,40 @@ def _conversion_source(item: dict) -> _ConversionSource:
         _file_sha256(path) if path.exists() else '', suffix)
 
 
+def _jpeg_scan_ends_at_boundary(raw: bytes, offset: int) -> bool:
+    marker_pattern = re.compile(rb'\xff+([^\xff])')
+    while (match := marker_pattern.search(raw, offset)) is not None:
+        code = match[1][0]
+        offset = match.end()
+        if code == 0xd9:
+            return offset == len(raw)
+        if code in {0, 1} or 0xd0 <= code <= 0xd7:
+            continue
+        if code == 0xd8 or offset + 2 > len(raw):
+            return False
+        length = int.from_bytes(raw[offset:offset + 2], 'big')
+        if length < 2:
+            return False
+        offset += length
+    return False
+
+
 def _mpo_jpeg_frame(source: Path, image, index: int) -> bytes:
     image.seek(index)
+    frame_offset = image.offset
     size = image.mpinfo[0xB002][index]['Size']
-    if size < 4 or size > source.stat().st_size - image.offset:
+    if size < 4 or size > source.stat().st_size - frame_offset:
         raise ValueError('attachment_mpo_frame_invalid')
+    overlaps_next_frame = False
+    if index + 1 < image.n_frames:
+        image.seek(index + 1)
+        next_offset = image.offset
+        image.seek(index)
+        overlaps_next_frame = frame_offset < next_offset < frame_offset + size
+        if overlaps_next_frame:
+            size = next_offset - frame_offset
     with source.open('rb') as stream:
-        stream.seek(image.offset)
+        stream.seek(frame_offset)
         raw = stream.read(size)
     if len(raw) != size or not raw.startswith(b'\xff\xd8') or not raw.endswith(b'\xff\xd9'):
         raise ValueError('attachment_mpo_frame_invalid')
@@ -800,7 +818,9 @@ def _mpo_jpeg_frame(source: Path, image, index: int) -> bytes:
         if length < 2 or offset + length > len(raw):
             break
         if marker == 0xDA:
-            return raw
+            if not overlaps_next_frame or _jpeg_scan_ends_at_boundary(raw, offset + length):
+                return raw
+            break
         if marker == 0xE2 and raw[offset + 2:offset + 6] == b'MPF\0':
             raw = raw[:start] + raw[offset + length:]
             offset = start
@@ -863,13 +883,11 @@ def _convert_pages(source: _ConversionSource, *, out_dir: Path, compact: bool) -
 
 
 def _convert_spreadsheet(source: _ConversionSource, *, out_dir: Path, compact: bool) -> _ConversionResult:
-    from apps.oa.materials import spreadsheet_images
-
     images = []
     try:
         extracted = spreadsheet_images.extract(source.path, out_dir,
                     safe_name(source.resource_id, source.path.stem), compact=compact)
-        fact = (spreadsheet_fact(source.path) if _is_ooxml_spreadsheet(source.path)
+        fact = (spreadsheet_fact(source.path) if spreadsheet_images.is_ooxml_spreadsheet(source.path)
                 else legacy_spreadsheet_fact(source.path))
         for number, (path, cell) in enumerate(extracted, 1):
             images.append(source.image(path, f'spreadsheet_image_{number}', _file_sha256(path),
@@ -921,7 +939,7 @@ def _convert_attachment(source: _ConversionSource, *, out_dir: Path,
         return _convert_pages(source, out_dir=out_dir, compact=compact_pdf)
     if (suffix in SPREADSHEET_EXTS and source.path.name.startswith('~$')
             and source.path.stat().st_size <= 512 and not zipfile.is_zipfile(source.path)
-            and _is_ooxml_spreadsheet(source.path.with_name(source.path.name[2:]))):
+            and spreadsheet_images.is_ooxml_spreadsheet(source.path.with_name(source.path.name[2:]))):
         return source.result('spreadsheet_read', structured=[{
             'document_type': 'office_owner_file', 'summary': 'Office临时锁定文件，原件保留，不作为业务凭据。',
             'key_text': ['此文件只记录Office编辑锁定信息；业务内容以同目录的对应工作簿为准。']}],

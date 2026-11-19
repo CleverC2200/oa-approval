@@ -18,6 +18,16 @@ _NS = {
 }
 
 
+def is_ooxml_spreadsheet(path: Path) -> bool:
+    try:
+        with zipfile.ZipFile(path) as archive:
+            archive.getinfo("[Content_Types].xml")
+            archive.getinfo("xl/workbook.xml")
+    except (KeyError, OSError, zipfile.BadZipFile):
+        return False
+    return True
+
+
 def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) -> list[tuple[Path, str]]:
     from openpyxl.utils import get_column_letter
 
@@ -43,7 +53,7 @@ def extract(path: Path, out_dir: Path, prefix: str, *, compact: bool = False) ->
         material_store.write_bytes(destination, content, source={'resource_id': prefix, 'kind': 'spreadsheet_image'})
         output.append((destination, cell))
 
-    if path.suffix.lower() == '.xls' and not zipfile.is_zipfile(path):
+    if path.suffix.lower() == '.xls' and not is_ooxml_spreadsheet(path):
         from apps.oa.materials.legacy_spreadsheet_images import images
 
         for content, suffix, cell in images(path):

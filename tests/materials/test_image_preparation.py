@@ -5,6 +5,7 @@ from io import BytesIO
 import json
 from pathlib import Path
 from random import Random
+import struct
 
 from PIL import Image
 import pytest
@@ -32,13 +33,35 @@ def request_bytes(request):
     return base64.b64decode(url.split(',', 1)[1])
 
 
-def test_prepare_recognize_mpo_keeps_original_jpeg_frames_and_source_ownership(tmp_path, requests):
+@pytest.mark.parametrize('frame_layout', ['normal', 'overlap', 'gap'])
+def test_prepare_recognize_mpo_keeps_original_jpeg_frames_and_source_ownership(tmp_path, requests, frame_layout):
     source = tmp_path / 'photos.jpg'
     with Image.frombytes('RGB', (96, 64), Random(0).randbytes(96 * 64 * 3)) as first:
         with Image.new('RGB', (48, 32), 'blue') as second:
             first.save(source, format='MPO', save_all=True, append_images=[second], quality=90)
+    if frame_layout != 'normal':
+        with Image.open(source) as image:
+            primary_size = image.mpinfo[0xB002][0]['Size']
+            secondary = image.mpinfo[0xB002][1]
+        original = source.read_bytes()
+        gap = b'junk\xff\xd9' if frame_layout == 'gap' else b''
+        if gap:
+            entry = struct.pack('<LLLHH', 0, secondary['Size'], secondary['DataOffset'], 0, 0)
+            assert original.count(entry) == 1
+            original = original.replace(entry, struct.pack('<LLLHH', 0, secondary['Size'],
+                                                           secondary['DataOffset'] + len(gap), 0, 0))
+            original = original[:primary_size] + gap + original[primary_size:]
+        entry = struct.pack('<LLLHH', 0x030000, primary_size, 0, 0, 0)
+        assert original.count(entry) == 1
+        source.write_bytes(original.replace(entry, struct.pack('<LLLHH', 0x030000,
+                                                               primary_size + len(gap) + 32, 0, 0, 0)))
     original = source.read_bytes()
     result = prepare(files=[source], output_dir=tmp_path / 'prepared')
+    if frame_layout == 'gap':
+        assert result['status'] == 'failed'
+        assert result['error_code'] == 'attachment_mpo_frame_invalid'
+        assert source.read_bytes() == original
+        return
     assert result['status'] == 'complete'
     material_file = Path(result['material_file'])
     frozen = material_file.read_bytes()
