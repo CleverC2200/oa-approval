@@ -70,7 +70,8 @@ def reading(resource_id, sha256, amount, number):
 
 @pytest.mark.parametrize('state', ['pending', 'fields_changed', 'node_changed', 'uneditable', 'delivery_changed',
                                   'wrong_attempt', 'unconfirmed', 'handled_conflict', 'already_submitted',
-                                  'main_changed', 'resources_changed'])
+                                  'main_changed', 'resources_changed', 'empty_readonly_type',
+                                  'nonempty_readonly_type', 'empty_editable_type', 'empty_required_type'])
 def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path, monkeypatch, capsys, state):
     from apps.oa.approvals import cli, owner, receipts
 
@@ -120,6 +121,17 @@ def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path
         data['canEdit'] = False
     if state == 'main_changed':
         data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'][-1]['fieldValue'] = 'UNPLANNED-NUMBER'
+    type_fields = {
+        'empty_readonly_type': ('', False, False),
+        'nonempty_readonly_type': ('1', False, False),
+        'empty_editable_type': ('', True, False),
+        'empty_required_type': ('', False, True),
+    }
+    if state in type_fields:
+        value, editable, mandatory = type_fields[state]
+        data['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].append({
+            'fieldName': 'lx', 'fieldShowName': '类型', 'fieldValue': value, 'edit': editable, 'mand': mandatory,
+        })
     if state == 'resources_changed':
         resources[0]['name'] = 'changed.pdf'
     if state == 'delivery_changed':
@@ -146,16 +158,30 @@ def test_confirm_unsubmitted_overseas_node_preserves_field_writes(case, tmp_path
     assert len(posts) == 1
     assert data == values_before
     assert len(after['submissions']) == 1
-    if state in {'fields_changed', 'node_changed', 'uneditable', 'delivery_changed', 'wrong_attempt',
-                 'handled_conflict', 'main_changed', 'resources_changed'}:
+    unverified = {'fields_changed', 'main_changed', 'resources_changed',
+                  'nonempty_readonly_type', 'empty_editable_type', 'empty_required_type'}
+    if state in unverified | {'node_changed', 'uneditable', 'delivery_changed', 'wrong_attempt', 'handled_conflict'}:
         assert code == 1
-        assert result['error'] == {'fields_changed': 'confirmation_fields_unverified',
-                                   'main_changed': 'confirmation_fields_unverified',
-                                   'resources_changed': 'confirmation_fields_unverified',
-                                   'wrong_attempt': 'confirmation_submission_changed'}.get(state, 'confirmation_target_changed')
+        assert result['error'] == {
+            **dict.fromkeys(unverified, 'confirmation_fields_unverified'),
+            'wrong_attempt': 'confirmation_submission_changed',
+        }.get(state, 'confirmation_target_changed')
         assert after == before
     elif state == 'unconfirmed':
         assert code == 0 and result['status'] == 'unknown'
+        assert result['fields_match'] is True
+        assert result['failure_code'] == original['failure_code']
+        assert result['response_code'] == original['response_code']
+        assert json.loads(after['submissions'][0]['result_json'])['response_code'] == original['response_code']
+        initial_receipt = json.loads(before['submissions'][0]['result_json'])
+        repeated = app.postcheck(task['task_id'])
+        assert repeated == result
+        assert repeated['previous_result'] == initial_receipt
+        confirmed = app.postcheck(task['task_id'], confirmation_note='确认当前节点未提交',
+                                  expected_submission_id=before['submissions'][0]['id'])
+        assert confirmed['status'] == 'failed'
+        assert confirmed['previous_result'] == initial_receipt
+        assert len(posts) == 1
     elif state == 'already_submitted':
         assert code == 0 and result['status'] == 'submitted'
         assert 'confirmation_scope' not in result
