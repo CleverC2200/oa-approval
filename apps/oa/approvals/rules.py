@@ -41,7 +41,7 @@ def freeze_rules(workflow_key, directory):
                 "finance-result-contract.md", "finance-observation-contract.md")]
             selected += [Path("docs/agents") / name for name in (
                 "attachment-recognition.md", "image-compression.md", "invoice-originals.md")]
-    selected.append(reference / 'review-assessment.md')
+    selected += [reference / 'review-assessment.md', reference / 'opinion-style.md']
     for relative in selected:
         source = PROJECT / relative
         if not source.is_file():
