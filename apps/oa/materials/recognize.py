@@ -21,7 +21,7 @@ import fitz
 from PIL import Image, JpegImagePlugin
 
 from apps.oa.materials import formats as attachment_extractors
-from apps.oa.materials.prepared import PreparedMaterial, read_prepared
+from apps.oa.materials.prepared import PreparedMaterial, only_user_skipped_attachment, read_prepared
 from apps.oa.materials import reports
 from apps.oa.runtime import environment
 from apps.oa.runtime import control as runtime_control
@@ -358,11 +358,13 @@ class _InputSnapshot:
     sources: list[dict] = field(default_factory=list)
     confirmed_empty: bool = False
     attachment_presence: dict | None = None
+    user_skipped_only: bool = False
 
     def load(self, options: _RecognitionOptions) -> None:
         if options.material_file:
             material, self.binding = _material(options.material_file)
             prepared = material.get('prepared') or {}
+            self.user_skipped_only = only_user_skipped_attachment(material)
             presence = material.get('attachment_presence')
             if presence is not None:
                 if (not isinstance(presence, dict) or presence.get('status') != 'confirmed_empty'
@@ -377,7 +379,7 @@ class _InputSnapshot:
         else:
             prepared = self._local(options)
         self.prepared = read_prepared(prepared, reading='frozen' if options.material_file else 'local',
-                                      confirmed_empty=self.confirmed_empty)
+                                      confirmed_empty=self.confirmed_empty or self.user_skipped_only)
 
     def _local(self, options: _RecognitionOptions) -> dict:
         for index, path in enumerate(options.files or [], 1):
@@ -410,6 +412,8 @@ class _InputSnapshot:
             fields.update(reason='official_no_attachments', attachment_presence=self.attachment_presence)
             if selection.resource_id is None:
                 fields['coverage'] = 'no_attachments'
+        if self.user_skipped_only:
+            fields['reason'] = 'authorized_attachment_unread'
         return fields
 
     def verify(self, parts: tuple, observed: list[dict], material_file: Path | None) -> None:

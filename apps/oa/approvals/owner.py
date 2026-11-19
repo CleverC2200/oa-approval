@@ -137,8 +137,8 @@ def dispatch(approval, run_id, request):
     operation = request['operation']
     if operation == 'collect':
         return approval.collect(run_id, expected_task_id=request.get('expected_task_id'),
-                                **({'travel_read_exception': request['travel_read_exception']}
-                                   if request.get('travel_read_exception') is not None else {}))
+                                **{name: request[name] for name in ('travel_read_exception', 'attachment_read_exception')
+                                   if name in request})
     if operation == 'status':
         return {'run_id': run_id, 'status': approval.store.run(run_id)['status']}
     if operation == 'dispatch-review':

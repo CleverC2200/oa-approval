@@ -53,6 +53,7 @@ def main(argv=None):
     collect = commands.add_parser('collect', help='独立准备当前FIFO的一单，不占审核名额')
     collect.add_argument('--expected-task-id', type=int, required=True)
     collect.add_argument('--travel-read-exception-file', type=Path, help='本单独立授权的商旅受限读取记录')
+    collect.add_argument('--attachment-read-exception-file', type=Path, help='本次独立授权跳过一份 TPM 附件的记录')
     dispatch_review = commands.add_parser('dispatch-review', help='将完整待审材料派发给当前真实审核Agent')
     dispatch_review.add_argument('--expected-task-id', type=int, required=True)
     dispatch_review.add_argument('--agent-id', required=True)
@@ -176,6 +177,11 @@ def main(argv=None):
             request['expected_task_id'] = args.expected_task_id
             if args.travel_read_exception_file:
                 request['travel_read_exception'] = json.loads(args.travel_read_exception_file.read_text())
+            if args.attachment_read_exception_file:
+                exception = json.loads(args.attachment_read_exception_file.read_text())
+                if not isinstance(exception, dict):
+                    raise ValueError('attachment_read_exception_invalid')
+                request['attachment_read_exception'] = exception
         elif args.operation == 'dispatch-review':
             request.update(expected_task_id=args.expected_task_id, agent_id=args.agent_id,
                            agent_workflow_key=args.agent_workflow_key,
