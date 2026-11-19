@@ -91,16 +91,19 @@ def test_frozen_rule_links_stay_inside_complete_current_package(rule_case, workf
         root = Path(collected['rules_root'])
         expected = set() if workflow_key in {'overseas_invoice', 'dealer_closure'} else {workflow_key.replace('_', '-') + '.md'}
         assert {path.name for path in root.rglob('flows/*.md')} == expected
+        style = '.agents/skills/oa-finance-preaudit/references/opinion-style.md'
+        source = Path(__file__).resolve().parents[2] / style
+        assert (root / style).read_text() == source.read_text()
         if workflow_key == 'overseas_invoice':
             assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
                 '.agents/skills/oa-overseas-invoice/SKILL.md', 'docs/overseas-invoice.md',
-                '.agents/skills/oa-finance-preaudit/references/review-assessment.md'}
+                '.agents/skills/oa-finance-preaudit/references/review-assessment.md', style}
         if workflow_key == 'dealer_closure':
             assert {str(path.relative_to(root)) for path in root.rglob('*') if path.is_file()} == {
                 '.agents/skills/oa-dealer-closure/SKILL.md',
                 '.agents/skills/oa-dealer-closure/references/read-sources.md',
                 '.agents/skills/oa-dealer-closure/references/result-format.md',
-                '.agents/skills/oa-finance-preaudit/references/review-assessment.md'}
+                '.agents/skills/oa-finance-preaudit/references/review-assessment.md', style}
         for document in root.rglob('*.md'):
             for link in re.findall(r'\]\(([^)]+)\)', document.read_text()):
                 path = link.split('#', 1)[0]
