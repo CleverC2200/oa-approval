@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+import zipfile
 from pathlib import Path
 
 import fitz
@@ -211,6 +212,28 @@ def test_prepare_ooxml_images_keeps_sheet_and_anchor_despite_suffix(tmp_path, su
     assert result['status'] == 'complete'
     material = json.loads(Path(result['material_file']).read_text())
     assert {image['spreadsheet_cell'] for image in material['prepared']['images']} == {'First!D5', 'Second!E6'}
+
+
+def test_prepare_legacy_workbook_with_a_zipped_theme(tmp_path):
+    source = tmp_path / 'with-theme.xls'
+    png = legacy_book(source)
+    with zipfile.ZipFile(source, 'a') as package:
+        package.writestr('[Content_Types].xml', '<Types/>')
+        package.writestr('theme/theme/theme1.xml', '<theme/>')
+    padding = (-source.stat().st_size) % 512
+    with zipfile.ZipFile(source, 'a') as package:
+        package.comment = b'\0' * padding
+    original = source.read_bytes()
+
+    result = prepare(files=[source], output_dir=tmp_path / 'prepared')
+
+    assert result['status'] == 'complete'
+    material = json.loads(Path(result['material_file']).read_text())
+    images = material['prepared']['images']
+    assert {image['spreadsheet_cell'] for image in images} == {'First!B3', 'Second!C4'}
+    assert all(Path(image['path']).read_bytes() == png for image in images)
+    assert 'value' in str(material['prepared']['structured_contents'][0]['key_text'])
+    assert source.read_bytes() == original
 
 
 def test_prepare_text_only_legacy_workbook_still_completes(tmp_path):
