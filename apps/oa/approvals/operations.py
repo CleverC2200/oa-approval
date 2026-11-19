@@ -54,11 +54,17 @@ def expected_overseas_snapshot(material, plan):
 def check_overseas_fields(api, request_id, material, plan, *, origins, confirm_pending_node=False):
     data,resources = api.request_context(request_id)
     after = overseas_snapshot(data,resources,request_id,writable=False,origins=origins)
+    expected = expected_overseas_snapshot(material, plan)
+    if 'lx' not in expected['main'] and after['main'].get('lx') == '':
+        main_record = data['workflowMainTableInfo']['requestRecords'][0]
+        field = business._fields(main_record)['lx']
+        if field.get('fieldShowName') == '类型' and field.get('edit') is False and field.get('mand') is False:
+            del after['main']['lx']
     if confirm_pending_node:
         business._require(after['node_id'] == material['snapshot']['node_id'] == business.RPA_NODE_ID
                           and data.get('canEdit') is True, 'confirmation_target_changed')
-        business._require(after['main'] == material['snapshot']['main'], 'confirmation_fields_unverified')
-    return business.postcheck_fields_match(after,expected_overseas_snapshot(material,plan))
+        business._require(after['main'] == expected['main'], 'confirmation_fields_unverified')
+    return business.postcheck_fields_match(after, expected)
 
 def submit_overseas(api, writer, request_id, material, plan, *, origins):
     data,resources = api.request_context(request_id)
@@ -429,7 +435,8 @@ class Approval:
             from apps.oa.approvals.sources.writer import handled_since
             details = self.store.details(task_id)
             submission = details["submissions"][-1]
-            delivery = json.loads(submission['result_json']).get('delivery')
+            previous_result = json.loads(submission['result_json'])
+            delivery = previous_result.get('delivery')
             if delivery is not None and delivery['action'] == 'transfer':
                 if confirmation_note is not None:
                     raise ValueError('transfer_confirmation_not_supported')
@@ -456,7 +463,10 @@ class Approval:
             if handled is None:
                 handled = handled_since(self._api().handled_rows(max_pages=None),task['request_id'],submission['started_at'])
             fields_match = None
-            if task["workflow_key"] == "overseas_invoice":
+            overseas_invoice = task["workflow_key"] == "overseas_invoice"
+            original_result = previous_result
+            if overseas_invoice:
+                original_result = previous_result.get('previous_result', previous_result)
                 review = details["reviews"][-1]
                 material = json.loads(task["material_json"])
                 fields_match = check_overseas_fields(self._api(),task["request_id"],material,business.build_plan(material,json.loads(review["recognition_json"])),
@@ -465,15 +475,19 @@ class Approval:
             if confirmation_note is not None and receipts.submission_status(result) != 'submitted':
                 if handled or sum(occurrence_key(row) == task['occurrence'] for row in pending_rows) != 1:
                     raise ValueError('confirmation_target_changed')
-                if task['workflow_key'] == 'overseas_invoice':
+                if overseas_invoice:
                     business._require(fields_match is True, 'confirmation_fields_unverified')
                     result.update(failure_code=receipts.USER_CONFIRMED_NODE_NOT_SUBMITTED,
                                   confirmation_scope='node_submission')
                 else:
                     result['failure_code'] = receipts.USER_CONFIRMED_NOT_WRITTEN
-                result.update(
-                    confirmation_note=confirmation_note.strip(), previous_result=json.loads(submission['result_json']))
+                result.update(confirmation_note=confirmation_note.strip(), previous_result=original_result)
             status = receipts.submission_status(result)
+            if overseas_invoice:
+                result['previous_result'] = original_result
+                if status == 'unknown':
+                    result.update({key: original_result[key] for key in ('failure_code', 'response_code')
+                                   if key in original_result})
             self.store.finish_submission(submission["id"],status,result)
             if status == "submitted":
                 result["cleanup"] = retention.cleanup(self.store, execute=True, task_id=task_id)
