@@ -465,6 +465,7 @@ def collect_case(
     prepared_root: Path | None = None,
     attachment_timeout_sec: int = 180,
     travel_read_exception: dict | None = None,
+    attachment_read_exception: dict | None = None,
 ) -> dict[str, Any]:
     read_session = None
     if source_policy.travel_read.enabled:
@@ -475,7 +476,7 @@ def collect_case(
             configs=configs, allow_browser_download=allow_browser_download,
             attachment_root=attachment_root, prepared_root=prepared_root,
             attachment_timeout_sec=attachment_timeout_sec, read_session=read_session,
-            travel_read_exception=travel_read_exception)
+            travel_read_exception=travel_read_exception, attachment_read_exception=attachment_read_exception)
     finally:
         if read_session is not None:
             read_session.close()
@@ -493,8 +494,9 @@ def _collect_case(
     attachment_timeout_sec: int = 180,
     read_session=None,
     travel_read_exception: dict | None = None,
+    attachment_read_exception: dict | None = None,
 ) -> dict[str, Any]:
-    from apps.oa.approvals import travel_exception
+    from apps.oa.approvals import attachment_exception, travel_exception
 
     if travel_read_exception is not None:
         travel_exception.validate(travel_read_exception, request_id)
@@ -504,9 +506,11 @@ def _collect_case(
         transfer.travel_session = read_session
     travel_source = travel_orders.TravelSource(source_policy, transfer=transfer, read_session=read_session)
     workflow, raw_resources = oa_api.request_context(str(request_id))
+    input_file = None
     if attachment_root is not None:
         from apps.oa.runtime import files
-        files.write_bytes(Path(attachment_root).parent / 'collection-input.json',
+        input_file = Path(attachment_root).parent / 'collection-input.json'
+        files.write_bytes(input_file,
             json.dumps({'request_id': str(request_id), 'workflow': workflow, 'resources': raw_resources},
                        ensure_ascii=False, default=str).encode(),
             source={'request_id': str(request_id), 'kind': 'collection_input'})
@@ -520,6 +524,10 @@ def _collect_case(
     except (RuntimeError, SystemExit) as error:
         raise RuntimeError("workflow_ambiguous") from error
     identity = flow.workflow_identity(workflow)
+    if attachment_read_exception is not None:
+        attachment_exception.validate(attachment_read_exception, request_id, config['flow_key'])
+        if str(workflow.get('requestId')) != str(request_id):
+            raise ValueError('attachment_read_exception_target_changed')
     closure_evidence = None
     if config.get("flow_key") == "dealer_closure":
         from apps.oa.approvals.sources import dealer_closure
@@ -572,6 +580,18 @@ def _collect_case(
         if str(item.get("id") or "") in original_sources else item
         for item in logical_resources
     ]
+    skipped_attachment = None
+    attachment_scope = None
+    if attachment_read_exception is not None:
+        resource_id = attachment_read_exception['resource_id']
+        if resource_id in original_sources:
+            raise ValueError('attachment_read_exception_target_changed')
+        skipped_attachment = attachment_exception.select(workflow, raw_resources, form_resources, resource_id)
+        attachment_scope = {**attachment_read_exception, 'attachment': skipped_attachment,
+                            'form_snapshot_sha256': attachment_exception.context_digest(
+                                workflow, raw_resources, origins=source_policy.attachments),
+                            **({'source_path': str(input_file.resolve())} if input_file is not None else {})}
+        logical_resources = [item for item in logical_resources if resources.resource_key(item) != resource_id]
     attachment_deduplication: list[dict[str, str]] = []
     if str(config.get("flow_key") or "") == _PACKAGING_FLOW:
         logical_resources, attachment_deduplication = _prepare_packaging_resources(
@@ -694,8 +714,13 @@ def _collect_case(
     if read_exception is not None:
         warnings.append({"code": "travel_read_user_exception",
                          "message": "本单按用户明确授权受限审核，商旅页面及未取得附件仍未读取，不代表核验通过。"})
+    if skipped_attachment is not None:
+        warnings.append({'code': 'attachment_skipped_by_user', 'resource_id': skipped_attachment['resource_id'],
+                         'source_field_path': skipped_attachment['source_field_path'],
+                         'message': '附件按本次用户授权跳过，内容未核实，须在预审意见中列明。'})
     empty_fields = {}
     if (config.get("flow_key") in {"general_expense", "tpm_small_marketing_fee"} and not logical_resources
+            and skipped_attachment is None
             and not authority_facts and not invoice_evidence.get("invoices")):
         empty_fields = official_sql.confirmed_empty_attachment_fields(
             workflow, request_id=str(request_id), workflow_key=str(config["flow_key"]))
@@ -755,6 +780,7 @@ def _collect_case(
 
     return {
         **({"travel_read_exception": read_exception} if read_exception is not None else {}),
+        **({'attachment_read_exception': attachment_scope} if attachment_scope is not None else {}),
         "schema_version": 1,
         "kind": "preaudit_material",
         "request_id": str(request_id),

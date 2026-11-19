@@ -16,7 +16,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals import finance_precheck, receipts, retention
+from apps.oa.approvals import attachment_exception, finance_precheck, receipts, retention
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
@@ -158,15 +158,24 @@ class Approval:
             result["batch"] = json.loads(self.store.run(run)["summary_json"])["batch"]
         return result
 
-    def collect(self, run_id, *, expected_task_id=None, travel_read_exception=None):
+    def collect(self, run_id, *, expected_task_id=None, travel_read_exception=None,
+                attachment_read_exception=None):
         from apps.oa.approvals import travel_exception
 
+        def authorize(task):
+            return {
+                'travel_read_exception': travel_exception.for_task(task, travel_read_exception),
+                'attachment_read_exception': attachment_exception.validate(
+                    attachment_read_exception, task['request_id'], task['workflow_key'])
+                if attachment_read_exception is not None else None,
+            }
+
         decision = self.store.claim(run_id,expected_task_id=expected_task_id,
-            authorize=lambda task: travel_exception.for_task(task, travel_read_exception))
+            authorize=authorize)
         if decision["status"] != "claimed":
             return decision
         task = decision["task"]
-        travel_read_exception = decision['authorization']
+        exceptions = {name: value for name, value in decision['authorization'].items() if value is not None}
         directory = self.root / "materials" / str(task["id"]) / uuid4().hex
         directory.mkdir(parents=True)
         try:
@@ -180,7 +189,7 @@ class Approval:
                         self.collector = partial(collect_case, source_policy=self.source_policy)
                     material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
                         allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared",
-                        **({"travel_read_exception": travel_read_exception} if travel_read_exception is not None else {}))
+                        **exceptions)
                     if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
                         raise ValueError("material_identity_changed")
                     if task["workflow_key"] == "tpm_small_marketing_fee":
@@ -295,6 +304,8 @@ class Approval:
         assessment = validate_assessment(task, review_assessment)
         if material.get('travel_read_exception') and assessment['status'] == 'complete':
             raise ValueError('travel_exception_requires_business_pending')
+        if material.get('attachment_read_exception') and assessment['status'] == 'complete':
+            raise ValueError('attachment_exception_requires_business_pending')
         if assessment['status'] not in {'complete', 'business_pending'}:
             self.store.assess_review(task, assessment)
             raise ValueError('review_not_complete')
@@ -307,6 +318,10 @@ class Approval:
             opinion = business.build_plan(material, recognition)['remark']
         if not isinstance(opinion, str) or not opinion.strip():
             raise ValueError('opinion_required')
+        if scope := material.get('attachment_read_exception'):
+            disclosure = f"附件 {scope['resource_id']} 未读取"
+            if not any('附件完整性' in line and disclosure in line for line in opinion.splitlines()):
+                raise ValueError('attachment_exception_opinion_missing_resource')
         if task['workflow_key'] == 'travel_expense':
             from apps.oa.approvals.travel_mileage import validate_uploader_opinion
 
@@ -384,6 +399,8 @@ class Approval:
             if task['workflow_key'] == 'dealer_closure':
                 from apps.oa.approvals.sources import dealer_closure
                 dealer_closure.validate_submission(self._api(), material)
+            if material.get('attachment_read_exception'):
+                attachment_exception.recheck(self._api(), material, origins=self.source_policy.attachments)
             writer = self.writer
             if plan is None and writer is None:
                 from apps.oa.approvals.sources.writer import build_writer_api

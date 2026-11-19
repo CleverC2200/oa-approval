@@ -1,5 +1,5 @@
 from tests.approvals.review_fixtures import collect_for_review, deliver_and_submit
-from tests.approvals.review_fixtures import completed_review
+from tests.approvals.review_fixtures import completed_review, recognition_report
 
 from tests.approvals.source_fakes import POLICY
 from datetime import datetime, timezone
@@ -46,6 +46,155 @@ def service(tmp_path, api=None, *, predictor=None):
     api = api or FakeOA()
     return Approval(tmp_path, api=api, writer=api, configs=[], collector=collect,
                     predictor=predictor, source_policy=POLICY), api
+
+
+@pytest.fixture
+def tpm_attachment_approval(tmp_path, monkeypatch):
+    from PIL import Image
+
+    from apps.oa.approvals.collection import case
+    from apps.oa.approvals.sources.download_errors import DownloadError, Downloaded, Failed
+    from tests.approvals.source_fakes import download_sources
+
+    class AttachmentOA(FakeOA):
+        resources = {'901': 'photo.jpg.crdownload', '902': 'photo.png'}
+        urls = {}
+        source_request_id = None
+        field_code = 'fj'
+        log_annex = ''
+
+        def request_context(self, request_id):
+            fields = [{
+                'fieldName': self.field_code, 'fieldShowName': '附件', 'fieldValue': resource_id,
+                'filedHtmlShow': f'<a href="/news/download.do?fileid={resource_id}&filename={name}">{name}</a>',
+            } for resource_id, name in self.resources.items()]
+            workflow = {'requestId': request_id, 'workflowBaseInfo': {'workflowId': '195039'},
+                'workflowDetailTableInfos': [{'workflowRequestTableRecords': [
+                    {'workflowRequestTableFields': fields},
+                ]}]}
+            workflow['requestId'] = self.source_request_id or request_id
+            workflow['workflowRequestLogs'] = [{'annexDocHtmls': self.log_annex}]
+            return workflow, [{'id': rid, 'name': name, 'downloadUrl': self.urls.get(rid, f'/download?fileid={rid}')}
+                              for rid, name in self.resources.items()]
+
+    api = AttachmentOA()
+    api.rows[0]['workflow_key'] = 'tpm_small_marketing_fee'
+    calls, broken = [], {'901'}
+
+    def download(resource, *, dest_dir, **_kwargs):
+        resource_id = resource['id']
+        calls.append(resource_id)
+        if resource_id in broken:
+            return Failed(DownloadError('attachment_download_failed', 'Synthetic damaged attachment'))
+        path = dest_dir / resource['name']
+        Image.new('RGB', (2, 2)).save(path)
+        return Downloaded(path)
+
+    monkeypatch.setenv('OA_FINANCE_PREAUDIT_CACHE_DB', str(tmp_path/'cache.sqlite3'))
+    monkeypatch.setattr(case.attachments, 'build_download_sources', lambda _policy: download_sources(download))
+    monkeypatch.setattr(case.invoice_buyers, 'read_invoice_buyers', lambda *_args, **_kwargs: {
+        'read_status': 'not_applicable', 'invoices': [],
+    })
+    app = Approval(tmp_path, api=api, writer=api, source_policy=POLICY, configs=[{
+        'flow_key': 'tpm_small_marketing_fee', 'workflow_id': '195039', 'workflow_name': '合成 TPM 流程',
+    }])
+    run_id = app.pending()['run_id']
+    scope = {'request_id': '101', 'resource_id': '901', 'authorization_note': '仅跳过本单指定损坏附件'}
+    yield app, api, run_id, scope, calls, broken
+    app.store.connection.close()
+
+
+def test_tpm_attachment_exception_binds_collection_review_and_submit(tpm_attachment_approval):
+    from apps.oa.approvals.owner import dispatch
+
+    app, api, run_id, scope, calls, _ = tpm_attachment_approval
+    with pytest.raises(ValueError, match='attachment_read_exception_invalid'):
+        app.collect(run_id, expected_task_id=1, attachment_read_exception={**scope, 'request_id': '102'})
+    assert app.store.get_task(1)['status'] == 'queued' and not calls
+    signed_url = '/weaver/weaver.file.FileDownload?fileid={}&download=1&ddcode=recorded'
+    api.urls = {'901': signed_url.format('signed-original')}
+    result = dispatch(app, run_id, {'operation': 'collect', 'expected_task_id': 1,
+                                    'attachment_read_exception': scope})
+    assert result['status'] == 'prepared'
+    material = json.loads(Path(result['material_file']).read_text())
+    assert calls == ['902'] and [item['resource_id'] for item in material['resources']] == ['902']
+    recorded = material['attachment_read_exception']
+    assert Path(recorded['source_path']).is_file()
+    assert len(recorded['form_snapshot_sha256']) == 64
+    assert {key: recorded[key] for key in scope} == scope
+    assert recorded['attachment'] == {
+        'resource_id': '901', 'name': 'photo.jpg.crdownload', 'source_field_path': 'detail[0].row[0].field[0]',
+        'source_field_name': '附件', 'owner_detail_id': 'detail[0].row[0]', 'read_status': 'skipped_by_user',
+    }
+    report = recognition_report(app.store.get_task(1))
+    app.dispatch_review(run_id, expected_task_id=1, agent_id='reviewer',
+                        agent_workflow_key='tpm_small_marketing_fee', recognition=report)
+    complete = completed_review(app, 1)
+    pending = {**complete, 'status': 'business_pending', 'rule_basis': 'TPM 单附件例外'}
+    opinion = '附件完整性：附件 901 未读取，定位照片归属待核。\n金额孰低核销：金额待核。'
+    with pytest.raises(ValueError, match='attachment_exception_requires_business_pending'):
+        deliver_and_submit(app, 1, opinion=opinion, recognition=report, review_assessment=complete)
+    with pytest.raises(ValueError, match='attachment_exception_opinion_missing_resource'):
+        deliver_and_submit(app, 1, opinion='附件 901 已核。', recognition=report, review_assessment=pending)
+
+    assert deliver_and_submit(app, 1, opinion=opinion, recognition=report, review_assessment=pending)['status'] == 'preview'
+    api.urls = {'901': '/download?fileid=903'}
+    with pytest.raises(ValueError, match='attachment_read_exception_target_changed'):
+        app.submit(1, confirm_write=True)
+    api.urls = {'901': signed_url.format('signed-refresh')}
+    api.resources = {**api.resources, '902': 'replacement.png'}
+    with pytest.raises(ValueError, match='attachment_read_exception_target_changed'):
+        app.submit(1, confirm_write=True)
+    api.resources['902'] = 'photo.png'
+    api.log_annex = '<a href="/news/download.do?fileid=903&filename=annex.png">签字附件</a>'
+    with pytest.raises(ValueError, match='attachment_read_exception_target_changed'):
+        app.submit(1, confirm_write=True)
+    assert not api.posts and not app.inspect(1)['submissions']
+    api.log_annex = ''
+    assert app.submit(1, confirm_write=True)['status'] == 'submitted'
+    assert api.posts == [('101', opinion)] and api.pending_rows() == []
+
+
+@pytest.mark.parametrize('change', [{'source_request_id': '102'}, {'field_code': 'fpfj'}])
+def test_tpm_attachment_exception_refuses_wrong_source_or_invoice(tpm_attachment_approval, change):
+    app, api, run_id, scope, calls, _ = tpm_attachment_approval
+    vars(api).update(change)
+    with pytest.raises(ValueError, match='attachment_read_exception_target_changed'):
+        app.collect(run_id, expected_task_id=1, attachment_read_exception=scope)
+    assert not calls
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_tpm_exception_does_not_hide_other_failed_attachments(tpm_attachment_approval, explicit):
+    app, _, run_id, scope, calls, broken = tpm_attachment_approval
+    if explicit:
+        broken.add('902')
+    with pytest.raises(RuntimeError, match='attachment_download_failed'):
+        app.collect(run_id, expected_task_id=1, **({'attachment_read_exception': scope} if explicit else {}))
+    assert sorted(calls) == (['902'] if explicit else ['901', '902'])
+    assert app.store.get_task(1)['status'] == 'failed'
+
+
+def test_tpm_exception_only_attachment_still_has_an_unread_record(tpm_attachment_approval, tmp_path):
+    from apps.oa.materials.recognize import recognize
+
+    app, api, run_id, scope, calls, _ = tpm_attachment_approval
+    api.resources = {'901': api.resources['901']}
+    result = app.collect(run_id, expected_task_id=1, attachment_read_exception=scope)
+    material_file = Path(result['material_file'])
+    material = json.loads(material_file.read_text())
+    report = recognize(material_file=material_file, output_dir=tmp_path/'recognized')
+    assert report['status'] == 'skipped' and report['reason'] == 'authorized_attachment_unread'
+    assert report['coverage'] == 'all_prepared_content' and not report['parts']
+    assert calls == [] and 'attachment_presence' not in material
+    assert material['attachment_read_exception']['attachment']['resource_id'] == '901'
+    assert app.dispatch_review(run_id, expected_task_id=1, agent_id='reviewer',
+        agent_workflow_key='tpm_small_marketing_fee', recognition=report)['status'] == 'reviewing'
+    material['attachment_read_exception'].pop('authorization_note')
+    invalid = tmp_path/'invalid-material.json'
+    invalid.write_text(json.dumps(material))
+    rejected = recognize(material_file=invalid, output_dir=tmp_path/'rejected')
+    assert rejected['status'] == 'failed' and rejected['error_code'] == 'attachment_content_empty'
 
 
 def test_collect_freezes_material_and_default_submit_is_preview(tmp_path):

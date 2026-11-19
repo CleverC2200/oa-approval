@@ -798,19 +798,22 @@ def test_status_does_not_report_a_busy_owner_as_missing(tmp_path, view):
             socket_path(tmp_path).unlink(missing_ok=True)
 
 
-def test_travel_exception_cli_sends_only_the_explicit_request(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize('exception', ['travel_read_exception', 'attachment_read_exception'])
+def test_collect_exception_cli_sends_only_the_explicit_request(tmp_path, monkeypatch, capsys, exception):
     from apps.oa.approvals import cli
 
     note = {'request_id': '12', 'authorization_note': '仅本单允许受限审核'}
+    if exception == 'attachment_read_exception':
+        note['resource_id'] = '901'
     path = tmp_path / 'exception.json'
     path.write_text(json.dumps(note))
     requests = []
     monkeypatch.setattr(cli, 'send', lambda root, request: requests.append(request) or {'status': 'reviewing'})
     args = ['--root', str(tmp_path), 'collect', '--expected-task-id', '1']
-    assert cli.main([*args, '--travel-read-exception-file', str(path)]) == 0
-    assert requests[-1]['travel_read_exception'] == note
+    assert cli.main([*args, '--' + exception.replace('_', '-') + '-file', str(path)]) == 0
+    assert requests[-1][exception] == note
     assert cli.main(args) == 0
-    assert 'travel_read_exception' not in requests[-1]
+    assert exception not in requests[-1]
 
 
 def test_travel_exception_identity_rejected_before_claim(tmp_path):

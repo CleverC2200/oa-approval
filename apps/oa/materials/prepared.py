@@ -14,6 +14,24 @@ SUCCESSFUL_PREPARATION_STATUSES = {
 SKIPPED_PREPARATION_STATUSES = {'video_skipped'}
 
 
+def only_user_skipped_attachment(material: dict) -> bool:
+    scope = material.get('attachment_read_exception')
+    if material.get('workflow_key') != 'tpm_small_marketing_fee' or not isinstance(scope, dict):
+        return False
+    attachment = scope.get('attachment')
+    request_id, resource_id = scope.get('request_id'), scope.get('resource_id')
+    note = scope.get('authorization_note')
+    return (isinstance(attachment, dict) and isinstance(request_id, str) and bool(request_id)
+            and request_id == material.get('request_id')
+            and isinstance(resource_id, str) and re.fullmatch(r'[1-9][0-9]*', resource_id) is not None
+            and isinstance(note, str) and bool(note.strip())
+            and attachment.get('resource_id') == resource_id and bool(attachment.get('source_field_path'))
+            and attachment.get('read_status') == 'skipped_by_user'
+            and _valid_digest(scope.get('form_snapshot_sha256'))
+            and material.get('resources') == []
+            and not any((material.get('prepared') or {}).get(key) for key in ('manifest', 'images', 'structured_contents')))
+
+
 class PreparationFailure(RuntimeError):
     def __init__(self, diagnostics: list[dict]):
         super().__init__('attachment_content_incomplete')

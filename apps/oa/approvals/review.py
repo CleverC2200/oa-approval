@@ -69,7 +69,7 @@ def validate_frozen(task):
 
 
 def validate_readiness(task, recognition):
-    from apps.oa.materials.prepared import read_prepared, skipped_video_sources
+    from apps.oa.materials.prepared import only_user_skipped_attachment, read_prepared, skipped_video_sources
     from apps.oa.materials.reports import parse_report, prepared_parts
 
     validate_frozen(task)
@@ -81,7 +81,8 @@ def validate_readiness(task, recognition):
              and material.get('resources') == [])
     restricted_empty = (bool(material.get('travel_read_exception')) and material.get('resources') == []
                         and not any(prepared.get(key) for key in ('manifest', 'images', 'structured_contents')))
-    read_prepared(prepared, reading='frozen', confirmed_empty=empty or restricted_empty)
+    read_prepared(prepared, reading='frozen',
+                  confirmed_empty=empty or restricted_empty or only_user_skipped_attachment(material))
     if task['workflow_key'] == 'packaging_layout_approval':
         return
     if recognition is None and not prepared.get('images'):

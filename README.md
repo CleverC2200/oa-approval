@@ -58,6 +58,8 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" collect
   --expected-task-id "$OA_TASK_ID"
 ```
 
+TPM 单据经本次明确授权跳过一份损坏附件时，见 [TPM 单附件例外](.agents/skills/oa-finance-preaudit/references/flows/tpm-small-marketing-fee.md#单附件例外)。
+
 完成本流程适用的材料识别后派发审核。`OA_RECOGNITION_FILE` 使用完整识别报告；无适用报告时省略该选项。
 
 ```bash
