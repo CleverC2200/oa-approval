@@ -879,7 +879,7 @@ def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
         claimed = app.store.claim(first['run_id'],  expected_task_id=task['id'],
                                   )
         assert claimed['status'] == 'claimed'
-        app.store.fail_collection(task['id'], 'synthetic_collection_failure')
+        app.store.fail_collection(first['run_id'], task['id'], 'synthetic_collection_failure')
         app.close(first['run_id'])
         second = app.pending(batch_size=1)
         assert task['id'] not in [item['id'] for item in second['tasks']]

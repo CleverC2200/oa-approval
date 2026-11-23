@@ -20,7 +20,7 @@ def freeze(store, run, task_id):
     material = {'prepared': {'images': [], 'structured_contents': [{'resource_id': 'text', 'text': 'Synthetic'}], 'manifest': []}}
     path.write_text(json.dumps(material))
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    return store.freeze(task_id, material, path, digest, {str(path): digest}, path)
+    return store.freeze(run, task_id, material, path, digest, {str(path): digest}, path)
 
 
 def dispatch(store, run, task_id, agent='agent-a', workflow='travel_expense'):

@@ -201,7 +201,7 @@ class Approval:
             material_file.write_text(encoded(material),encoding="utf-8")
             files = material_paths(material) | {material_file} | {path for path in (directory / "rules").rglob("*") if path.is_file()}
             frozen = {str(path):file_digest(path) for path in files}
-            frozen_task = self.store.freeze(task["id"],material,material_file,file_digest(material_file),frozen,rule)
+            frozen_task = self.store.freeze(run_id,task["id"],material,material_file,file_digest(material_file),frozen,rule)
             from apps.oa.approvals.collection import invoice_originals
             from apps.oa.approvals.collection.case import CollectionFailure
 
@@ -230,7 +230,7 @@ class Approval:
                 error.diagnostics_file = str(report)
             except OSError:
                 error.diagnostics_write_failed = True
-            self.store.fail_collection(task["id"],type(error).__name__+":"+code)
+            self.store.fail_collection(run_id,task["id"],type(error).__name__+":"+code)
             raise
 
     def fail(self, run_id, task_id, reason, *, review_assessment=None):
@@ -242,9 +242,9 @@ class Approval:
             "reason":reason,"failure_count":task["failure_count"]}
 
     @contextmanager
-    def _writer_lock(self):
+    def _writer_lock(self, *, blocking=True):
         with (self.root / "submit.lock").open("a") as stream:
-            fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
+            fcntl.flock(stream.fileno(), fcntl.LOCK_EX if blocking else fcntl.LOCK_EX | fcntl.LOCK_NB)
             yield
 
     def _frozen(self, task):
@@ -354,9 +354,11 @@ class Approval:
         return {'task_id': task_id, 'status': 'reviewed', 'review_id': review['id'],
                 'evidence_files': json.loads(review['delivery_json'])['assessment']['evidence_files']}
 
-    def submit(self, task_id, *, confirm_write=False, allow_overseas=False):
+    def submit(self, task_id, *, confirm_write=False, allow_overseas=False, run_id=None):
         with self._writer_lock():
             task = self.store.get_task(task_id)
+            if run_id is not None and task['last_run_id'] != run_id:
+                raise ValueError('task_run_mismatch')
             if task['status'] in {'submitted', 'unknown', 'submitting'}:
                 return {'task_id': task_id, 'status': task['status'], 'submissions': self.store.details(task_id)['submissions']}
             if task['status'] not in {'reviewed', 'preview'}:

@@ -9,9 +9,11 @@ from apps.oa.approvals.store import REVIEW_STATUSES, REVIEW_SLOTS, UNFINISHED_ST
 
 def batch_status(store, run, tasks, owner):
     from apps.oa.approvals.execution import close_execution, execution_headline
+    from apps.oa.approvals.hourly import dispatch_plan
     from apps.oa.materials.read_progress import progress_summary
 
-    frozen = json.loads(run['summary_json']).get('batch')
+    stored = json.loads(run['summary_json'])
+    frozen = stored.get('batch')
     scoped = tasks if frozen is None else [store.get_task(task_id) for task_id in frozen['task_ids']]
     task_ids = {task['id'] for task in scoped}
     outside = [task for task in tasks if task['id'] not in task_ids]
@@ -40,7 +42,7 @@ def batch_status(store, run, tasks, owner):
                       or owner.get('reachable') is True and owner.get('run_id') is not None
                       and owner['run_id'] != run['id'])
     complete = run['status'] == 'closed' and owner_released
-    execution = json.loads(run['summary_json']).get('execution')
+    execution = stored.get('execution')
     stop = execution.get('stop') if execution else None
     recovered = (complete and not blockers and not queued and acceptance['all_verified']
                  and execution is not None and execution.get('unknown_count', 0) > 0
@@ -59,7 +61,7 @@ def batch_status(store, run, tasks, owner):
         if unresolved:
             execution.update(status='blocked', archive_eligible=False)
         if (execution['status'] == 'success' and not execution.get('verified_count')
-                and json.loads(run['summary_json']).get('pending') is None):
+                and stored.get('pending') is None):
             execution.update(status='legacy_unverified', archive_eligible=False,
                              remaining_count=None, selected_remaining_count=None)
     else:
@@ -68,8 +70,14 @@ def batch_status(store, run, tasks, owner):
     execution['headline'] = (execution_headline(execution) if owner_released
                              else '收尾待验｜等待执行进程退出')
     return {
-        'pending': json.loads(run['summary_json']).get('pending'),
+        'pending': stored.get('pending'),
         'execution': execution,
+        'closure': stored.get('closure'),
+        'closed_batch': stored.get('closed_batch'),
+        'handoff': {key: stored['handoff'][key] for key in ('status', 'remaining', 'reason')
+                    if key in stored['handoff']} if stored.get('handoff') else None,
+        'hourly_dispatch': dispatch_plan(run, stored, owner, blockers, unresolved),
+        'isolated_failures': isolated_failures(store, run, stored, tasks),
         'acceptance': acceptance,
         'runtime_unresolved': unresolved,
         'closeout': {'drained': not blockers, 'blockers': blockers,
@@ -95,6 +103,63 @@ def batch_status(store, run, tasks, owner):
             ('id', 'request_id', 'workflow_key', 'received_at', 'status')} if candidate is not None else None,
         'recovery_candidates': recovery_candidates(store, run, tasks),
     }
+
+
+def isolated_failures(store, run, stored, tasks):
+    from apps.oa.approvals.client import collection_failure_info
+
+    pending = stored.get('pending') or {}
+    failed = {task['id']: task for task in tasks if task['status'] == 'failed'}
+    legacy_processed = {item['request_id'] for item in pending.get('excluded', [])
+                        if item['reason'] == 'continuation_processed' and 'task_id' not in item}
+    if legacy_processed:
+        processed = set(stored.get('continuation', {}).get('processed_occurrences', []))
+        for row in store.connection.execute("SELECT * FROM tasks WHERE status='failed'"):
+            if row['occurrence'] in processed and row['request_id'] in legacy_processed:
+                failed[row['id']] = dict(row)
+    for item in pending.get('excluded', []):
+        if item['reason'] in {'historical_failure', 'continuation_processed'} and 'task_id' in item:
+            row = store.connection.execute(
+                "SELECT * FROM tasks WHERE id=? AND status='failed'", (item['task_id'],)).fetchone()
+            if row is not None:
+                failed[row['id']] = dict(row)
+
+    items = []
+    for task in sorted(failed.values(), key=lambda item: (item['received_at'], item['id'])):
+        task_id, run_id = task['id'], task['last_run_id']
+        try:
+            collection = collection_failure_info(store.path.parent, task).get('collection_failure', {})
+        except (OSError, ValueError, KeyError, TypeError):
+            collection = {}
+        attempt = store.connection.execute(
+            'SELECT id, completed_at, result_json FROM submissions WHERE task_id=? AND run_id=? ORDER BY id DESC LIMIT 1',
+            (task_id, run_id)).fetchone()
+        review = next((entry for entry in reversed(store.review_assessments(task_id))
+                       if entry['run_id'] == run_id and entry['assessment']['status'] in {
+                           'technical_failure', 'incomplete'}), None)
+        review_evidence = review['assessment'].get('evidence_files', []) if review else []
+        if attempt:
+            stage, action = 'submission', '核对原提交尝试和回执，按提交保护规则处理'
+            evidence_file = json.loads(attempt['result_json']).get('diagnostics_file')
+        elif collection:
+            diagnostics = collection.get('diagnostics') or []
+            stage = collection.get('stage') or next(
+                (entry['stage'] for entry in diagnostics if entry.get('stage')), 'collection')
+            action = '核对采集诊断，修复材料或读取来源后再申请恢复'
+            evidence_file = collection['diagnostics_file']
+        else:
+            stage = 'review' if review else 'unrecorded'
+            action = '核对原审核或失败记录，补齐证据或修复原因后再申请恢复'
+            evidence_file = next(iter(review_evidence), None) or task['material_file']
+        items.append({
+            'task_id': task_id, 'request_id': task['request_id'], 'workflow_key': task['workflow_key'],
+            'run_id': run_id, 'stage': stage, 'reason': task['error'], 'suggested_action': action,
+            'evidence_file': evidence_file, 'submission_id': attempt['id'] if attempt else None,
+            'last_attempt_run_started_at': store.run(run_id)['started_at'],
+            'failure_recorded_at': attempt['completed_at'] if attempt else review['created_at'] if review else None,
+        })
+    return {'pending_snapshot_at': pending.get('snapshot_at'),
+            'new_count': sum(item['run_id'] == run['id'] for item in items), 'items': items}
 
 
 def recovery_candidates(store, run, tasks):
@@ -127,7 +192,7 @@ def closeout_blockers(acceptance, *, collection_active=False, writer_active=Fals
     if any(task['status'] == 'unknown' or any(not attempt['resolved'] for attempt in task['submissions'])
            for task in facts):
         blockers.append('submission_unresolved')
-    if any(task['status'] == 'submitted' and not task['verified_attempt_count']
+    if any(task['status'] == 'submitted' and not task['occurrence_verified']
            and all(attempt['resolved'] for attempt in task['submissions']) for task in facts):
         blockers.append('submission_unverified')
     return blockers
@@ -181,10 +246,19 @@ def submission_acceptance(store, run_id, tasks):
                 key: receipt.get(key) for key in
                     ('submit_ok', 'done_hit', 'postcheck_done_hit', 'fields_match', 'failure_code')} | {
                     'verified': evidence.verified, 'resolved': evidence.resolved})
+        verified = sum(item['verified'] for item in attempts)
+        occurrence_verified = bool(verified)
+        if not occurrence_verified and task['status'] == 'submitted':
+            previous = store.connection.execute(
+                "SELECT * FROM submissions WHERE task_id=? AND run_id!=? AND status='submitted'",
+                (task['id'], run_id))
+            occurrence_verified = any(assess_submission(row, workflow_key=task['workflow_key']).verified
+                                      for row in previous)
         facts.append({
             'task_id': task['id'], 'request_id': task['request_id'], 'status': task['status'],
             'attempt_count': len(attempts), 'duplicate_attempt_count': max(0, len(attempts) - 1),
-            'verified_attempt_count': sum(item['verified'] for item in attempts),
+            'verified_attempt_count': verified,
+            'occurrence_verified': occurrence_verified,
             'unknown_attempt_count': sum(item['status'] == 'unknown' for item in attempts),
             'unfinished_attempt_count': sum(item['status'] == 'started' or item['completed_at'] is None for item in attempts),
             'unverified_attempt_count': sum(not item['verified'] for item in attempts),
