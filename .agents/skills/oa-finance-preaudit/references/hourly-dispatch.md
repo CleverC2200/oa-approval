@@ -13,6 +13,12 @@
 3. 空闲后 fetch `origin/main`，确认分支为 main、工作区干净且 HEAD 与 `origin/main` 一致。失败即停止，不自动切换、重置或拉取合入。
 4. 所有小时启动使用 `start --hourly`。`continue` 使用 `--continue-from <精确前轮ID> --limit 0`，沿用原选择。首次运行或 `start` 使用 `--batch-size 40 --limit 0` 和当前授权流程及排除项。按下文带上适用的失败恢复项。入口持有共享锁和本轮锁，并在获取待办前重查 socket、Writer 锁、停机、写入回执和接续预留。返回 `already_running` 时按正在运行处理，不换目录绕过。下一轮仍只处理一个批次。
 
+### 差旅对账名单
+
+在 OA 私有认证文件同目录配置 `travel-reconciliation-sheet.json`，填写 `spreadsheet_token`、`sheet_id` 和具备该表读取权限的 `identity`（`user` 或 `bot`）。配置和名单放在私有目录。
+
+每次实际启动小时轮次（含接续），入口通过 `lark-cli sheets +table-get` 重新读取子表，并把结果保存到本轮独立文件。`start` 和 `status --view batch` 的 `travel_reconciliation` 显示读取状态、时间、含工号的行数及快照路径。读取失败保留失败原因。名单快照目前只供核对。
+
 ### 进度与失联核对
 
 状态不明时相隔 30 秒核对同一轮，检查原对话和工具会话、对应 PID 和启动时间、采集/识别/审核进度、阶段时限和 Writer 回执。可达、待办数量和运行时长各自都不足以判定卡死。正常在途或服务端明确退避时保留原轮继续。个别审核异常按[批次停滞规则](batch-execution.md)核实终态，隔离失败单并保留其余正常审批。缺少可核实的进程或阶段证据时报告具体缺口。

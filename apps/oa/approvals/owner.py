@@ -624,6 +624,7 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
         try:
             with ExitStack() as start_locks:
                 recovered = None
+                reconciliation = None
                 if hourly:
                     from apps.oa.approvals.hourly import prepare_start
 
@@ -632,11 +633,19 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                     if stopping.is_set():
                         raise ValueError('user_stop')
                     recovered = prepare_start(approval.store, continue_from, stopped_run_file)
+                    if not demo and not stopping.is_set() and not control.stop_requested():
+                        from apps.oa.approvals.sources import travel_reconciliation
+
+                        reconciliation = travel_reconciliation.refresh()
                     if stopping.is_set() or control.stop_requested():
                         raise ValueError('user_stop')
                 started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
                                            continue_from=continue_from, retry_failed=retry_failed, retry_reviewed=retry_reviewed,
                                            recovery_request_ids=recovery_request_ids, review_slots=review_slots)
+                if reconciliation is not None:
+                    receipt = travel_reconciliation.save(root, started['run_id'], reconciliation)
+                    approval.store.record_travel_reconciliation(started['run_id'], receipt)
+                    started['travel_reconciliation'] = receipt
                 if recovered is not None:
                     started['recovered_run'] = recovered
         except Exception:
