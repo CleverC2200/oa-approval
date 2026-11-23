@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import io
 import json
 import os
 from pathlib import Path
@@ -47,6 +48,83 @@ def stopped_run_file(root, run_id, basis='execution_stalled'):
     path = root / 'stopped-run.json'
     path.write_text(json.dumps({'run_id': run_id, 'basis': basis, 'evidence': 'Synthetic tool terminal and exit evidence'}))
     return path
+
+
+def test_hourly_refreshes_lark_roster_for_each_run(tmp_path, monkeypatch, capsys):
+    from apps.oa.approvals.sources import oa
+    from apps.oa.approvals.sources import travel_reconciliation
+
+    root = tmp_path / 'runtime' / 'hourly-preaudit'
+    app = create_demo(tmp_path / 'fake-oa')
+    monkeypatch.setattr(owner, 'PROJECT_ROOT', tmp_path)
+    monkeypatch.setattr(owner, 'require_production_main', lambda: None)
+    monkeypatch.setattr(owner, 'load_source_policy', lambda: app.source_policy)
+    monkeypatch.setattr(oa, 'build_api', lambda *args, **kwargs: app.api)
+    monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'private-auth.env'))
+    config = {'spreadsheet_token': 'syntheticWorkbook', 'sheet_id': 'sheetA', 'identity': 'user'}
+    (tmp_path / 'travel-reconciliation-sheet.json').write_text(json.dumps(config))
+    response_file = tmp_path / 'lark-response.json'
+    calls = tmp_path / 'lark-calls.txt'
+    pending_rows = app.api.pending_rows
+
+    def pending():
+        with calls.open('a') as log:
+            log.write('queue\n')
+        return pending_rows()
+
+    monkeypatch.setattr(app.api, 'pending_rows', pending)
+    executable = tmp_path / 'lark-cli'
+    executable.write_text(
+        f'#!{sys.executable}\n'
+        'import os, sys\n'
+        'from pathlib import Path\n'
+        "assert not {'OA_APP_SECRET', 'OA_DB_PASSWORD', 'OA_AUTH_ENV_FILE'} & os.environ.keys()\n"
+        "assert sys.argv[1:] == ['sheets', '+table-get', '--spreadsheet-token', 'syntheticWorkbook', "
+        "'--sheet-id', 'sheetA', '--as', 'user', '--max-chars', '250000']\n"
+        "root = Path(__file__).parent\n"
+        "with (root / 'lark-calls.txt').open('a') as calls: calls.write('read\\n')\n"
+        "print((root / 'lark-response.json').read_text())\n"
+    )
+    executable.chmod(0o700)
+    monkeypatch.setenv('PATH', os.pathsep.join((str(tmp_path), os.environ['PATH'])))
+    monkeypatch.setenv('OA_APP_SECRET', 'synthetic-oa-credential')
+    monkeypatch.setenv('OA_DB_PASSWORD', 'synthetic-db-credential')
+
+    def run(rows, *, truncated=False):
+        sheet = {'name': 'Synthetic', 'range': 'A1:B3', 'columns': ['工号', '状态'], 'data': rows}
+        response_file.write_text(json.dumps({'ok': True, 'identity': 'user',
+            'data': {'sheets': [sheet], 'truncated': truncated}}))
+        monkeypatch.setattr(sys, 'stdin', io.StringIO('{"operation":"finish"}\n'))
+        assert cli.main(['--root', str(root), 'start', '--hourly', '--workflow', 'travel_expense']) == 0
+        ready_line = capsys.readouterr().out.splitlines()[0]
+        assert 'synthetic-id' not in ready_line
+        started = json.loads(ready_line)
+        assert started['status'] == 'ready'
+        assert invoke(root, 'status', '--view', 'batch')['travel_reconciliation'] == started['travel_reconciliation']
+        return started['travel_reconciliation']
+
+    try:
+        original = run([['synthetic-id-a', '暂停']])
+        original_file = Path(original['snapshot_file'])
+        current = run([['synthetic-id-a', '已解除'], ['synthetic-id-b', '暂停']])
+        current_file = Path(current['snapshot_file'])
+        assert original_file != current_file
+        assert original['employee_rows'] == 1
+        assert current['employee_rows'] == 2
+        assert json.loads(original_file.read_text())['table']['data'] == [['synthetic-id-a', '暂停']]
+        assert json.loads(current_file.read_text())['table']['data'] == [
+            ['synthetic-id-a', '已解除'], ['synthetic-id-b', '暂停']]
+        assert run([], truncated=True) == {'status': 'failed', 'error': 'travel_reconciliation_result_invalid'}
+        with monkeypatch.context() as failure:
+            def unwritable(*args, **kwargs):
+                raise PermissionError
+
+            failure.setattr(travel_reconciliation, 'write_bytes', unwritable)
+            assert run([['synthetic-id-b', '暂停']]) == {
+                'status': 'failed', 'error': 'travel_reconciliation_snapshot_write_failed'}
+        assert calls.read_text().splitlines() == ['read', 'queue'] * 4
+    finally:
+        app.store.connection.close()
 
 
 def test_hourly_keeps_progressing_batch_and_restores_stalled_batch_in_same_start(tmp_path):

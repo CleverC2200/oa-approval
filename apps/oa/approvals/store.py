@@ -238,6 +238,12 @@ class Store:
                 self.connection.execute("UPDATE runs SET status='blocked' WHERE id=?", (run_id,))
         return run_id
 
+    def record_travel_reconciliation(self, run_id, receipt):
+        with self.connection:
+            self.connection.execute(
+                "UPDATE runs SET summary_json=json_set(summary_json,'$.travel_reconciliation',json(?)) WHERE id=?",
+                (encoded(receipt), run_id))
+
     def tasks(self, run_id):
         tasks = [dict(row) for row in self.connection.execute(
             "SELECT * FROM tasks WHERE last_run_id=? ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id", (run_id,))]

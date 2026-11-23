@@ -71,6 +71,7 @@ def batch_status(store, run, tasks, owner):
                              else '收尾待验｜等待执行进程退出')
     return {
         'pending': stored.get('pending'),
+        **({'travel_reconciliation': stored['travel_reconciliation']} if 'travel_reconciliation' in stored else {}),
         'execution': execution,
         'closure': stored.get('closure'),
         'closed_batch': stored.get('closed_batch'),
