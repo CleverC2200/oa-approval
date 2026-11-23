@@ -64,7 +64,7 @@ def test_atomic_delivery_frees_review_slot_and_reserves_every_inflight_result(tm
                               agent_workflow_key='travel_expense')['reason'] == 'result_backpressure'
     delivery(app, 4)
     delivery(app, 5)
-    capacity = app.store.pipeline_capacity(app.store.tasks(run))
+    capacity = app.store.pipeline_capacity(app.store.run(run), app.store.tasks(run))
     assert capacity['results'] == 5
     assert capacity['result_reserved'] == 0 and capacity['result_capacity'] == 6
     assert capacity['backpressure'] is True
@@ -77,14 +77,15 @@ def test_atomic_delivery_frees_review_slot_and_reserves_every_inflight_result(tm
     assert api.posts == []
 
 
-def test_active_writer_does_not_block_preparation_or_three_reviewers(tmp_path):
+@pytest.mark.parametrize('review_limit', [3, 4])
+def test_active_writer_does_not_block_preparation_or_review_slots(tmp_path, review_limit):
     from threading import Event
 
     from tests.approvals.test_operations import service
 
     app, api = service(tmp_path)
-    api.rows = [pending(str(value)) for value in range(101, 106)]
-    run = app.pending()['run_id']
+    api.rows = [pending(str(value)) for value in range(101, 103 + review_limit)]
+    run = app.pending(review_slots=review_limit)['run_id']
     prepared(app, run, 1)
     reviewing(app, run, 1, 'real-1')
     delivery(app, 1)
@@ -107,10 +108,16 @@ def test_active_writer_does_not_block_preparation_or_three_reviewers(tmp_path):
         future = writer.submit(submit)
         try:
             assert started.wait(5)
-            for task_id in range(2, 5):
+            for task_id in range(2, review_limit + 2):
                 prepared(app, run, task_id)
                 reviewing(app, run, task_id, f'real-{task_id}')
-            assert app.store.pipeline_capacity(app.store.tasks(run))['reviewing'] == 3
+            capacity = app.store.pipeline_capacity(app.store.run(run), app.store.tasks(run))
+            assert capacity['reviewing'] == review_limit
+            assert capacity['result_capacity'] == review_limit + 3
+            next_task_id = review_limit + 2
+            prepared(app, run, next_task_id)
+            assert app.dispatch_review(run, expected_task_id=next_task_id, agent_id='next',
+                                      agent_workflow_key='travel_expense')['reason'] == 'inflight_limit'
             assert app.store.get_task(1)['status'] == 'submitting'
         finally:
             release.set()
@@ -180,7 +187,7 @@ def test_delivery_validates_identity_version_and_rolls_back_all_evidence_facts(t
         details = app.inspect(1)
         assert details['reviews'] == details['review_assessments'] == []
         assert details['task']['status'] == 'reviewing'
-        assert app.store.pipeline_capacity(app.store.tasks(run))['reviewing'] == 1
+        assert app.store.pipeline_capacity(app.store.run(run), app.store.tasks(run))['reviewing'] == 1
     assert delivery(app, 1)['status'] == 'reviewed'
 
 
@@ -247,7 +254,7 @@ def test_delivery_is_local_and_preserves_independent_evidence_before_writer_read
     saved = app.inspect(1)['reviews'][0]
     saved_assessment = json.loads(saved['delivery_json'])['assessment']
     assert Path(saved_assessment['evidence_files'][0]).read_text() == 'Synthetic row 1: quantity 2 at price 3; total 6'
-    assert app.store.pipeline_capacity(app.store.tasks(run))['reviewing'] == 0
+    assert app.store.pipeline_capacity(app.store.run(run), app.store.tasks(run))['reviewing'] == 0
 
 
 def test_cross_run_unknown_remains_blocked_after_readonly_resolution(tmp_path):

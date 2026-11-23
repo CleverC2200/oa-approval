@@ -6,15 +6,15 @@
 
 1. 先按 README 操作入口确定本轮绝对根目录 `OA_RUNTIME_ROOT`，通过 `bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" start --batch-size N --limit N` 重新拉取真实待办，后续操作沿用同一根目录，按当前授权选择适用类型。`--batch-size N` 将本轮全局 FIFO 排队前缀持久保存在 `runs`，启动输出的 `batch.size` 和 `batch.task_ids` 给出范围。保存 `run_id`、任务身份及顺序。`--limit` 仅控制紧凑展示，不能限制批次；省略 `--batch-size` 保留完整队列的旧调用行为。旧批次名单不跨新轮使用，历史成功和未知提交不进入重发路径。默认预览，真实写入和海外字段分别按当前明确授权执行。
 2. 每次 `collect` 前检查停止状态、下一张 FIFO 任务和准备缓冲。`collect --expected-task-id <next-task-id>` 不传 Agent 身份，只采集和冻结一份待审材料。领取达到批次范围后不再请求 `collect`，技术失败也占已领取数量。程序拒绝领取范围外的第 N+1 单；批次内无排队或在途任务时返回 `done`，即使完整队列还有范围外待办。
-3. 完成本单适用准备及识别后，核对审核空位与结果背压，再选择真实审核 Agent。使用 `dispatch-review --expected-task-id <prepared-task-id> --agent-id <actual-native-agent-id> --agent-workflow-key <workflow-key>`，财务图片同时传本次完整的 `--recognition-file`。包装沿直接观察原图的分支，纯结构化材料可直接读取；海外按专用规则处理。入口核对当前材料版本、适用识别完整性、实际身份、类型和同代类型一致后才绑定审核槽。拒绝时保留材料，不跳过老单。类型只影响空闲 Agent 复用，同类积压可以占满三个审核槽。逻辑槽号只保存在主 Agent 工作表中。
+3. 完成本单适用准备及识别后，核对审核空位与结果背压，再选择真实审核 Agent。使用 `dispatch-review --expected-task-id <prepared-task-id> --agent-id <actual-native-agent-id> --agent-workflow-key <workflow-key>`，财务图片同时传本次完整的 `--recognition-file`。包装沿直接观察原图的分支，纯结构化材料可直接读取；海外按专用规则处理。入口核对当前材料版本、适用识别完整性、实际身份、类型和同代类型一致后才绑定审核槽。拒绝时保留材料，不跳过老单。类型只影响空闲 Agent 复用，同类积压可以占满审核槽。逻辑槽号只保存在主 Agent 工作表中。
 
-容量以公开 `status.capacity` 为准：
+用户明确要求紧急处理时，在新批次的 `start` 加 `--review-slots 4`，含合法接续。普通批次默认 3 个审核槽，接续未指定时沿用前批容量。以 `status.capacity` 和本次实际可启动的 Agent 数量安排派发。
 
-| 阶段 | 固定容量与释放条件 |
+| 阶段 | 容量与释放条件 |
 | --- | --- |
 | `preparing`、`prepared` | 独立准备缓冲 1 单，不占审核槽 |
-| `reviewing` | 审核槽 3 个，每个真实 Agent 同时一单；`deliver` 保存成功或明确技术失败才释放 |
-| `reviewed`、`submitting` | 结果容量 6 单；达到 3 单停止新派发，在审任务各预留一个结果位置，已完成交付继续落盘 |
+| `reviewing` | 以 `review_limit` 为上限。每个真实 Agent 同时一单，`deliver` 保存成功或明确技术失败才释放 |
+| `reviewed`、`submitting` | 结果容量为审核槽数加 3。已保存的结果达到 3 单时停止新派发，在审任务各预留一个结果位置，已完成交付继续落盘 |
 | 唯一 Writer | 串行处理已保存结果的提交、预览与回查，不占审核槽 |
 
 `backpressure=true` 时先排结果，不再派发；准备缓冲可按入口判断独立补齐。正常活动 Writer 的 `submitting` 不阻止采集、派发或本地交付。未知或失联的未结束提交按下文停止保护执行。所有未结束阶段都参与关闭检查，审核槽释放不表示整单结束。
@@ -29,7 +29,7 @@
 | --- | --- |
 | 收到绑定当前任务的完整审核结果 | 核对并 `deliver`，释放审核槽。Writer 正忙时也继续保存交付 |
 | FIFO 待审材料和适用识别就绪，`capacity.review_available > 0` 且 `backpressure=false` | `dispatch-review` 并立即给实际审核 Agent 发任务。Writer 忙时照常派发，同类型有多单时可用多个 Agent |
-| `next_candidate` 存在，准备缓冲有空位，且没有活动采集 | `collect` 下一张 FIFO 单，采集完成后立刻执行适用识别。三个审核槽都占用时也提前准备一单 |
+| `next_candidate` 存在，准备缓冲有空位，且没有活动采集 | `collect` 下一张 FIFO 单，采集完成后立刻执行适用识别。审核槽全满时也提前准备一单 |
 | 有已保存的审核结果且 Writer 空闲 | 按授权发起一次 `submit` 或 `preview`，保存会话并继续推进其他阶段 |
 
 长操作用独立工具会话启动，有返回时间参数时用短初始返回（如 `yield_time_ms=1000`），记录会话 ID 并带着它继续补位。待审材料就绪时优先派发；采集或识别仍在跑时推进已完成交付或空闲 Writer。每个阶段按自己的容量推进，提交回执只占用 Writer。用公开状态区分有空位但需要等材料、结果背压、范围耗尽、技术或授权保护，以及执行器仍有动作可做。未知写入和失联 Writer 仍按停止保护处理。

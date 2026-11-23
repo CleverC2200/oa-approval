@@ -153,7 +153,7 @@ def test_prediction_block_keeps_saved_delivery_and_review_slot_released(tmp_path
     assert app.inspect(task_id)['submissions'] == []
     assert api.posts == []
     run_id = app.store.get_task(task_id)['last_run_id']
-    assert app.store.pipeline_capacity(app.store.tasks(run_id))['reviewing'] == 0
+    assert app.store.pipeline_capacity(app.store.run(run_id), app.store.tasks(run_id))['reviewing'] == 0
     with pytest.raises(ValueError, match='task_not_failable'):
         app.fail(run_id, task_id, 'finance_prediction_incomplete')
     assert app.inspect(task_id)['task']['material_file'] == material

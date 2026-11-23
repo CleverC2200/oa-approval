@@ -22,7 +22,7 @@ from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
 from apps.oa.approvals.sources.writer import handled_since
 
-from apps.oa.approvals.store import Store
+from apps.oa.approvals.store import REVIEW_SLOTS, REVIEW_SLOT_OPTIONS, Store
 from apps.oa.approvals.store import encoded
 from apps.oa.approvals.store import occurrence_key
 
@@ -106,7 +106,9 @@ class Approval:
         return api.build_api(self.configs[0],source_policy=self.source_policy)
 
     def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None, retry_failed=False, retry_reviewed=False,
-                recovery_request_ids=None):
+                recovery_request_ids=None, review_slots=None):
+        if review_slots is not None and (type(review_slots) is not int or review_slots not in REVIEW_SLOT_OPTIONS):
+            raise ValueError('review_slots_invalid')
         if recovery_request_ids is not None and (not isinstance(recovery_request_ids, list)
                 or not recovery_request_ids or any(not isinstance(value, str) or not value.strip() for value in recovery_request_ids)):
             raise ValueError('recovery_request_ids_invalid')
@@ -115,6 +117,8 @@ class Approval:
             if retry_failed or retry_reviewed or any(value is not None for value in (workflows, batch_size, request_ids)):
                 raise ValueError('continuation_selection_changed')
             workflows, batch_size, request_ids = (continuation[key] for key in ('workflows', 'batch_size', 'request_ids'))
+            if review_slots is None:
+                review_slots = continuation.get('review_slots')
             recovery_request_ids = list(dict.fromkeys([*(continuation.get('recovery_request_ids') or []),
                                                       *(recovery_request_ids or [])])) or None
         if retry_failed and not request_ids:
@@ -149,7 +153,8 @@ class Approval:
                                   recovery_request_ids=recovery_request_ids,
                                   pending_count=len(pending_rows),
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids,
-                                             'recovery_request_ids':recovery_request_ids})
+                                             'recovery_request_ids':recovery_request_ids,
+                                             'review_slots': REVIEW_SLOTS if review_slots is None else review_slots})
         cleanup = retention.cleanup(self.store, execute=True)
         result = {"run_id":run,"tasks":self.store.tasks(run)}
         if cleanup["status"] != "completed":

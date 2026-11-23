@@ -4,7 +4,7 @@ from collections import Counter
 import json
 
 from apps.oa.approvals.receipts import assess_submission
-from apps.oa.approvals.store import REVIEW_STATUSES, REVIEW_SLOTS, UNFINISHED_STATUSES
+from apps.oa.approvals.store import REVIEW_STATUSES, UNFINISHED_STATUSES
 
 
 def batch_status(store, run, tasks, owner):
@@ -26,7 +26,7 @@ def batch_status(store, run, tasks, owner):
         busy = [task['id'] for task in claimed if task['status'] in REVIEW_STATUSES]
         agents.append({'agent_id': agent_id, 'workflow_keys': sorted({task['workflow_key'] for task in claimed}),
                        'claimed_count': len(claimed), 'inflight_task_ids': busy, 'busy': bool(busy)})
-    occupied = sum(task['status'] in REVIEW_STATUSES for task in tasks)
+    capacity = store.pipeline_capacity(run, tasks)
     acceptance = submission_acceptance(store, run['id'], scoped)
     all_acceptance = submission_acceptance(store, run['id'], tasks) if outside else acceptance
     unresolved = store.unresolved_writes()
@@ -88,8 +88,8 @@ def batch_status(store, run, tasks, owner):
         'review_progress': [{'task_id': task['id'], 'agent_id': task['agent_id'],
                              **progress_summary(task['material_file'], task['material_sha256'])}
                             for task in scoped if task['status'] == 'reviewing' and task['material_file']],
-        'capacity': {'inflight': occupied, 'available': max(0, REVIEW_SLOTS - occupied), 'limit': REVIEW_SLOTS,
-                     **store.pipeline_capacity(tasks)},
+        'capacity': {'inflight': capacity['reviewing'], 'available': capacity['review_available'],
+                     'limit': capacity['review_limit'], **capacity},
         'batch': {
             'mode': 'all_queue' if frozen is None else 'frozen',
             'size': None if frozen is None else frozen['size'],

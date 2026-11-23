@@ -7,6 +7,7 @@ import sqlite3
 
 from apps.oa.approvals.client import emit, failure, send, socket_path, query
 from apps.oa.approvals import receipts
+from apps.oa.approvals.store import REVIEW_SLOTS, REVIEW_SLOT_OPTIONS
 from apps.oa.runtime.paths import RUNTIME_ROOT
 
 
@@ -30,6 +31,7 @@ def main(argv=None):
     pending.add_argument('--request-id', action='append', help='仅纳入重新拉取待办中匹配的申请，可重复指定')
     pending.add_argument('--limit', type=int, default=20, help='紧凑队列展示数，默认 20，0 只显示统计')
     pending.add_argument('--batch-size', type=int, help='冻结本轮可领取的全局 FIFO 排队前缀数量，独立于展示数')
+    pending.add_argument('--review-slots', type=int, choices=REVIEW_SLOT_OPTIONS, help=f'审核并行上限，默认 {REVIEW_SLOTS}')
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
     pending.add_argument('--hourly', action='store_true', help='按小时调度保护检查启动，仅限固定小时账本或隔离 demo')
@@ -159,7 +161,7 @@ def main(argv=None):
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
                              batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from,
                              retry_failed=args.retry_failed == 'YES', retry_reviewed=args.retry_reviewed == 'YES',
-                             recovery_request_ids=args.recover_request_id,
+                             recovery_request_ids=args.recover_request_id, review_slots=args.review_slots,
                              hourly=args.hourly, stopped_run_file=args.stopped_run_file)
             except BlockingIOError:
                 emit({'status': 'already_running'})

@@ -895,8 +895,10 @@ def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
         app.store.connection.close()
 
 
-def test_guarded_finish_drains_before_handoff(tmp_path):
-    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo', '--batch-size', '1'],
+@pytest.mark.parametrize(('initial_slots', 'next_slots'), [(4, None), (3, 4)])
+def test_guarded_finish_drains_before_handoff(tmp_path, initial_slots, next_slots):
+    process = subprocess.Popen([sys.executable, '-m', 'apps.oa.approvals', '--root', str(tmp_path), 'start', '--demo',
+                                '--batch-size', '1', '--review-slots', str(initial_slots)],
                                cwd=PROJECT, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         line = process.stdout.readline()
@@ -907,8 +909,10 @@ def test_guarded_finish_drains_before_handoff(tmp_path):
         assert wrong.returncode == 1
         assert json.loads(wrong.stdout)['error'] == 'run_mismatch'
         assert process.poll() is None
-        status = subprocess.run([*base, 'status'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
-        assert json.loads(status.stdout)['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None, 'writer': None}
+        status = subprocess.run([*base, 'status', '--view', 'batch'], cwd=PROJECT, capture_output=True, text=True, timeout=5)
+        running = json.loads(status.stdout)
+        assert running['owner'] == {'reachable': True, 'run_id': started['run_id'], 'phase': 'running', 'collection': None, 'writer': None}
+        assert running['capacity']['limit'] == running['capacity']['review_limit'] == initial_slots
         collected = subprocess.run([*base, 'collect', '--expected-task-id', '1'],
                                    cwd=PROJECT, capture_output=True, text=True, timeout=10)
         assert json.loads(collected.stdout)['status'] == 'prepared'
@@ -932,6 +936,14 @@ def test_guarded_finish_drains_before_handoff(tmp_path):
         report = json.loads(checked.stdout)
         assert report['closeout'] == {'drained': True, 'blockers': [], 'batch_complete': True, 'complete': True}
         assert {alert['code'] for alert in report['alerts']} == {'technical_failures', 'continuation_pending'}
+        continuation = [*base, 'start', '--demo', '--hourly', '--continue-from', started['run_id']]
+        if next_slots is not None:
+            continuation.extend(['--review-slots', str(next_slots)])
+        continued = subprocess.run(continuation, cwd=PROJECT, input='', capture_output=True, text=True, timeout=10, check=True)
+        resumed = json.loads(continued.stdout.splitlines()[0])
+        assert resumed['status'] == 'ready' and resumed['run_id'] != started['run_id']
+        checked = subprocess.run([*base, 'status', '--view', 'batch'], cwd=PROJECT, capture_output=True, text=True, timeout=5, check=True)
+        assert json.loads(checked.stdout)['capacity']['review_limit'] == 4
     finally:
         if process.poll() is None:
             process.kill()
