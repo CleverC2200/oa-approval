@@ -113,7 +113,7 @@ def test_deepseek_archive_and_duplicate_pages_keep_real_attachment_ids_in_sqlite
     run = store.start_run([{'request_id': '12', 'received_at': '2026-10-22 09:00:00',
                            'operator_id': 'tester', 'workflow_key': 'general_expense'}])
     task = store.claim(run,  expected_task_id=1, )["task"]
-    store.freeze(task['id'], material, material_file, report['material_binding']['material_sha256'],
+    store.freeze(run, task['id'], material, material_file, report['material_binding']['material_sha256'],
                  {str(image): digest}, material_file)
     store.dispatch_review(run, expected_task_id=task['id'], agent_id='synthetic-reader',
                           agent_workflow_key='general_expense', recognition=report)

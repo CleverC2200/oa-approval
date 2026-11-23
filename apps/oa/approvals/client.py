@@ -47,12 +47,16 @@ def _owner_status(root):
                 owner = {'reachable': True, 'busy': True}
             except TimeoutError:
                 owner = {'reachable': None, 'reason': 'probe_timeout'}
-            except OSError:
+            except (FileNotFoundError, ConnectionRefusedError):
                 owner = {'reachable': False}
-    except (ValueError, KeyError):
+            except OSError:
+                owner = {'reachable': None, 'reason': 'probe_error'}
+    except (ValueError, KeyError, TypeError):
         owner = {'reachable': None, 'reason': 'invalid_response'}
-    except OSError:
+    except (FileNotFoundError, ConnectionRefusedError):
         owner = {'reachable': False}
+    except OSError:
+        owner = {'reachable': None, 'reason': 'probe_error'}
     return owner
 
 
