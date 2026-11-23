@@ -126,7 +126,7 @@ def finish_orphaned(root, run_id, *, collection_stopped_note=None):
             if any(task['status'] in {'submitting', 'unknown'} for task in tasks) or any(
                     not submission['resolved'] for task in acceptance['tasks'] for submission in task['submissions']):
                 raise ValueError('submission_unresolved')
-            result = store.close(run_id, collection_stopped_note=collection_stopped_note)
+            result = store.close(run_id, collection_stopped_note=collection_stopped_note, closure={'kind': 'orphaned'})
             server_path.unlink(missing_ok=True)
             return {**result, 'reason': 'owner_missing'}
         finally:
@@ -153,7 +153,7 @@ def dispatch(approval, run_id, request):
     if operation in {'submit', 'preview'}:
         if any(name in request for name in ('opinion', 'recognition', 'observations', 'review_assessment')):
             raise ValueError('delivery_required')
-        return approval.submit(request['task_id'],
+        return approval.submit(request['task_id'], run_id=run_id,
             confirm_write=operation == 'submit' and request.get('confirm_write', False),
             allow_overseas=request.get('allow_overseas', False))
     if operation == 'postcheck':
@@ -396,7 +396,7 @@ class _Collection:
                             result['diagnostics_file'] = str(report)
                         except OSError:
                             result['diagnostics_write_failed'] = True
-                        self._store.fail_collection(task['id'], reason)
+                        self._store.fail_collection(self._run_id, task['id'], reason)
             else:
                 result = received[0]
         finally:
@@ -469,8 +469,9 @@ class _RoundSession:
                                  'reason': 'run_not_drained', 'blockers': blockers})
                         return
                 self._finishing = True
-                self._handoff = request.get('handoff', False)
-                self._stop = stop
+                if self._stop is None or self._stop['kind'] != 'user_stop':
+                    self._handoff = request.get('handoff', False)
+                    self._stop = stop
                 if source == 'socket':
                     self._finish_responders.append(respond)
             elif request.get('operation') == 'status':
@@ -597,9 +598,18 @@ def require_production_main(project=None):
         raise ValueError('production_main_not_synced')
 
 def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=None, request_ids=None,
-          continue_from=None, retry_failed=False, retry_reviewed=False, recovery_request_ids=None, review_slots=None):
+          continue_from=None, retry_failed=False, retry_reviewed=False, recovery_request_ids=None,
+          review_slots=None, hourly=False, stopped_run_file=None):
     from apps.oa.approvals.operations import Approval
 
+    if hourly:
+        hourly_root = (PROJECT_ROOT / 'runtime' / 'hourly-preaudit').resolve()
+        if demo and root == hourly_root:
+            raise ValueError('hourly_demo_requires_scratch')
+        if not demo and root != hourly_root:
+            raise ValueError('hourly_runtime_required')
+        if not demo and continue_from is None and not workflows:
+            raise ValueError('hourly_workflows_required')
     server_path = socket_path(root)
     with termination_cleanup() as stopping, round_lock(root, shared_root=None if demo else PROJECT_ROOT / 'runtime'):
         source_policy = None
@@ -611,9 +621,27 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
             approval = create_demo(root)
         else:
             approval = Approval(root, source_policy=source_policy)
-        started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
-                                   continue_from=continue_from, retry_failed=retry_failed, retry_reviewed=retry_reviewed,
-                                   recovery_request_ids=recovery_request_ids, review_slots=review_slots)
+        try:
+            with ExitStack() as start_locks:
+                recovered = None
+                if hourly:
+                    from apps.oa.approvals.hourly import prepare_start
+
+                    _require_owner_missing(root)
+                    start_locks.enter_context(approval._writer_lock(blocking=False))
+                    if stopping.is_set():
+                        raise ValueError('user_stop')
+                    recovered = prepare_start(approval.store, continue_from, stopped_run_file)
+                    if stopping.is_set() or control.stop_requested():
+                        raise ValueError('user_stop')
+                started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
+                                           continue_from=continue_from, retry_failed=retry_failed, retry_reviewed=retry_reviewed,
+                                           recovery_request_ids=recovery_request_ids, review_slots=review_slots)
+                if recovered is not None:
+                    started['recovered_run'] = recovered
+        except Exception:
+            approval.store.connection.close()
+            raise
         run_id = started['run_id']
         server_path.unlink(missing_ok=True)
         server = None

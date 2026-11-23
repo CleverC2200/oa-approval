@@ -167,6 +167,11 @@ class Store:
             processed = set()
             recovered = set()
             pending_recovery = set()
+            latest = self.latest_run()
+            if latest is not None:
+                previous_summary = json.loads(latest['summary_json'])
+                if previous_summary.get('closure'):
+                    pending_recovery.update(previous_summary.get('recovery', {}).get('task_ids', []))
             if continue_from is not None:
                 previous = json.loads(self.run(continue_from)['summary_json'])
                 processed.update(previous['handoff']['processed_occurrences'])
@@ -197,17 +202,21 @@ class Store:
                               and occurrence not in recovered and (previous_task['status'] == 'failed'
                               or previous_task['status'] == 'queued' and previous_task['id'] in pending_recovery))
                 if occurrence in processed and not recovering:
-                    pending['excluded'].append({'request_id': request_id, 'reason': 'continuation_processed'})
+                    excluded = {'request_id': request_id, 'reason': 'continuation_processed'}
+                    if previous_task is not None:
+                        excluded['task_id'] = previous_task['id']
+                    pending['excluded'].append(excluded)
                     continue
                 if previous_task and previous_task['status'] == 'failed' and not (retry_failed or recovering):
                     pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'historical_failure'})
                     continue
-                if recovering:
-                    recovery_tasks.append(previous_task['id'])
                 if previous_task and not retry_reviewed and not recovering and (previous_task['status'] == 'preview' or
                         (previous_task['status'] in {'queued', 'reviewed'} and previous_task['unsubmitted_review'])):
                     pending['excluded'].append({'task_id': previous_task['id'], 'request_id': request_id, 'reason': 'unsubmitted_review'})
                     continue
+                if recovering or (previous_task is not None and previous_task['id'] in pending_recovery
+                                  and previous_task['status'] in {'queued', 'preparing', 'prepared', 'reviewing'}):
+                    recovery_tasks.append(previous_task['id'])
                 self.connection.execute("""INSERT INTO requests VALUES (?,?,?,?) ON CONFLICT(request_id)
                     DO UPDATE SET workflow_key=excluded.workflow_key,title=excluded.title,last_seen_at=excluded.last_seen_at""",
                     (request_id,workflow,str(row.get("request_name") or ""),timestamp))
@@ -222,8 +231,8 @@ class Store:
                 eligible = [task for task in self.tasks(run_id) if task['status'] == 'queued']
                 task_ids = [task['id'] for task in eligible][:batch_size]
                 stored['batch'] = {'size':batch_size, 'task_ids':task_ids}
-            if recovery_request_ids:
-                stored['recovery'] = {'request_ids': recovery_request_ids, 'task_ids': recovery_tasks}
+            if recovery_request_ids or recovery_tasks:
+                stored['recovery'] = {'request_ids': recovery_request_ids or [], 'task_ids': recovery_tasks}
             self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored),run_id))
             if self.connection.execute("SELECT 1 FROM tasks WHERE status='unknown'").fetchone():
                 self.connection.execute("UPDATE runs SET status='blocked' WHERE id=?", (run_id,))
@@ -366,12 +375,15 @@ class Store:
                                     (reason.strip(), task_id))
         return {'run_id': run_id, 'task_id': task_id, 'review_id': review_id, 'status': 'failed', 'reason': reason.strip()}
 
-    def fail_collection(self, task_id, error):
+    def fail_collection(self, run_id, task_id, error):
         with self.connection:
-            self.connection.execute("UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1 WHERE id=? AND status='preparing'", (error,task_id))
+            self.connection.execute("""UPDATE tasks SET status='failed',error=?,failure_count=failure_count+1
+                WHERE id=? AND last_run_id=? AND status='preparing'
+                AND EXISTS(SELECT 1 FROM runs WHERE id=last_run_id AND status IN ('running','blocked'))""",
+                (error, task_id, run_id))
         return self.get_task(task_id)
 
-    def freeze(self, task_id, material, material_file, material_sha256, frozen, rule_file):
+    def freeze(self, run_id, task_id, material, material_file, material_sha256, frozen, rule_file):
         resources = {str(item["resource_id"]):item for item in material.get("resources", [])}
         prepared = material.get("prepared", {})
         for item in prepared.get("images", []) + prepared.get("structured_contents", []):
@@ -380,10 +392,14 @@ class Store:
                 resources[rid] = {"resource_id":rid,"name":item.get("name") or rid,
                     "parent_resource_id":item.get("parent_resource_id"),"local_readonly_path":item.get("path")}
         with self.connection:
-            self.connection.execute("""UPDATE tasks SET material_file=?,material_sha256=?,frozen_json=?,
+            frozen_task = self.connection.execute("""UPDATE tasks SET material_file=?,material_sha256=?,frozen_json=?,
                 material_json=?,rule_file=?,status=CASE WHEN status='preparing' THEN 'prepared' ELSE status END,
-                error=CASE WHEN status='preparing' THEN NULL ELSE error END WHERE id=?""",
-                (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),task_id))
+                error=CASE WHEN status='preparing' THEN NULL ELSE error END
+                WHERE id=? AND last_run_id=? AND status IN ('preparing','failed')
+                AND EXISTS(SELECT 1 FROM runs WHERE id=last_run_id AND status IN ('running','blocked'))""",
+                (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),task_id,run_id))
+            if frozen_task.rowcount != 1:
+                raise ValueError('collection_run_changed')
             ids = {}
             for rid,item in resources.items():
                 path = str(item.get("local_readonly_path") or item.get("path") or "")
@@ -550,12 +566,15 @@ class Store:
         from apps.oa.approvals.status import submission_acceptance
 
         submitted = [task for task in tasks if task['status'] == 'submitted']
-        if submitted and not submission_acceptance(self,run['id'],submitted)['all_verified']:
+        submitted_facts = submission_acceptance(self, run['id'], submitted)['tasks']
+        if any(not task['occurrence_verified'] or any(not attempt['verified'] for attempt in task['submissions'])
+               for task in submitted_facts):
             return {'status':'blocked', 'reason':'continuation_unverified_submission'}
         remaining = sum(task['status'] == 'queued' for task in tasks)
         if not remaining:
             return {'status':'done', 'remaining':0}
-        if not any(task['status'] in {'preview','failed','submitted'} for task in tasks):
+        if not (any(task['status'] in {'preview', 'failed'} for task in tasks)
+                or any(task['verified_attempt_count'] for task in submitted_facts)):
             return {'status':'blocked', 'reason':'continuation_no_progress'}
         processed = set(stored.get('continuation', {}).get('processed_occurrences', []))
         processed.update(task['occurrence'] for task in tasks if task['status'] in {'preview','failed','submitted'})
@@ -566,7 +585,7 @@ class Store:
         return {'status':'ready', 'remaining':remaining, 'processed_occurrences':sorted(processed),
                 'recovered_occurrences': sorted(recovered)}
 
-    def close(self, run_id, *, handoff=False, collection_stopped_note=None, stop=None):
+    def close(self, run_id, *, handoff=False, collection_stopped_note=None, stop=None, closure=None):
         from apps.oa.approvals.execution import close_execution, validate_stop
 
         stop = validate_stop(self, run_id, stop, handoff=handoff)
@@ -576,10 +595,33 @@ class Store:
             tasks = self.tasks(run_id)
             summary = dict(Counter(task['status'] for task in tasks))
             stored = json.loads(run['summary_json'])
+            frozen = stored.get('batch')
+            if 'closed_batch' not in stored:
+                scoped = tasks if frozen is None else [self.get_task(task_id) for task_id in frozen['task_ids']]
+                stored['closed_batch'] = {
+                    'summary': dict(Counter(task['status'] for task in scoped)),
+                    'unfinished': [{'task_id': task['id'], 'status': task['status'],
+                                    'material_file': task['material_file']}
+                                   for task in scoped if task['status'] in UNFINISHED_STATUSES],
+                }
+                for unfinished in stored['closed_batch']['unfinished']:
+                    if unfinished['status'] == 'preparing':
+                        directory = self.path.parent / 'materials' / str(unfinished['task_id'])
+                        if directory.is_dir() and not directory.is_symlink():
+                            unfinished['partial_directories'] = [str(child) for child in sorted(directory.iterdir())
+                                                                if child.is_dir() and not child.is_symlink()]
+            if closure is not None:
+                stored.setdefault('closure', {**closure, 'recorded_at': now()})
             if run['status'] == 'closed':
+                if closure is not None:
+                    if 'execution' in stored:
+                        stored['execution']['archive_eligible'] = False
+                    self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored), run_id))
                 return {'run_id': run_id, 'status': 'closed', 'summary': summary,
-                        **({'execution': stored['execution']} if 'execution' in stored else {})}
+                        **{key: stored[key] for key in ('execution', 'closure') if key in stored}}
             stored['execution'] = close_execution(self, run, tasks, stop)
+            if closure is not None:
+                stored['execution']['archive_eligible'] = False
             if collection_stopped_note:
                 stored['orphaned_collection'] = {
                     'confirmation_note': collection_stopped_note,
@@ -593,6 +635,8 @@ class Store:
                     stored['execution'].update(status='blocked', archive_eligible=False)
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
         result = {'run_id':run_id, 'status':'closed', 'summary':summary, 'execution':stored['execution']}
+        if closure is not None:
+            result['closure'] = stored['closure']
         if handoff:
             result['handoff'] = {key:value for key,value in stored['handoff'].items()
                                  if key not in {'processed_occurrences', 'recovered_occurrences'}}

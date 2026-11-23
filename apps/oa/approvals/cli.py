@@ -34,6 +34,8 @@ def main(argv=None):
     pending.add_argument('--review-slots', type=int, choices=REVIEW_SLOT_OPTIONS, help=f'审核并行上限，默认 {REVIEW_SLOTS}')
     pending.add_argument('--full', action='store_true', help='返回全部待办完整数据，忽略 --limit')
     pending.add_argument('--demo', action='store_true', help='仅使用合成 OA 与本地附件，不访问网络')
+    pending.add_argument('--hourly', action='store_true', help='按小时调度保护检查启动，仅限固定小时账本或隔离 demo')
+    pending.add_argument('--stopped-run-file', type=Path, help='精确旧轮及退出核对证据，仅与 --hourly 使用')
     pending.add_argument('--continue-from', help='仅消费指定已关闭轮次的接续，保留流程范围与链内已处理身份')
     pending.add_argument('--retry-failed', choices=['YES'], help='仅按本次明确授权重试 --request-id 指定的失败投递；小时任务默认排除历史失败')
     pending.add_argument('--retry-reviewed', choices=['YES'], help='仅按本次明确授权重新采集并审核 --request-id 指定的未提交预览或意见；保留旧意见')
@@ -100,6 +102,10 @@ def main(argv=None):
     if args.operation == 'finish' and args.collection_stopped_note is not None and (
             not args.orphaned or not args.collection_stopped_note.strip()):
         parser.error('--collection-stopped-note requires --orphaned and a nonempty confirmation')
+    if args.operation in {'pending', 'start'} and args.stopped_run_file and (not args.hourly or args.continue_from):
+        parser.error('--stopped-run-file requires --hourly and cannot replace a continuation')
+    if args.operation in {'pending', 'start'} and args.hourly and (args.retry_failed or args.retry_reviewed):
+        parser.error('--hourly supports only the scoped --recover-request-id recovery')
     if args.operation in {'pending', 'start'} and args.retry_failed and (not args.request_id or args.continue_from):
         parser.error('--retry-failed YES requires --request-id and cannot change a continuation')
     if args.operation in {'pending', 'start'} and args.retry_reviewed and (not args.request_id or args.continue_from):
@@ -155,7 +161,8 @@ def main(argv=None):
                 return owner.serve(root, demo=args.demo, workflows=args.workflow, limit=args.limit, full=args.full,
                              batch_size=args.batch_size, request_ids=args.request_id, continue_from=args.continue_from,
                              retry_failed=args.retry_failed == 'YES', retry_reviewed=args.retry_reviewed == 'YES',
-                             recovery_request_ids=args.recover_request_id, review_slots=args.review_slots)
+                             recovery_request_ids=args.recover_request_id, review_slots=args.review_slots,
+                             hourly=args.hourly, stopped_run_file=args.stopped_run_file)
             except BlockingIOError:
                 emit({'status': 'already_running'})
                 return 0

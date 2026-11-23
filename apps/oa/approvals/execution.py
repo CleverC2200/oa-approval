@@ -65,7 +65,7 @@ def close_execution(store, run, tasks, stop):
     preview = sum(t['status'] == 'preview' for t in scoped)
     verified = sum(t['verified_attempt_count'] > 0 for t in acceptance['tasks'])
     unfinished = sum(t['status'] in UNFINISHED_STATUSES for t in scoped)
-    unverified = sum(t['status'] == 'submitted' and not t['verified_attempt_count'] for t in acceptance['tasks'])
+    unverified = sum(t['status'] == 'submitted' and not t['occurrence_verified'] for t in acceptance['tasks'])
     if queued and stop is None:
         stop = {'kind': 'unexplained', 'reason': 'batch_closed_before_queue_drained'}
     unresolved = store.unresolved_writes()

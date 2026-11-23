@@ -60,6 +60,15 @@ def _cleanup(store, *, execute, task_id):
     root = store.path.parent.resolve()
     if store.connection.execute("SELECT 1 FROM tasks WHERE status='preparing' LIMIT 1").fetchone():
         return {'status': 'deferred', 'reason': 'collection_in_progress'}
+    cutoff = datetime.now(timezone.utc) - timedelta(days=365)
+    closed_materials = set()
+    for row in store.connection.execute(
+            """SELECT task.value FROM runs, json_each(runs.summary_json, '$.closed_batch.unfinished') AS task
+            WHERE ended_at >= ? AND json_extract(runs.summary_json, '$.closure.kind') IS NOT NULL""", (cutoff.isoformat(),)):
+        unfinished = json.loads(row['value'])
+        if unfinished.get('material_file'):
+            closed_materials.add(Path(unfinished['material_file']).parent.resolve())
+        closed_materials.update(Path(directory).resolve() for directory in unfinished.get('partial_directories', []))
     completed = verified_tasks(store)
     completed_ids = {task['id'] for task in completed}
     protected = set()
@@ -82,6 +91,7 @@ def _cleanup(store, *, execute, task_id):
         resolved = path.resolve()
         if (not path.is_absolute() or path.is_symlink() or not resolved.is_relative_to(root)
                 or resolved.parent == root or resolved in protected or not path.is_file()
+                or any(parent in closed_materials for parent in resolved.parents)
                 or any(part.startswith('.') and part != '.agents' for part in resolved.relative_to(root).parts)
                 or (not resolved.is_relative_to(root / 'materials')
                     and not {'attachments', 'prepared', 'recognitions'}.intersection(resolved.relative_to(root).parts[:-1])
@@ -114,7 +124,7 @@ def _cleanup(store, *, execute, task_id):
                             connection.execute('DELETE FROM attachment_files WHERE request_id=? AND flow_key=?',
                                                (task['request_id'], task['workflow_key']))
             if task_id is None:
-                result['expired_tasks'] = store.expire_history(datetime.now(timezone.utc) - timedelta(days=365))
+                result['expired_tasks'] = store.expire_history(cutoff)
         if result['failed_files']:
             result['status'] = 'partial'
     return result

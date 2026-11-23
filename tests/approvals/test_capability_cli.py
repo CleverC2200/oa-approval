@@ -879,7 +879,7 @@ def test_failed_delivery_requires_explicit_scoped_retry(tmp_path):
         claimed = app.store.claim(first['run_id'],  expected_task_id=task['id'],
                                   )
         assert claimed['status'] == 'claimed'
-        app.store.fail_collection(task['id'], 'synthetic_collection_failure')
+        app.store.fail_collection(first['run_id'], task['id'], 'synthetic_collection_failure')
         app.close(first['run_id'])
         second = app.pending(batch_size=1)
         assert task['id'] not in [item['id'] for item in second['tasks']]
@@ -936,7 +936,7 @@ def test_guarded_finish_drains_before_handoff(tmp_path, initial_slots, next_slot
         report = json.loads(checked.stdout)
         assert report['closeout'] == {'drained': True, 'blockers': [], 'batch_complete': True, 'complete': True}
         assert {alert['code'] for alert in report['alerts']} == {'technical_failures', 'continuation_pending'}
-        continuation = [*base, 'start', '--demo', '--continue-from', started['run_id']]
+        continuation = [*base, 'start', '--demo', '--hourly', '--continue-from', started['run_id']]
         if next_slots is not None:
             continuation.extend(['--review-slots', str(next_slots)])
         continued = subprocess.run(continuation, cwd=PROJECT, input='', capture_output=True, text=True, timeout=10, check=True)
