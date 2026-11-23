@@ -12,9 +12,9 @@ from apps.oa.materials.reports import review_contents
 
 
 REVIEW_SLOTS = 3
+REVIEW_SLOT_OPTIONS = (REVIEW_SLOTS, 4)
 PREPARATION_BUFFER = 1
 RESULT_BACKPRESSURE = 3
-RESULT_CAPACITY = RESULT_BACKPRESSURE + REVIEW_SLOTS
 REVIEW_STATUSES = ("reviewing",)
 RESULT_STATUSES = ("reviewed", "submitting")
 UNFINISHED_STATUSES = ("preparing", "prepared", *REVIEW_STATUSES, *RESULT_STATUSES)
@@ -108,7 +108,8 @@ class Store:
                 self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
 
     def require_dispatchable(self, run_id):
-        if self.run(run_id)['status'] != 'running':
+        run = self.run(run_id)
+        if run['status'] != 'running':
             raise ValueError('run_blocked')
         if self.connection.execute("SELECT 1 FROM tasks WHERE status='unknown'").fetchone() or self.connection.execute(
                 "SELECT 1 FROM submissions s JOIN runs r ON r.id=s.run_id WHERE s.status='unknown' OR s.status='started' AND r.status!='running'").fetchone():
@@ -118,16 +119,20 @@ class Store:
                 with self.connection:
                     self.connection.execute("UPDATE runs SET status='blocked' WHERE id=? AND status='running'", (run_id,))
             raise ValueError('submission_unresolved')
+        return run
 
-    def pipeline_capacity(self, tasks):
+    def pipeline_capacity(self, run, tasks):
+        selection = json.loads(run['summary_json']).get('selection', {})
+        review_limit = selection.get('review_slots', REVIEW_SLOTS)
+        result_capacity = RESULT_BACKPRESSURE + review_limit
         reviewing = sum(task['status'] in REVIEW_STATUSES for task in tasks)
         results = sum(task['status'] in RESULT_STATUSES for task in tasks)
         preparation = sum(task['status'] in {'preparing', 'prepared'} for task in tasks)
-        return {'reviewing': reviewing, 'review_available': max(0, REVIEW_SLOTS - reviewing),
-                'review_limit': REVIEW_SLOTS, 'preparation': preparation, 'preparation_limit': PREPARATION_BUFFER,
-                'results': results, 'result_reserved': reviewing, 'result_capacity': RESULT_CAPACITY,
+        return {'reviewing': reviewing, 'review_available': max(0, review_limit - reviewing),
+                'review_limit': review_limit, 'preparation': preparation, 'preparation_limit': PREPARATION_BUFFER,
+                'results': results, 'result_reserved': reviewing, 'result_capacity': result_capacity,
                 'result_backpressure_threshold': RESULT_BACKPRESSURE,
-                'backpressure': results >= RESULT_BACKPRESSURE or results + reviewing >= RESULT_CAPACITY}
+                'backpressure': results >= RESULT_BACKPRESSURE or results + reviewing >= result_capacity}
 
     def requests(self):
         return [dict(row) for row in self.connection.execute("SELECT * FROM requests ORDER BY request_id")]
@@ -253,16 +258,16 @@ class Store:
                 return {'run_id': run_id, 'status': status, 'reason': reason,
                         'summary': dict(Counter(task['status'] for task in tasks))}
             try:
-                self.require_dispatchable(run_id)
+                run = self.require_dispatchable(run_id)
             except ValueError as error:
                 if str(error) == 'run_not_found':
                     raise
                 return decision('blocked', str(error))
             if type(expected_task_id) is not int or expected_task_id < 1:
                 return decision('refused', 'claim_guards_required')
-            if self.pipeline_capacity(tasks)['preparation'] >= PREPARATION_BUFFER:
+            if self.pipeline_capacity(run, tasks)['preparation'] >= PREPARATION_BUFFER:
                 return decision('waiting', 'preparation_buffer_full')
-            batch = json.loads(self.run(run_id)['summary_json']).get('batch')
+            batch = json.loads(run['summary_json']).get('batch')
             queued = [task for task in tasks if task['status'] == 'queued'
                       and (batch is None or task['id'] in batch['task_ids'])]
             if not queued:
@@ -288,7 +293,7 @@ class Store:
                 return {'run_id': run_id, 'status': status, 'reason': reason,
                         'summary': dict(Counter(task['status'] for task in tasks))}
             try:
-                self.require_dispatchable(run_id)
+                run = self.require_dispatchable(run_id)
             except ValueError as error:
                 if str(error) == 'run_not_found':
                     raise
@@ -298,7 +303,7 @@ class Store:
                 return decision('refused', 'claim_guards_required')
             if not isinstance(agent_id, str) or not agent_id.strip():
                 return decision('refused', 'agent_identity_required')
-            capacity = self.pipeline_capacity(tasks)
+            capacity = self.pipeline_capacity(run, tasks)
             if not capacity['review_available']:
                 return decision('waiting', 'inflight_limit')
             if any(task['agent_id'] == agent_id and task['status'] in REVIEW_STATUSES for task in tasks):

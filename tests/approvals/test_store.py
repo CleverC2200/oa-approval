@@ -136,7 +136,7 @@ def test_two_connections_cannot_dispatch_the_last_slot_twice(tmp_path):
         results = [future.result(timeout=10) for future in futures]
     assert sorted(result['status'] for result in results) == ['claimed', 'waiting']
     assert next(result for result in results if result['status'] == 'waiting')['reason'] == 'inflight_limit'
-    assert store.pipeline_capacity(store.tasks(run))['reviewing'] == 3
+    assert store.pipeline_capacity(store.run(run), store.tasks(run))['reviewing'] == 3
 
 
 def test_closed_run_refuses_preparation_and_review_dispatch(tmp_path):
