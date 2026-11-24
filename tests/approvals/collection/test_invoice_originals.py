@@ -72,6 +72,9 @@ def original_transport(monkeypatch, tmp_path):
         def geturl(self):
             return self.url
 
+        def getcode(self):
+            return 206 if state.cloud_failure == 'partially_reported' else 200
+
     def open_request(request, **_kwargs):
         path = urlsplit(request.full_url).path
         params = parse_qs(urlsplit(request.full_url).query)
@@ -135,6 +138,152 @@ def test_collect_reads_linked_original_body_via_native_context(original_transpor
     downloads = [r for r in state.requests if r[0] == '/weaver/weaver.file.FileDownload']
     assert len(downloads) == 2 and downloads[0] == downloads[1]
     assert 'session=fixed' not in json.dumps(material, default=str)
+
+
+@pytest.fixture
+def page_original(original_transport):
+    state = original_transport
+    state.detail['oa'] = {'doc_id': None, 'img_id': None}
+    state.detail['modify_info']['fileType'] = 2
+    state.cloud_pdf = state.pdf
+    return state
+
+
+def test_collect_prepares_official_page_pdf_when_native_ids_are_absent(page_original, tmp_path):
+    state = page_original
+    state.client.pending_rows = lambda: [{
+        'request_id': '101', 'workflow_key': CONFIG['flow_key'],
+        'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
+    }]
+    app = Approval(tmp_path / 'runtime', api=state.client, configs=[CONFIG], source_policy=POLICY)
+    try:
+        app.collect(app.pending()['run_id'], expected_task_id=1)
+        result = app.inspect(1)
+    finally:
+        app.store.connection.close()
+
+    assert result['task']['status'] == 'prepared' and not result['submissions']
+    material = json.loads(Path(result['task']['material_file']).read_text())
+    invoice = material['invoice_evidence']['invoices'][0]
+    source = invoice['files'][0]['original_source']
+    resource = material['resources'][0]
+    assert invoice['invoice_no'] == NUMBER
+    assert invoice['body_read_status'] == 'content_read'
+    assert source['cloud_record_id'] == '9001'
+    assert source['cloud_file_id'] == '8001'
+    assert 'document_id' not in source and 'native_file_id' not in source
+    assert invoice['files'][0]['resource_id'] == resource['resource_id'] == 'invoice_cloud:9001:8001'
+    assert resource['source_field_path'] == 'detail[0].row[0].field[0]'
+    assert resource['owner_detail_id'] == 'detail[0].row[0]'
+    assert resource['source_system'] == 'invoice_cloud'
+    assert Path(resource['local_readonly_path']).read_bytes() == state.pdf
+    assert material['prepared']['manifest'][0]['page_count'] == 1
+    assert NUMBER in material['prepared']['structured_contents'][0]['key_text'][0]
+    paths = [route for route, _, _ in state.requests]
+    assert paths.count('/invoiceApi/file/download') == 1
+    assert '/api/hrm/login/getAccountList' in paths
+    assert '/api/doc/detail/basicInfo' not in paths
+    assert '/weaver/weaver.file.FileDownload' not in paths
+    assert 'synthetic-token' not in json.dumps(material)
+
+
+@pytest.mark.parametrize('change,reason', [
+    ('missing_oa', 'invoice_original_native_identity_missing'),
+    ('partial', 'invoice_original_native_identity_invalid'),
+    ('malformed', 'invoice_original_native_identity_invalid'),
+    ('blank', 'invoice_original_native_identity_invalid'),
+    ('unlinked', 'invoice_original_native_identity_invalid'),
+    ('other_pdf', 'invoice_original_candidate_ambiguous'),
+    ('other_format', 'invoice_original_candidate_ambiguous'),
+    ('malformed_inventory', 'invoice_original_inventory_invalid'),
+    ('fileType', 'invoice_original_file_mapping_mismatch'),
+    ('pdf', 'invoice_original_file_mapping_mismatch'),
+    ('furl', 'invoice_original_file_mapping_mismatch'),
+])
+def test_official_page_pdf_requires_unambiguous_link_and_file_mapping(page_original, tmp_path, monkeypatch, change, reason):
+    state = page_original
+    if change == 'missing_oa':
+        state.detail.pop('oa')
+    elif change == 'partial':
+        state.detail['oa']['doc_id'] = '303'
+    elif change == 'malformed':
+        state.detail['oa']['img_id'] = []
+    elif change == 'blank':
+        state.detail['oa']['img_id'] = ''
+    elif change == 'unlinked':
+        config = {**CONFIG, 'flow_key': 'general_expense'}
+        state.client.config = config
+        monkeypatch.setattr(flow, 'load_all_configs', lambda: [config])
+        field = state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields'][0]
+        field.update(fieldName='fphm', fieldShowName='发票号码')
+    elif change in {'other_format', 'other_pdf'}:
+        state.detail['flist'].append({'id': '8002', 'type': 'pdf' if change == 'other_pdf' else 'ofd', 'del': 0})
+    elif change == 'malformed_inventory':
+        state.detail['flist'].append({'id': '8002', 'type': 'pdf', 'del': []})
+    else:
+        state.detail['modify_info'][change] = '8002'
+    material = collect_original(state, tmp_path)
+    invoice = material['invoice_evidence']['invoices'][0]
+    assert invoice['body_read_status'] == 'not_read'
+    assert invoice['original_binding_diagnostic']['reason'] == reason
+    assert material['resources'] == []
+    assert not any(route == '/invoiceApi/file/download' for route, _, _ in state.requests)
+
+
+@pytest.mark.parametrize('failure,code,cloud_reads', [
+    ('account', 'rpa_session_invalid', 0),
+    ('actor_after_download', 'rpa_session_invalid', 1),
+    ('http', 'attachment_access_denied', 1),
+    ('redirect', 'attachment_download_failed', 1),
+    ('partially_reported', 'attachment_content_incomplete', 1),
+    ('invalid_pdf', 'attachment_content_incomplete', 1),
+    ('changed_workflow', 'resource_ownership_untrusted', 1),
+    ('changed_source_field', 'resource_ownership_untrusted', 1),
+    ('changed_file', 'resource_ownership_untrusted', 1),
+    ('native_mapping_appears', 'resource_ownership_untrusted', 1),
+])
+def test_official_page_pdf_failure_cannot_prepare_an_invoice(page_original, tmp_path, failure, code, cloud_reads):
+    state = page_original
+
+    def source_changed():
+        if failure == 'actor_after_download':
+            state.actor = '88'
+        elif failure == 'changed_workflow':
+            state.workflow['workflowBaseInfo']['workflowId'] = '22222'
+        elif failure == 'changed_source_field':
+            fields = state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]['workflowRequestTableFields']
+            fields.insert(0, {'fieldName': 'unrelated', 'fieldShowValue': 'detail'})
+        elif failure == 'changed_file':
+            state.detail['flist'][0]['id'] = '8002'
+            state.detail['modify_info'].update(pdf='8002', furl='8002')
+        elif failure == 'native_mapping_appears':
+            state.detail['oa'] = {'doc_id': '303', 'img_id': '202'}
+
+    state.after_cloud_download = source_changed
+    if failure == 'account':
+        state.actor = '88'
+    elif failure in {'http', 'redirect', 'partially_reported'}:
+        state.cloud_failure = failure
+    elif failure == 'invalid_pdf':
+        state.cloud_pdf = b'{"status": "not a PDF"}'
+    with pytest.raises(RuntimeError, match=f'^{code}$'):
+        collect_original(state, tmp_path)
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
+    routes = [route for route, _, _ in state.requests]
+    assert routes.count('/invoiceApi/file/download') == cloud_reads
+    assert '/api/doc/detail/basicInfo' not in routes
+    assert '/weaver/weaver.file.FileDownload' not in routes
+
+
+def test_ordinary_attachment_cannot_claim_official_page_pdf_resource_id(page_original, tmp_path):
+    state = page_original
+    state.client.request_context = lambda _request_id: (state.workflow, [{
+        'id': 'invoice_cloud:9001:8001', 'name': 'ordinary.pdf',
+        'downloadUrl': 'https://api.mypiaojia.com/invoiceApi/file/download',
+    }])
+    with pytest.raises(RuntimeError, match='^attachment_resource_identity_conflict$'):
+        collect_original(state, tmp_path)
+    assert not any(route == '/invoiceApi/file/download' for route, _, _ in state.requests)
 
 
 @pytest.fixture(params=['jpg', 'png'])
@@ -590,6 +739,9 @@ def many_originals(request, original_transport, monkeypatch):
         def geturl(self):
             return self.url
 
+        def getcode(self):
+            return 200
+
     def open_request(request, **kwargs):
         path = urlsplit(request.full_url).path
         params = parse_qs(urlsplit(request.full_url).query)
@@ -620,6 +772,38 @@ def many_originals(request, original_transport, monkeypatch):
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     monkeypatch.setattr(original_source.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
     return state
+
+
+@pytest.mark.parametrize('many_originals', [3], indirect=True)
+def test_official_page_pdf_preserves_every_linked_row_and_original(many_originals, tmp_path):
+    state = many_originals
+    rows = state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords']
+    rows.append(deepcopy(rows[0]))
+    for index, (data_id, detail) in enumerate(state.details.items()):
+        if index < 2:
+            detail['oa'] = {} if index else {'doc_id': None, 'img_id': None}
+            detail['modify_info']['fileType'] = '2'
+        with fitz.open() as document:
+            document.new_page().insert_text((40, 40), f"Original invoice {detail['number']}")
+            state.cloud_bodies[data_id] = document.tobytes()
+    state.details['1000']['flist'][0]['id'] = '2002'
+    state.details['1000']['modify_info'].update(pdf='2002', furl='2002')
+    material = collect_original(state, tmp_path)
+    by_id = {resource['resource_id']: resource for resource in material['resources']}
+    invoices = material['invoice_evidence']['invoices']
+    assert set(by_id) == {'invoice_cloud:9000:2002', 'invoice_cloud:9001:8001', '2002'}
+    assert sorted(state.cloud_reads) == ['1000', '1001', '1002']
+    for invoice in invoices:
+        assert invoice['body_read_status'] == 'content_read'
+        source = by_id[invoice['files'][0]['resource_id']]
+        assert Path(source['local_readonly_path']).read_bytes() == state.cloud_bodies[invoice['data_id']]
+    refs = by_id['invoice_cloud:9000:2002']['source_references']
+    assert [(ref['owner_detail_id'], ref['source_field_path']) for ref in refs] == [
+        ('detail[0].row[0]', 'detail[0].row[0].field[0]'),
+        ('detail[0].row[3]', 'detail[0].row[3].field[0]'),
+    ]
+    assert by_id['invoice_cloud:9000:2002']['owner_detail_id'] is None
+
 
 @pytest.mark.parametrize('many_originals', [5], indirect=True)
 def test_collection_explains_each_official_original_gap_and_keeps_read_material(many_originals, tmp_path):

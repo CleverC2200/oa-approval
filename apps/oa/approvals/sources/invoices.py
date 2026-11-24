@@ -20,6 +20,7 @@ MAPPING_PATH = "/api/fna/invoiceLedger/getFidOrEcid"
 MAX_WORKERS = 4
 DETAIL_URL = "https://api.mypiaojia.com/invoiceApi/invoice/get"
 DETAIL_TIMEOUT_SEC = 15
+OFFICIAL_PAGE_PDF = "official_page_pdf"
 
 
 class InvoiceCloudClient:
@@ -66,17 +67,12 @@ def _invoice_refs(
     seen: dict[str, dict] = {}
     for field in fields:
         name = str(field.get("name") or "").strip()
-        if linked_detail_only and (
-            name != "关联发票"
-            or str(field.get("field_name") or "").strip() != "glfp"
-            or str(field.get("table") or "") != "detail_0"
-        ):
+        linked = (name == "关联发票"
+                  and str(field.get("field_name") or "").strip() == "glfp"
+                  and re.fullmatch(r"detail_\d+", str(field.get("table") or "")) is not None)
+        if linked_detail_only and (not linked or field["table"] != "detail_0"):
             continue
-        if not linked_detail_only and name != "发票号码" and not (
-            name == "关联发票"
-            and str(field.get("field_name") or "").strip() == "glfp"
-            and re.fullmatch(r"detail_\d+", str(field.get("table") or ""))
-        ):
+        if not linked_detail_only and name != "发票号码" and not linked:
             continue
         raw_value = str(field.get("raw_value") or "").strip()
         if name == "关联发票" and any(
@@ -93,15 +89,17 @@ def _invoice_refs(
             continue
         group = (tuple(data_ids), tuple(invoice_numbers))
         for data_id in data_ids:
+            path = str(field.get("path") or "")
             if data_id in seen:
-                path = str(field.get("path") or "")
                 if path and path not in seen[data_id]["source_field_paths"]:
                     seen[data_id]["source_field_paths"].append(path)
+                if linked and path and path not in seen[data_id]["_linked_field_paths"]:
+                    seen[data_id]["_linked_field_paths"].append(path)
                 if group not in seen[data_id]["_number_groups"]:
                     seen[data_id]["_number_groups"].append(group)
                 continue
             ref = {"data_id": data_id, "_number_groups": [group],
-                   "source_field_paths": [str(field.get("path") or "")]}
+                   "source_field_paths": [path], "_linked_field_paths": [path] if linked and path else []}
             seen[data_id] = ref
             refs.append(ref)
     return refs, invalid_invoice_numbers, has_misaligned_refs
@@ -188,7 +186,7 @@ def _bind_invoice_numbers(refs: List[dict], fids: List[str], details: List[dict]
             raise ValueError("invoice_number_group_mismatch")
     return [
         {"data_id": ref["data_id"], "invoice_no": numbers_by_id[ref["data_id"]],
-         "source_field_paths": ref["source_field_paths"]}
+         "source_field_paths": ref["source_field_paths"], "_linked_field_paths": ref["_linked_field_paths"]}
         for ref in refs
     ]
 
@@ -231,7 +229,7 @@ def _invoice_evidence(ref: dict, detail: dict) -> dict:
             record["size_bytes"] = size
         files.append(record)
     started = time.monotonic()
-    binding = _bind_original(data, ref["invoice_no"])
+    binding = _bind_original(data, ref)
     diagnostics = {}
     if isinstance(binding, dict):
         for record in files:
@@ -243,7 +241,8 @@ def _invoice_evidence(ref: dict, detail: dict) -> dict:
             "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
         }}
     return {
-        **ref, "read_status": "content_read", "fields": fields, "files": files,
+        **{key: value for key, value in ref.items() if key != "_linked_field_paths"},
+        "read_status": "content_read", "fields": fields, "files": files,
         "file_records_status": "present" if files else "not_provided",
         "body_read_status": "not_read", **diagnostics,
     }
@@ -364,9 +363,15 @@ def _positive_id(value: object) -> str:
     return text if re.fullmatch(r'[1-9][0-9]*', text) else ''
 
 
-def _bind_original(data: dict, invoice_number: str) -> dict | str:
+def original_resource_id(source: dict) -> str:
+    if source.get('representation') == OFFICIAL_PAGE_PDF:
+        return f"invoice_cloud:{source['cloud_record_id']}:{source['cloud_file_id']}"
+    return source['native_file_id']
+
+
+def _bind_original(data: dict, ref: dict) -> dict | str:
     record_id = _positive_id(data.get('id'))
-    if not record_id or str(data.get('number')) != invoice_number:
+    if not record_id or str(data.get('number')) != ref['invoice_no']:
         return 'invoice_original_record_identity_unverified'
     if data.get('fid') is not None and str(data['fid']) != record_id:
         return 'invoice_original_record_identity_mismatch'
@@ -383,6 +388,8 @@ def _bind_original(data: dict, invoice_number: str) -> dict | str:
         return 'invoice_original_not_provided'
     files = [item for item in inventory if isinstance(item, dict)
              and item.get('del', 0) in (0, '0')]
+    if isinstance(native, dict) and native.get('doc_id') is None and native.get('img_id') is None:
+        return _bind_official_page_pdf(inventory, files, modified, record_id, ref)
     active = [item for item in files if item.get('type') == 'pdf']
     if len(active) > 1 and isinstance(modified, dict) and str(modified.get('fileType')) == '2':
         reference = _positive_id(modified.get('pdf'))
@@ -427,3 +434,27 @@ def _bind_original(data: dict, invoice_number: str) -> dict | str:
     if file_type != 'pdf':
         source['file_type'] = file_type
     return source
+
+
+def _bind_official_page_pdf(inventory, files, modified, record_id, ref) -> dict | str:
+    if not _positive_id(ref['data_id']) or not ref['_linked_field_paths']:
+        return 'invoice_original_native_identity_invalid'
+    if any(not isinstance(item, dict) or type(item.get('del', 0)) not in (int, str)
+           or str(item.get('del', 0)) not in {'0', '1'} for item in inventory):
+        return 'invoice_original_inventory_invalid'
+    if len(files) > 1:
+        return 'invoice_original_candidate_ambiguous'
+    if not files or files[0].get('type') != 'pdf':
+        return 'invoice_original_candidate_missing'
+    cloud_file = _positive_id(files[0].get('id'))
+    if not cloud_file:
+        return 'invoice_original_cloud_file_identity_invalid'
+    if not isinstance(modified, dict):
+        return 'invoice_original_file_mapping_missing'
+    if (_positive_id(modified.get('fileType')) != '2'
+            or _positive_id(modified.get('pdf')) != cloud_file
+            or _positive_id(modified.get('furl')) != cloud_file):
+        return 'invoice_original_file_mapping_mismatch'
+    return {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
+            'representation': OFFICIAL_PAGE_PDF, 'oa_data_id': ref['data_id'],
+            'invoice_no': ref['invoice_no'], 'source_field_paths': ref['_linked_field_paths']}

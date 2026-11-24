@@ -9,7 +9,7 @@ import urllib.request
 
 from PIL import Image
 
-from apps.oa.approvals.sources import browser_session, native_documents
+from apps.oa.approvals.sources import browser_session, invoices, native_documents
 from apps.oa.approvals.sources.download_errors import (
     Downloaded,
     DownloadError,
@@ -23,7 +23,7 @@ from apps.oa.runtime import control, files
 
 
 _MAX_ORIGINAL_BYTES = 50 * 1024 * 1024
-_CLOUD_DOWNLOAD_URL = "https://api.mypiaojia.com/invoiceApi/file/download"
+CLOUD_DOWNLOAD_URL = "https://api.mypiaojia.com/invoiceApi/file/download"
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,10 +86,12 @@ class OriginalSources:
         return self._read_context(request_id)
 
     def _checked_resource(self, resource: dict) -> dict:
-        url = self._policy.attachments.download_url(
-            str(resource.get("downloadUrl") or resource.get("download_url") or ""),
-            allow_extra=False,
-        )
+        url = str(resource.get("downloadUrl") or resource.get("download_url") or "")
+        if resource.get("_invoice_original", {}).get("representation") == invoices.OFFICIAL_PAGE_PDF:
+            if url != CLOUD_DOWNLOAD_URL:
+                raise ValueError("resource_ownership_untrusted")
+        else:
+            url = self._policy.attachments.download_url(url, allow_extra=False)
         return dict(
             resource,
             downloadUrl=url,
@@ -112,6 +114,20 @@ class OriginalSources:
         source, _ = context.sources.get(str(checked.get("id") or ""), ({}, ""))
         if not source or source != checked.get("_invoice_original"):
             return False
+        if source.get("representation") == invoices.OFFICIAL_PAGE_PDF:
+            if (checked["downloadUrl"] != CLOUD_DOWNLOAD_URL
+                    or checked.get("_workflow_request_id") != source["request_id"]):
+                return False
+            try:
+                native_documents.verify_account(
+                    base_url=self._policy.attachments.oa_origin,
+                    cookie=checked["_ephemeral_cookie_header"], timeout_sec=timeout_sec,
+                )
+            except browser_session.RpaSessionError:
+                raise
+            except Exception:
+                return False
+            return True
         return native_documents.verify(
             checked,
             checked["downloadUrl"],
@@ -141,7 +157,8 @@ class OriginalSources:
     def _read(self, context, resource, *, dest_dir, timeout_sec) -> TransferOutcome:
         checked = self._checked_resource(resource)
         url = checked["downloadUrl"]
-        if checked.get('_invoice_original', {}).get('representation') == 'official_pdf':
+        representation = checked.get('_invoice_original', {}).get('representation')
+        if representation in {'official_pdf', invoices.OFFICIAL_PAGE_PDF}:
             try:
                 verified = self._verify(context, checked, timeout_sec=timeout_sec, initialize=True)
             except browser_session.RpaSessionError as error:
@@ -193,12 +210,10 @@ class OriginalSources:
         return first if isinstance(retried, Unavailable) else retried
 
     def _cloud(self, context, resource, *, dest, timeout_sec) -> TransferOutcome:
-        from apps.oa.approvals.sources import invoices
-
         request_id = str(resource.get("_workflow_request_id") or "")
-        native_file_id = str(resource.get("id") or "")
+        resource_id = str(resource.get("id") or "")
         try:
-            source, data_id = context.sources.get(native_file_id, ({}, ""))
+            source, data_id = context.sources.get(resource_id, ({}, ""))
             if not source or source != resource.get("_invoice_original"):
                 return Failed(
                     DownloadError(
@@ -228,7 +243,7 @@ class OriginalSources:
                 }
             )
             request = urllib.request.Request(
-                _CLOUD_DOWNLOAD_URL + "?" + query,
+                CLOUD_DOWNLOAD_URL + "?" + query,
                 headers={
                     "User-Agent": "Mozilla/5.0",
                     "Referer": "https://inc.mypiaojia.com/",
@@ -239,6 +254,15 @@ class OriginalSources:
                 with urllib.request.build_opener(_NoCloudRedirect()).open(
                     request, timeout=max(1, timeout_sec)
                 ) as response:
+                    if response.geturl() != request.full_url:
+                        return _cloud_download_failure(
+                            "attachment_download_failed", "cloud_unexpected_url", resource_id, started)
+                    if source.get("representation") == invoices.OFFICIAL_PAGE_PDF:
+                        status = response.getcode()
+                        if status != 200 or response.headers.get("Content-Range") is not None:
+                            return _cloud_download_failure(
+                                "attachment_content_incomplete", "cloud_incomplete_response",
+                                resource_id, started, http_status=status)
                     length = response.headers.get("Content-Length")
                     if length is not None and (
                         not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES
@@ -246,7 +270,7 @@ class OriginalSources:
                         reason = ('cloud_content_length_invalid' if not length.isdecimal()
                                   else 'cloud_content_too_large')
                         return _cloud_download_failure(
-                            "attachment_content_incomplete", reason, native_file_id, started)
+                            "attachment_content_incomplete", reason, resource_id, started)
                     body = response.read(_MAX_ORIGINAL_BYTES + 1)
                     reason = ''
                     if len(body) > _MAX_ORIGINAL_BYTES:
@@ -257,15 +281,16 @@ class OriginalSources:
                         reason = 'cloud_length_mismatch'
                     if reason:
                         return _cloud_download_failure(
-                            "attachment_content_incomplete", reason, native_file_id, started)
+                            "attachment_content_incomplete", reason, resource_id, started)
             except urllib.error.HTTPError as error:
                 code = "attachment_access_denied" if error.code in (401, 403) else "attachment_download_failed"
-                return _cloud_download_failure(code, code, native_file_id, started, http_status=error.code)
+                error.close()
+                return _cloud_download_failure(code, code, resource_id, started, http_status=error.code)
             except (urllib.error.URLError, TimeoutError) as error:
                 code = "attachment_download_failed"
                 cause = error.reason if isinstance(error, urllib.error.URLError) else error
                 exception_type = "TimeoutError" if isinstance(cause, TimeoutError) else type(error).__name__
-                return _cloud_download_failure(code, code, native_file_id, started, exception_type=exception_type)
+                return _cloud_download_failure(code, code, resource_id, started, exception_type=exception_type)
             if not self._verify(context, resource, timeout_sec=timeout_sec):
                 return Failed(
                     DownloadError(
@@ -279,7 +304,7 @@ class OriginalSources:
                 body,
                 source={
                     "request_id": request_id,
-                    "resource_id": native_file_id,
+                    "resource_id": resource_id,
                     "kind": "invoice_original",
                 },
             )

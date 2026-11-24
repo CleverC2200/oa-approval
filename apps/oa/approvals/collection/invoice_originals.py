@@ -3,12 +3,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 import re
 import time
-from apps.oa.approvals.sources.invoices import _positive_id
+from apps.oa.approvals import flows as flow
+from apps.oa.approvals.sources.invoices import OFFICIAL_PAGE_PDF, _positive_id, original_resource_id
 
 from apps.oa.approvals.sources import native_documents
 from apps.oa.approvals.sources import browser_session as rpa_session
 from apps.oa.materials.prepared import PreparedMaterial, PreparationFailure, read_prepared
-from apps.oa.approvals.sources.originals import OriginalContext
+from apps.oa.approvals.sources.originals import CLOUD_DOWNLOAD_URL, OriginalContext
 
 
 _FINANCE_FLOWS = {
@@ -25,16 +26,16 @@ def _binding_failure(invoice: dict, index: int) -> dict | None:
 
 def collection_diagnostics(evidence: dict, failures: list[dict]) -> list[dict]:
     diagnostics = []
-    by_native_id: dict[str, list[str]] = {}
+    by_resource_id: dict[str, list[str]] = {}
     for index, invoice in enumerate(evidence.get('invoices', [])):
         if binding := _binding_failure(invoice, index):
             diagnostics.append(binding)
         for file in invoice.get('files', []):
             if source := file.get('original_source'):
-                by_native_id.setdefault(source['native_file_id'], []).append(f'invoice_evidence.invoices[{index}]')
+                by_resource_id.setdefault(original_resource_id(source), []).append(f'invoice_evidence.invoices[{index}]')
     for failure in failures:
         file_id = failure.get('file_ref') or failure.get('attachment_ref')
-        paths = by_native_id.get(file_id)
+        paths = by_resource_id.get(file_id)
         if not paths:
             diagnostics.append(failure)
             continue
@@ -89,14 +90,30 @@ def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict
     identities = {}
     for invoice, file in originals:
         source = file['original_source']
-        file_id = source['native_file_id']
-        identity = (source['cloud_record_id'], source['cloud_file_id'], source['document_id'])
+        file_id = original_resource_id(source)
+        page_pdf = source.get('representation') == OFFICIAL_PAGE_PDF
+        identity = source if page_pdf else (source['cloud_record_id'], source['cloud_file_id'], source['document_id'])
         if file_id in identities and identities[file_id] != identity:
             raise RuntimeError('resource_ownership_untrusted')
         identities[file_id] = identity
-        paths = invoice.get('source_field_paths') or []
+        paths = source['source_field_paths'] if page_pdf else invoice.get('source_field_paths') or []
         if not paths:
             raise RuntimeError('resource_ownership_untrusted')
+        if page_pdf:
+            references = _page_references(source)
+            owners = {reference['owner_detail_id'] for reference in references}
+            result.append({
+                'id': file_id, 'name': f"invoice-original-{source['cloud_file_id']}.pdf",
+                'downloadUrl': CLOUD_DOWNLOAD_URL, 'source': 'invoice_cloud',
+                'source_request_id': request_id,
+                '_trusted_owner_detail_id': next(iter(owners)) if len(owners) == 1 else None,
+                '_trusted_source_field_path': paths[0] if len(paths) == 1 else '',
+                '_trusted_source_field_name': '关联发票原件',
+                '_trusted_source_references': references,
+                '_invoice_original': dict(source, request_id=request_id, workflow_key=workflow_key,
+                                          **flow.workflow_identity(workflow)),
+            })
+            continue
         result.append({
             'id': file_id, 'name': f'invoice-original-{file_id}.{source.get("file_type", "pdf")}',
             'downloadUrl': base_url + '/weaver/weaver.file.FileDownload?fileid=' + file_id,
@@ -107,9 +124,16 @@ def resources(request_id: str, workflow: dict, workflow_key: str, evidence: dict
     return result
 
 
+def _page_references(source: dict) -> list[dict]:
+    return [
+        {'source_field_path': path, 'source_field_name': '关联发票原件',
+         'owner_detail_id': path.rpartition('.field[')[0]}
+        for path in source['source_field_paths']
+    ]
+
+
 def read_original_context(request_id: str, *, source_policy) -> OriginalContext:
     from apps.oa.approvals.sources import oa as api
-    from apps.oa.approvals import flows as flow
     from apps.oa.approvals.sources import invoices as invoice_buyers
 
     client = api.build_api({}, source_policy=source_policy)
@@ -126,17 +150,17 @@ def read_original_context(request_id: str, *, source_policy) -> OriginalContext:
     evidence = result.get('invoice_evidence') or {}
     trusted = resources(request_id, workflow, workflow_key, evidence,
                         base_url=source_policy.attachments.oa_origin)
-    candidates = {item['id']: [] for item in trusted}
+    sources = {item['id']: item['_invoice_original'] for item in trusted}
+    candidates = {resource_id: [] for resource_id in sources}
     for invoice in evidence.get('invoices', []):
         for file in invoice['files']:
-            source = file.get('original_source') or {}
-            native_file_id = source.get('native_file_id')
-            if native_file_id in candidates:
-                candidates[native_file_id].append((source, _positive_id(invoice.get('data_id'))))
+            if source := file.get('original_source'):
+                resource_id = original_resource_id(source)
+                candidates[resource_id].append((source, _positive_id(invoice.get('data_id'))))
     return OriginalContext(client, {
-        native_file_id: sources[0]
-        for native_file_id, sources in candidates.items()
-        if sources and all(source == sources[0][0] and data_id for source, data_id in sources)
+        resource_id: (sources[resource_id], bindings[0][1])
+        for resource_id, bindings in candidates.items()
+        if bindings and all(source == bindings[0][0] and data_id for source, data_id in bindings)
     })
 
 
@@ -162,7 +186,7 @@ def initialize_workflow_document(resource: dict, url: str, *, timeout_sec: int, 
 
 
 def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial) -> dict:
-    resource_id = source['native_file_id']
+    resource_id = original_resource_id(source)
     resource = [item for item in resource_rows if item.get('resource_id') == resource_id]
     coverage = prepared.coverage(resource_id)
     file_type = source.get('file_type', 'pdf')
@@ -177,6 +201,10 @@ def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial)
             or not coverage.direct_image_count or page_count != coverage.direct_image_count
             or coverage.declared_image_count != coverage.direct_image_count
             or coverage.direct_source_sha256 is None):
+        raise RuntimeError('attachment_content_incomplete')
+    if source.get('representation') == OFFICIAL_PAGE_PDF and (
+            resource[0].get('source_system') != 'invoice_cloud'
+            or resource[0].get('source_references') != _page_references(source)):
         raise RuntimeError('attachment_content_incomplete')
     return {'resource_id': resource_id, 'source_content_sha256': coverage.direct_source_sha256,
             'page_count': coverage.direct_image_count, 'body_read_status': 'content_read'}
@@ -227,6 +255,6 @@ def body_coverage(invoice: dict, resource_rows: list, prepared: dict) -> str:
 
 def field_body_read(field: dict, evidence: dict) -> bool:
     documents = set(re.findall(r'\btoDocument\s*\(\s*([1-9][0-9]*)\s*\)', field['attachment_html']))
-    read = {file['original_source']['document_id'] for invoice in evidence.get('invoices', [])
+    read = {file['original_source'].get('document_id') for invoice in evidence.get('invoices', [])
             for file in invoice.get('files', []) if file.get('body_read_status') == 'content_read' and file.get('original_source')}
     return bool(documents) and documents <= read
