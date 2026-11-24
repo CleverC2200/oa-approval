@@ -10,6 +10,7 @@ import sys
 
 
 _MAX_SAP_ROWS = 1_000_000
+_PREACCRUAL_DOCUMENTS_PER_REQUEST = 400
 
 def doris(payload):
     spec = importlib.util.spec_from_file_location('dealer_balance_connector', payload['connection']['doris_connector'])
@@ -180,8 +181,8 @@ def sap(payload):
             seen, target, batches = set(), [], []
             for year, docs in groups.items():
                 docs = sorted(docs)
-                for start in range(0, len(docs), 100):
-                    batch = docs[start:start + 100]
+                for start in range(0, len(docs), _PREACCRUAL_DOCUMENTS_PER_REQUEST):
+                    batch = docs[start:start + _PREACCRUAL_DOCUMENTS_PER_REQUEST]
                     options = [f"BUKRS = '{company}' AND GJAHR = '{year}'", f"AND HKONT = '{account}'", 'AND BELNR IN (']
                     for n in range(0, len(batch), 4):
                         options.append(','.join("'" + v + "'" for v in batch[n:n + 4]) + (',' if n + 4 < len(batch) else ''))

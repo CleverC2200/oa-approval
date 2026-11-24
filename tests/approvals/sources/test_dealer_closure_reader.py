@@ -1,3 +1,4 @@
+import re
 import sys
 from types import SimpleNamespace
 
@@ -48,6 +49,49 @@ def test_reader_preserves_raw_sign_window_and_closes_readonly_connection(monkeyp
     assert connection.closed
     assert {f for f, _ in connection.calls} == {'RFC_SYSTEM_INFO', 'RFC_READ_TABLE', 'RPY_PROGRAM_READ'}
     assert all(p['ROWCOUNT'] == 10000 for f, p in connection.calls if f == 'RFC_READ_TABLE')
+
+
+def test_preaccrual_batches_cover_document_keys_and_keep_customer_details(monkeypatch):
+    connection = SapRecording()
+    account = '0000123456'
+    keys = [('2025', f'{document:010d}') for document in range(1, 402)] + [('2026', '0000000001')]
+    expected = {keys[index] for index in (0, 399, 400, 401)}
+    connection.tables['BSIS'] = [
+        {'BUKRS': 'D001', 'HKONT': account, 'GJAHR': year, 'BELNR': document, 'BUZEI': '001',
+         'DMBTR': '12.50', 'SHKZG': 'H'} for year, document in keys
+    ]
+    lines = {(row['GJAHR'], row['BELNR']): {
+        **row, 'XREF1': '99000001' if (row['GJAHR'], row['BELNR']) in expected else '99000002',
+    } for row in connection.tables['BSIS']}
+    reference_batches = []
+    original = connection.call
+
+    def call(function, **params):
+        if function == 'RFC_READ_TABLE' and params['QUERY_TABLE'] == 'BSEG':
+            options = ' '.join(row['TEXT'] for row in params['OPTIONS'])
+            assert "BUKRS = 'D001'" in options
+            year = re.search(r"GJAHR = '([0-9]{4})'", options)[1]
+            if 'BELNR IN (' in options:
+                assert f"HKONT = '{account}'" in options
+                documents = re.findall(r"'([0-9]{10})'", options.partition('BELNR IN (')[2])
+                reference_batches.append((year, len(documents)))
+            else:
+                assert "BUZEI = '001'" in options
+                documents = [re.search(r"BELNR = '([0-9]{10})'", options)[1]]
+            connection.tables['BSEG'] = [lines[(year, document)] for document in documents]
+        return original(function, **params)
+
+    connection.call = call
+    monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
+    evidence, = reader.sap({**payload(), 'preaccrual_accounts': [account]})['preaccrual']
+
+    assert evidence['complete'] and evidence['index_rows'] == evidence['index_keys_seen'] == 402
+    assert {(row['GJAHR'], row['BELNR']) for row in evidence['target_rows']} == expected
+    details = [row for result in evidence['target_details'] for row in result['rows']]
+    assert {(row['GJAHR'], row['BELNR'], row['DMBTR']) for row in details} == {
+        (year, document, '12.50') for year, document in expected
+    }
+    assert reference_batches == [('2025', 400), ('2025', 1), ('2026', 1)]
 
 
 def test_company_ledger_is_scoped_and_active_contract_amounts_include_following_orders(monkeypatch):
