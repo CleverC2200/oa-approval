@@ -72,7 +72,9 @@ def collect_attachments(tmp_path, monkeypatch):
                     'requestId': request_id,
                     'workflowBaseInfo': {'workflowId': '195021', 'workflowName': '通用费用报销申请流程'},
                     'workflowDetailTableInfos': [{'workflowRequestTableRecords': [
-                        {'workflowRequestTableFields': [{'fieldShowName': '附件', 'filedHtmlShow': field}]}
+                        {'workflowRequestTableFields': [
+                            {'fieldShowName': '附件', **(field if isinstance(field, dict) else {'filedHtmlShow': field})},
+                        ]}
                         for field in detail_fields
                     ]}],
                     'workflowRequestLogs': [{'annexDocHtmls': log} for log in logs],
@@ -190,6 +192,33 @@ def test_collection_does_not_choose_an_owner_between_distinct_detail_references(
     assert [source['owner_detail_id'] for source in resource['source_references']] == [
         'detail[0].row[0]', 'detail[0].row[1]', None,
     ]
+
+
+@pytest.mark.parametrize('listed', [False, True], ids=['discovered', 'already-listed'])
+def test_collection_preserves_verified_travel_field_references(collect_attachments, workbook_bytes, listed):
+    collect, calls = collect_attachments
+    url = 'https://trip.example.test/opera/getFile/101/recorded.xlsx'
+    alias = 'https://trip.example.test/opera/share/open/101/recorded.xlsx'
+    raw_id = 'listed-101' if listed else 'field_detail_0_0_1'
+    material = collect(
+        detail_fields=[
+            {'fieldValue': url, 'fieldShowValue': url}, {'fieldValue': url}, {'fieldValue': alias},
+            {'fieldValue': url.replace('trip.example.test', 'external.invalid')},
+        ], logs=[], originals={raw_id: workbook_bytes},
+        listed=[{'id': raw_id, 'name': 'recorded.xlsx', 'downloadUrl': url,
+                 'allowExtraDownloadHost': True}] if listed else [],
+    )
+
+    assert calls == [('recorded', raw_id)]
+    resource, = material['resources']
+    assert (resource['resource_id'], resource['source_field_path'], resource['owner_detail_id']) == (
+        (raw_id, '', None) if listed else ('trip_file:101', 'detail[0].row[0].field[0]', 'detail[0].row[0]')
+    )
+    assert resource['source_references'] == [
+        {'source_field_path': f'detail[0].row[{row}].field[0]', 'source_field_name': '附件',
+         'owner_detail_id': f'detail[0].row[{row}]'} for row in range(3)
+    ]
+    assert Path(resource['local_readonly_path']).read_bytes() == workbook_bytes
 
 
 def test_collection_obtains_original_and_authority_for_each_case(collect_attachments, workbook_bytes):

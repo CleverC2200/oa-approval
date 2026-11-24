@@ -420,12 +420,7 @@ def _merge_resources(
             if weaker_discovery and trip_id and not owner:
                 return
             raise RuntimeError("resource_ownership_untrusted")
-        references = list(evidence_packet.source_references(item))
-        for reference in evidence_packet.source_references(resource):
-            if reference not in references:
-                references.append(reference)
-        if references:
-            item["_trusted_source_references"] = references
+        evidence_packet.merge_source_references(item, resource)
 
     for resource in form_resources:
         add(resource, weaker_discovery=False)
