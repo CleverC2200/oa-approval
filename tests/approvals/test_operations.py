@@ -3,8 +3,10 @@ from tests.approvals.review_fixtures import completed_review, recognition_report
 
 from tests.approvals.source_fakes import POLICY
 from datetime import datetime, timezone
+from functools import partial
 import json
 from pathlib import Path
+import sqlite3
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -288,20 +290,64 @@ def test_plain_collection_error_is_diagnosable_through_public_show(tmp_path):
     assert api.posts == []
 
 
-def test_collect_preserves_material_but_stops_before_review_with_missing_original(tmp_path):
-    app, api = service(tmp_path)
+def test_collect_preserves_material_but_stops_before_review_with_missing_original(tmp_path, monkeypatch):
+    from apps.oa.approvals.client import query
+
+    observe_commit = None
+
+    class ObservedConnection(sqlite3.Connection):
+        def __exit__(self, exc_type, exc, traceback):
+            committing = self.in_transaction and exc_type is None
+            result = super().__exit__(exc_type, exc, traceback)
+            if committing and observe_commit is not None:
+                observe_commit()
+            return result
+
+    with monkeypatch.context() as patch:
+        patch.setattr(sqlite3, 'connect', partial(sqlite3.connect, factory=ObservedConnection))
+        app, api = service(tmp_path)
+
     def incomplete(request_id, **kwargs):
         material = collect(request_id, **kwargs)
-        material['invoice_evidence'] = {'invoices': [{'files': [{'media_type': 'png', 'body_read_status': 'not_read'}]}]}
+        material['invoice_evidence'] = {'invoices': [
+            {'body_read_status': 'not_read', 'files': [{'media_type': 'png', 'body_read_status': 'not_read'}]},
+        ]}
         return material
+
     app.collector = incomplete
     run = app.pending()['run_id']
-    with pytest.raises(RuntimeError, match='invoice_original_coverage_incomplete'):
-        collect_for_review(app, run, agent_id='agent-a', expected_task_id=1, agent_workflow_key='travel_expense')
-    details = app.inspect(1)
-    assert details['task']['status'] == 'failed' and Path(details['task']['material_file']).is_file()
+    observer = Approval(tmp_path)
+    snapshots = []
+
+    def observe_commit():
+        status = query(tmp_path, 'status', run_id=run)['tasks'][0]['status']
+        dispatch = observer.dispatch_review(run, expected_task_id=1, agent_id='agent-a',
+                                            agent_workflow_key='travel_expense')
+        snapshots.append((status, dispatch['status'], dispatch.get('reason')))
+
+    try:
+        with pytest.raises(RuntimeError, match='invoice_original_coverage_incomplete'):
+            app.collect(run, expected_task_id=1)
+    finally:
+        observer.store.connection.close()
+        app.store.connection.close()
+    assert snapshots
+    assert set(snapshots) == {
+        ('preparing', 'waiting', 'materials_not_ready'),
+        ('failed', 'waiting', 'materials_not_ready'),
+    }
+    details = query(tmp_path, 'show', task_id=1)
+    assert details['task']['status'] == 'failed' and details['task']['failure_count'] == 1
+    assert details['task']['error'] == 'invoice_original_coverage_incomplete'
+    assert details['task']['agent_id'] is None
+    assert Path(details['task']['material_file']).is_file()
+    original, = details['attachments']
+    assert Path(original['path']).read_text() == '原件：100.00'
     assert details['reviews'] == [] and details['submissions'] == []
-    assert details['collection_failure']['diagnostics'][0]['source_path'] == 'invoice_evidence.invoices[0]'
+    assert details['collection_failure']['diagnostics'] == [{
+        'stage': 'invoice_original_coverage', 'reason': 'required_original_unread',
+        'source_path': 'invoice_evidence.invoices[0]',
+    }]
     assert api.posts == []
 
 

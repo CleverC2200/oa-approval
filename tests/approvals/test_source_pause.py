@@ -11,6 +11,8 @@ from apps.oa.approvals.operations import Approval
 from apps.oa.approvals.sources import invoice_titles
 from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 from tests.approvals.collection.test_case import FLOW_CONFIGS, RecordedOaApi
+from tests.approvals.collection.test_invoice_coverage import cloud_http
+from tests.approvals.invoice_fakes import InvoiceApi, linked_field
 from tests.approvals.invoice_title_fakes import InvoiceTitleTransport, Response
 from tests.approvals.source_fakes import POLICY
 
@@ -35,7 +37,6 @@ def source_pause(tmp_path, monkeypatch):
             return RecordedOaApi(config['workflow_id'], config['workflow_name']).request_context(request_id)
 
     monkeypatch.setattr(store, 'now', lambda: clock[0].isoformat())
-    monkeypatch.setattr(case, '_authority_facts', lambda **_kwargs: [])
     monkeypatch.setattr(case, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
     transport = InvoiceTitleTransport()
 
@@ -127,6 +128,40 @@ def test_single_bad_response_does_not_pause_hourly_collection(source_pause):
     report = query(app.root, 'status', view='batch')
     assert 'source_pause' not in report and report['next_candidate']['id'] == 2
     assert collected == ['1'] and sum(request.data is None for request in requests) == 2
+
+
+def test_hourly_source_recovery_with_missing_invoice_original_keeps_case_isolated(source_pause, cloud_http, monkeypatch):
+    app, rows, collected, clock, requests, _failed_reads = source_pause
+    pending_rows(rows)
+    recorded_context = app.api.request_context
+
+    def request_context(request_id):
+        workflow, resources = recorded_context(request_id)
+        if request_id == '1':
+            detail = workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords'][0]
+            detail['workflowRequestTableFields'].append(linked_field())
+        return workflow, resources
+
+    monkeypatch.setattr(app.api, 'request_context', request_context)
+    monkeypatch.setattr(app.api, 'get', InvoiceApi().get, raising=False)
+    run = app.pending(batch_size=2, hourly=True)['run_id']
+    assert app.collect(run, expected_task_id=1)['reason'] == 'source_unavailable'
+
+    clock[0] += timedelta(minutes=2)
+    with pytest.raises(case.CollectionFailure, match='invoice_original_coverage_incomplete') as failure:
+        app.collect(run, expected_task_id=1)
+    snapshot = query(app.root, 'status', run_id=run, view='batch')
+    assert snapshot['source_pause']['recovered_at'] == clock[0].isoformat()
+    assert snapshot['next_candidate']['id'] == 2
+    isolated, = snapshot['isolated_failures']['items']
+    assert isolated['task_id'] == 1 and isolated['reason'] == 'invoice_original_coverage_incomplete'
+    assert isolated['evidence_file'] == failure.value.diagnostics_file
+    failed = query(app.root, 'show', task_id=1)['task']
+    material = json.loads(Path(failed['material_file']).read_text())
+    assert material['invoice_title_reference']['status'] == 'ready'
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'not_read'
+    assert app.collect(run, expected_task_id=2)['status'] == 'prepared'
+    assert collected == ['1', '1', '2'] and sum(request.data is None for request in requests) == 4
 
 
 def test_unreserved_source_waiting_close_requires_hourly_recovery_evidence(source_pause):
