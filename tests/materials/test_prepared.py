@@ -11,8 +11,11 @@ def test_preparation_failure_identifies_the_failed_resource(tmp_path):
     source.write_bytes(b'not a workbook')
     with pytest.raises(RuntimeError, match='attachment_content_incomplete') as captured:
         prepare_materials([{'resource_id': 'workbook', 'path': str(source)}], out_dir=tmp_path / 'prepared')
-    assert captured.value.diagnostics == [{'stage': 'preparation', 'reason': 'spreadsheet_failed',
-                                          'attachment_ref': 'workbook', 'exception_type': 'BadZipFile'}]
+    diagnostic, = captured.value.diagnostics
+    elapsed_ms = diagnostic.pop('elapsed_ms')
+    assert elapsed_ms >= 0
+    assert diagnostic == {'stage': 'preparation', 'reason': 'spreadsheet_failed',
+                          'attachment_ref': 'workbook', 'exception_type': 'BadZipFile'}
 
 
 def test_prepared_projection_preserves_identity_without_sharing_mutable_records(tmp_path):

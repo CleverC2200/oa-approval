@@ -170,8 +170,10 @@ def test_worker_retains_safe_source_failure_diagnostics(monkeypatch):
     with pytest.raises(CollectionFailure) as captured:
         source._worker('sap', {}, {'sap_python': 'synthetic-python', 'sap_sdk': '/synthetic/sdk',
                                   'sap_user': 'synthetic-user', 'sap_keychain_service': 'synthetic-service'})
-    assert captured.value.diagnostics == [{'stage': 'sap_BSID',
-        'reason': 'dealer_closure_sap_rows_truncated', 'exception_type': 'RuntimeError'}]
+    diagnostic, = captured.value.diagnostics
+    assert diagnostic.pop('elapsed_ms') >= 0
+    assert diagnostic == {'stage': 'sap_BSID',
+        'reason': 'dealer_closure_sap_rows_truncated', 'exception_type': 'RuntimeError'}
 
 
 @pytest.mark.parametrize('rows', [[{'remark': '历史意见', 'remark_length': 9}], [{}] * 1001])

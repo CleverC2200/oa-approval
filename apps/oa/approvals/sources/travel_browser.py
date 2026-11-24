@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from apps.oa.runtime import collection_budget
 from contextlib import ExitStack, contextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import html
 from html.parser import HTMLParser
 import os
@@ -444,6 +444,7 @@ class _CandidateSession:
         self.capture = _CandidateCapture(policy)
         self.page.on("response", self.capture.observe)
         self.stage = "navigation"
+        self.hotel_details = []
         self.expected_marker = expected_marker
 
     def __enter__(self):
@@ -476,26 +477,43 @@ class _CandidateSession:
             initial_text = _read_stable_body_text(
                 self.page, timeout_sec=max(1, int(self.deadline - time.monotonic()))
             )
-            details = travel_hotel.read_details(
-                self.context.request,
-                self.capture.hotel_orders,
-                origin=self.policy.travel_origin,
-                timeout_sec=max(0.5, self.deadline - time.monotonic()),
-            )
+            self._read_hotel_details()
             self.stage = "attachment_scan"
             snapshot = self._read_attachment_snapshot(
                 timeout_sec=max(0.5, self.deadline - time.monotonic())
             )
-            return self._observation(initial_text, details, snapshot)
+            return self._observation(initial_text, snapshot)
         except Exception as error:
             from playwright.sync_api import TimeoutError as BrowserTimeout
 
-            return CandidateObservation.failure(
-                self.stage, "browser_deadline" if isinstance(error, BrowserTimeout) else f"{self.stage}_failed",
-                headless=self.headless, error=error
+            failed = CandidateObservation.failure(
+                self.stage, "browser_deadline" if isinstance(error, BrowserTimeout)
+                else f"{self.stage}_failed", headless=self.headless, error=error,
             )
+            return replace(failed, diagnostics=(*failed.diagnostics, *self.hotel_diagnostics()))
 
-    def _observation(self, initial_text, details, snapshot):
+    def _read_hotel_details(self):
+        self.stage = "hotel_detail"
+        browser = self._hotel_browser()
+        for index, detail in enumerate(travel_hotel.read_details(
+            self.context.request, self.capture.hotel_orders,
+            origin=self.policy.travel_origin,
+            timeout_sec=max(0.5, self.deadline - time.monotonic()),
+        )):
+            self.hotel_details.append(detail)
+            collection_budget.record_read({
+                "scope": "hotel_order", "status": detail["read_status"],
+                "diagnostics": [travel_hotel.detail_diagnostic(detail, index, browser)],
+            })
+
+    def _hotel_browser(self):
+        return "headless" if self.headless else "visible"
+
+    def hotel_diagnostics(self):
+        return tuple(travel_hotel.detail_diagnostic(detail, index, self._hotel_browser())
+                     for index, detail in enumerate(self.hotel_details))
+
+    def _observation(self, initial_text, snapshot):
         invoices = travel_invoices.read_invoices(
             self.context.request, self.capture.expenses,
             marker=self.expected_marker,
@@ -537,7 +555,7 @@ class _CandidateSession:
             tuple(resources),
             status,
             tuple(self.capture.inventory),
-            tuple(details),
+            tuple(self.hotel_details),
             mode,
             tuple(({**item, "browser": mode} for item in self.capture.diagnostics)),
             order_invoices=tuple(invoices),
@@ -771,7 +789,9 @@ class _BrowserAttempt:
     def _checkpoint(self, status, *, scope="attempt"):
         observations = []
         for item in self.results:
-            record = asdict(item)
+            assessment = item.assess(expected_marker=self.expected_marker,
+                expected_resource_count=self.expected_resource_count)
+            record = asdict(item if assessment.attempt_complete else replace(item, hotel_details=()))
             record['download_resource_count'] = len(record.pop('download_targets'))
             observations.append(_persistent_read_value(record))
         collection_budget.record_read({"status": status, "scope": scope, "observations": observations})
@@ -798,7 +818,16 @@ class _BrowserAttempt:
                 expected_resource_count=self.expected_resource_count,
                 expected_marker=self.expected_marker,
             ) as candidate:
-                observation = candidate.read()
+                try:
+                    observation = candidate.read()
+                except _TravelReadDeadline as error:
+                    failed = CandidateObservation.failure(
+                        "browser", "browser_deadline", headless=self.headless, error=error,
+                    )
+                    self.results.append(replace(failed,
+                        diagnostics=(*failed.diagnostics, *candidate.hotel_diagnostics())))
+                    self._checkpoint("interrupted", scope="candidate")
+                    break
                 self.results.append(observation)
                 assessment = observation.assess(expected_marker=self.expected_marker,
                     expected_resource_count=self.expected_resource_count)

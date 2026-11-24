@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import re
+import time
 from apps.oa.approvals.sources.invoices import _positive_id
 
 from apps.oa.approvals.sources import native_documents
 from apps.oa.approvals.sources import browser_session as rpa_session
-from apps.oa.materials.prepared import PreparedMaterial, read_prepared
+from apps.oa.materials.prepared import PreparedMaterial, PreparationFailure, read_prepared
 from apps.oa.approvals.sources.originals import OriginalContext
 
 
@@ -13,6 +15,47 @@ _FINANCE_FLOWS = {
     'travel_expense', 'business_entertainment', 'business_support_fee',
     'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense',
 }
+
+
+def _binding_failure(invoice: dict, index: int) -> dict | None:
+    if binding := invoice.get('original_binding_diagnostic'):
+        return {**binding, 'source': 'invoice_cloud', 'source_path': f'invoice_evidence.invoices[{index}]'}
+    return None
+
+
+def collection_diagnostics(evidence: dict, failures: list[dict]) -> list[dict]:
+    diagnostics = []
+    by_native_id: dict[str, list[str]] = {}
+    for index, invoice in enumerate(evidence.get('invoices', [])):
+        if binding := _binding_failure(invoice, index):
+            diagnostics.append(binding)
+        for file in invoice.get('files', []):
+            if source := file.get('original_source'):
+                by_native_id.setdefault(source['native_file_id'], []).append(f'invoice_evidence.invoices[{index}]')
+    for failure in failures:
+        file_id = failure.get('file_ref') or failure.get('attachment_ref')
+        paths = by_native_id.get(file_id)
+        if not paths:
+            diagnostics.append(failure)
+            continue
+        stage = 'invoice_original_preparation' if failure['stage'] == 'preparation' else failure['stage']
+        safe = {key: failure[key] for key in ('reason', 'elapsed_ms', 'http_status', 'exception_type') if key in failure}
+        diagnostics.extend({**safe, 'stage': stage, 'source': failure.get('source', 'invoice_original'),
+                            'source_path': path} for path in paths)
+    return diagnostics
+
+
+@contextmanager
+def preserve_collection_diagnostics(evidence: dict, stage: str):
+    try:
+        yield
+    except Exception as error:
+        if evidence.get('invoices'):
+            failures = getattr(error, 'diagnostics', None) or [
+                {'stage': stage, 'reason': f'{stage}_exception', 'exception_type': type(error).__name__},
+            ]
+            error.diagnostics = collection_diagnostics(evidence, list(failures))
+        raise
 
 
 def readiness_diagnostics(material: dict) -> list[dict]:
@@ -24,8 +67,11 @@ def readiness_diagnostics(material: dict) -> list[dict]:
                 not in {'content_read', 'partial_read'}
                 or not any(file.get('original_source') and file.get('body_read_status') == 'content_read'
                            for file in invoice.get('files', []))):
+            path = f'invoice_evidence.invoices[{index}]'
             result.append({'stage': 'invoice_original_coverage', 'reason': 'required_original_unread',
-                           'source_path': f'invoice_evidence.invoices[{index}]'})
+                           'source_path': path})
+            if binding := _binding_failure(invoice, index):
+                result.append(binding)
     return result
 
 
@@ -137,11 +183,19 @@ def prepared_body(source: dict, resource_rows: list, prepared: PreparedMaterial)
 
 
 def bind_prepared_bodies(evidence: dict, resource_rows: list, prepared: PreparedMaterial) -> None:
-    for invoice in evidence.get('invoices', []):
+    for index, invoice in enumerate(evidence.get('invoices', [])):
         files = invoice.get('files') or []
         for file in files:
-            if file.get('original_source'):
-                file.update(prepared_body(file['original_source'], resource_rows, prepared))
+            if source := file.get('original_source'):
+                started = time.monotonic()
+                try:
+                    file.update(prepared_body(source, resource_rows, prepared))
+                except RuntimeError as error:
+                    raise PreparationFailure([{
+                        'stage': 'invoice_original_coverage', 'reason': 'required_original_unread',
+                        'source': 'invoice_original', 'source_path': f'invoice_evidence.invoices[{index}]',
+                        'elapsed_ms': max(0, round((time.monotonic() - started) * 1000)),
+                    }]) from error
         read = sum(file.get('body_read_status') == 'content_read' for file in files)
         invoice['body_read_status'] = 'content_read' if files and read == len(files) else 'partial_read' if read else 'not_read'
 

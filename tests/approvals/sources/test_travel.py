@@ -2,16 +2,25 @@ from __future__ import annotations
 
 from tests.approvals.source_fakes import POLICY
 
+from copy import deepcopy
+from dataclasses import replace
 import json
+from pathlib import Path
 import signal
 from types import SimpleNamespace
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from apps.oa.approvals.collection import downloads as attachments
+from apps.oa.approvals.operations import Approval
+from apps.oa.approvals.source_policy import TravelReadPolicy
 from apps.oa.approvals.sources import downloads as remote
 from apps.oa.approvals.sources import travel as travel_orders
 from apps.oa.approvals.sources import travel_hotel, travel_browser
+from apps.oa.approvals.sources import travel_page_compat as compat, travel_read_session as sessions
+from tests.approvals.collection.test_empty_attachments import TRAVEL_CONFIG
+from tests.approvals.test_operations import FakeOA
 
 travel_source = travel_orders.TravelSource(POLICY)
 
@@ -150,11 +159,11 @@ def test_hotel_batch_keeps_each_protocol_request_and_semantics():
         payload = next(payloads)
         return SimpleNamespace(status=200, json=lambda: payload)
 
-    details = travel_hotel.read_details(
+    details = list(travel_hotel.read_details(
         SimpleNamespace(post=post),
         [{'order_no': 'online-1', 'expense_description': '线上住宿', 'sjly': '2'}, expense_order()],
         origin=POLICY.travel_origin, timeout_sec=1,
-    )
+    ))
 
     assert calls[0][0] == POLICY.travel_origin + '/hotel/fcc/hotel/order/b2ghotelzcd/getOrderDetail?ddbh=online-1'
     assert 'data' not in calls[0][1]
@@ -174,18 +183,18 @@ def test_hotel_batch_budget_precedes_later_missing_identity(monkeypatch):
     missing_identity = expense_order()
     del missing_identity['id']
 
-    details = travel_hotel.read_details(
+    details = list(travel_hotel.read_details(
         context.request,
         [{'order_no': 'online-1', 'sjly': '2'}, missing_identity],
         origin=POLICY.travel_origin, timeout_sec=1,
-    )
+    ))
 
     assert len(calls) == 1
     assert calls[0][1]['timeout'] == 900
     assert details[0]['read_status'] == 'read'
     assert details[1] == {
-        **missing_identity, 'read_status': 'failed',
-        'reason': 'hotel_order_detail_timeout', 'diagnostics': {'stage': 'hotel_detail'},
+        **missing_identity, 'read_status': 'failed', 'detail_source': 'offline_expense',
+        'reason': 'hotel_order_detail_timeout', 'diagnostics': {'stage': 'hotel_detail', 'elapsed_ms': 0},
     }
 
 
@@ -285,8 +294,8 @@ def test_hotel_details_preserve_complete_result_and_identity(address, identity):
               'xzqmc': '西湖区', 'ydrzrq': '2026-10-20', 'ydldrq': '2026-10-21', 'ddztmc': '已完成'}
     context = SimpleNamespace(request=SimpleNamespace(post=lambda *_a, **_k: SimpleNamespace(
         json=lambda: {'result': result})))
-    details = travel_hotel.read_details(
-        context.request, [{'order_no': 'hotel-1', 'expense_description': '合成住宿'}], origin=POLICY.travel_origin, timeout_sec=1)
+    details = list(travel_hotel.read_details(
+        context.request, [{'order_no': 'hotel-1', 'expense_description': '合成住宿'}], origin=POLICY.travel_origin, timeout_sec=1))
     assert len(details) == 1
     if identity == 'hotel-1':
         assert details[0]['order_detail'] == result
@@ -341,6 +350,7 @@ def browser_transport(monkeypatch):
             return self.outcome.get('text', 'SYNTHETIC-TRAVEL 暂无数据')
 
         def content(self):
+            self.scanned_content = True
             return self.outcome.get('markup', '<html></html>')
 
         def count(self):
@@ -356,7 +366,8 @@ def browser_transport(monkeypatch):
             pass
 
         def wait_for_timeout(self, _milliseconds):
-            pass
+            if self.outcome.get('scan_failure') and hasattr(self, 'scanned_content'):
+                raise RuntimeError('synthetic private scan failure')
 
         def close(self):
             self.closed = True
@@ -378,6 +389,10 @@ def browser_transport(monkeypatch):
 
             def post(url, **kwargs):
                 transport.requests.append((url, kwargs))
+                reply = self.page.outcome.get('hotel_response')
+                if reply is not None:
+                    payload = reply(url)
+                    return SimpleNamespace(status=200, json=lambda: payload)
                 return SimpleNamespace(status=200, json=lambda: self.page.outcome['hotel_payload'])
 
             return SimpleNamespace(new_page=new_page, cookies=lambda *_a: getattr(transport, 'cookies', []),
@@ -407,6 +422,7 @@ def browser_transport(monkeypatch):
     monkeypatch.setattr(travel_browser.BrowserAdapter, 'ensure_available', staticmethod(lambda: True))
     monkeypatch.setattr(remote.DownloadTransfer, 'rpa_storage_state', staticmethod(lambda **_k: {'cookies': [], 'origins': []}))
     monkeypatch.setattr(remote, 'browser_visible_fallback_enabled', lambda: True)
+    transport.page_type = Page
     return transport
 
 
@@ -465,6 +481,51 @@ def test_incomplete_headless_travel_scan_can_still_use_visible_fallback(browser_
 
     assert evidence.errors == ()
     assert browser_transport.launches == [True, False]
+
+
+@pytest.mark.parametrize('visible_address', ['合成酒店地址', '合成更正地址'])
+def test_visible_fallback_deduplicates_hotel_evidence_without_merging_different_results(
+        browser_transport, monkeypatch, visible_address):
+    real_monotonic = travel_hotel.time.monotonic
+    applied_delay = 0.0
+
+    def response(url):
+        nonlocal applied_delay
+        order = parse_qs(urlsplit(url).query)['ddbh'][0]
+        applied_delay += 0.01 if browser_transport.launches[-1] else 0.06
+        address = '合成酒店地址' if browser_transport.launches[-1] else visible_address
+        return {'result': {'ddbh': order, 'jddz': address}}
+
+    monkeypatch.setattr(travel_hotel.time, 'monotonic', lambda: real_monotonic() + applied_delay)
+    outcomes = {'expense_rows': [{'cpbh': '0300', 'ddlx': '03001', 'sjly': '2', 'ywdh': 'hotel-1'}],
+                'hotel_response': response}
+    browser_transport.outcomes = {False: outcomes, True: {
+        **outcomes, 'markup': '<a href="https://trip.example.test/opera/getFile/123/synthetic.pdf">synthetic.pdf</a>',
+    }}
+    evidence = collect_travel()
+    assert evidence.errors == ()
+    assert browser_transport.launches == [True, False]
+    details = [json.loads(fact['value']) for fact in evidence.facts if fact['name'] == '商旅住宿订单详情']
+    addresses = [fact['value'] for fact in evidence.facts if fact['name'] == '酒店地址']
+    assert addresses == list(dict.fromkeys(['合成酒店地址', visible_address]))
+    assert [detail['hotel_address'] for detail in details] == addresses
+    assert 10 <= details[0]['diagnostics']['elapsed_ms'] < 60
+
+
+def test_missing_hotel_order_identity_has_a_safe_diagnostic(browser_transport):
+    browser_transport.outcomes[True] = {'expense_rows': [
+        {'cpbh': '0300', 'ddlx': '03001', 'sjly': '2', 'fysm': 'private expense description'},
+    ]}
+    evidence = collect_travel()
+    assert evidence.errors == ()
+    diagnostic, = evidence.attachment_scan_record()['diagnostics']
+    assert diagnostic.pop('elapsed_ms') >= 0
+    assert diagnostic == {
+        'stage': 'hotel_detail', 'source_path': 'hotel_details[0]', 'browser': 'headless',
+        'read_status': 'failed', 'reason': 'hotel_order_identity_missing',
+    }
+    assert browser_transport.requests == []
+    assert not any(fact['name'] == '商旅住宿订单详情' for fact in evidence.facts)
 
 
 def test_complete_nonempty_travel_scan_does_not_open_visible_browser(browser_transport):
@@ -691,3 +752,288 @@ def test_candidate_outcome_is_saved_before_page_cleanup_blocks(browser_transport
         with pytest.raises(CollectorTerminated):
             travel_source.browser.read_attempt(['https://trip.example.test/target'], timeout_sec=10,
                 storage_state={}, headless=True, expected_marker='SYNTHETIC-TRAVEL', expected_resource_count=0)
+
+
+@pytest.fixture
+def collected_hotels(tmp_path, monkeypatch, browser_transport):
+    outcomes = browser_transport.outcomes[True] = {
+        'expense_rows': [
+            {'id': f'expense-{index}', 'ywdh': f'hotel-{index}', 'fysm': f'合成住宿 {index}',
+             'sjly': '2', 'bxpch': 'batch-1', 'cpbh': '0300', 'ddlx': '03001'}
+            for index in (1, 2)
+        ],
+    }
+    failures = set()
+    fault = {'after_orders': None, 'deadline_order': None, 'before_deadline': lambda: None}
+    orders_read = []
+
+    def hotel_response(url):
+        order, = parse_qs(urlsplit(url).query)['ddbh']
+        orders_read.append(order)
+        if order == fault['deadline_order']:
+            fault['before_deadline']()
+            raise travel_browser._TravelReadDeadline('synthetic private deadline')
+        if order in failures:
+            raise TimeoutError('synthetic private detail')
+        return {'success': True, 'result': {
+            'ddbh': order, 'ydrzrq': '2026-10-20', 'ydldrq': '2026-10-22', 'jdcszwmc': '合成市',
+        }}
+
+    outcomes['hotel_response'] = hotel_response
+    monkeypatch.setattr(sessions, 'api_storage_state', lambda *_a, **_kw: {'cookies': []})
+    monkeypatch.setenv('OA_UID', '7')
+
+    def start_browser(session, engine, _state, deadline, **_):
+        rules = sessions.Policy(session.policy)
+        records = []
+        session.transport = SimpleNamespace(policy=rules, records=records, wait_for_idle=lambda **_: True)
+        session.engine, session.version = engine, 'synthetic-browser'
+        amounts = {field: 0 for field in ['cwspbzje', *compat.SUMMARY_FIELDS]}
+        marker = 'SYNTHETIC-TRAVEL'
+        reads_at_start = len(orders_read)
+        trip_identity = {'id': '17', 'account': 'account-1', 'tenant': 'tenant-1'}
+
+        def response(path, payload, status=200):
+            request_id = f'r{len(records) + 1}'
+            facts = {'path': path, 'request_id': request_id, 'status': status}
+            records.extend({**facts, 'decision': event} for event in (
+                'request_started', 'forwarded', 'client_response_complete',
+            ))
+            host = rules.oa_host if path == sessions.ACCOUNT_PATH else rules.trip_host
+            return SimpleNamespace(url=f'https://{host}{path}', status=status, json=lambda: payload,
+                                   headers={'x-oa-readonly-request-id': request_id})
+
+        class Page(browser_transport.page_type):
+            def goto(self, url, **_):
+                self.url = url
+                if url.endswith(sessions.ACCOUNT_PATH):
+                    self.outcome = {'text': json.dumps({
+                        'data': {'accountlist': [{'userid': '7', 'iscurrent': '1'}]},
+                    })}
+                    return response(sessions.ACCOUNT_PATH, {})
+                self.url = f'https://{rules.trip_host}/fcc/fcecf/bxdHome/index.html'
+                base = {'bxdzb': {'bxdh': marker, 'bxpch': 'batch-1', 'bxbt': '合成差旅',
+                                 'bxrid': '17', 'tdrgh': 'account-1', 'qybh': 'tenant-1'},
+                        'fkBxdKzb': {'cwspbzje': 0}}
+                for path, result in ((compat.BASE_PATH, base),
+                                     (compat.EXP_PATH, {'bxmxList': outcomes['expense_rows']}),
+                                     (compat.SUMMARY_PATH, amounts)):
+                    reply = response(path, {'success': True, 'result': result})
+                    for handler in self.handlers:
+                        handler(reply)
+                return SimpleNamespace(status=200)
+
+            def locator(self, selector, *_a, **_kw):
+                return SimpleNamespace(evaluate=lambda *_: True, count=lambda: 1, nth=lambda _: self)                     if 'data-page="fjxx-page"' in selector else self
+
+            def wait_for_function(self, *_a, **_kw):
+                pass
+
+            def evaluate(self, expression, arg=None):
+                if 'await fetch(' in expression:
+                    try:
+                        body = hotel_response(arg['url'])
+                    except TimeoutError:
+                        request_id = f'r{len(records) + 1}'
+                        facts = {'path': travel_hotel.HOTEL_ORDER_DETAIL_PATH, 'request_id': request_id}
+                        records.extend([
+                            {**facts, 'decision': 'request_started', 'phase': 'client_read'},
+                            {**facts, 'decision': 'forwarded', 'phase': 'upstream', 'status': 200},
+                            {**facts, 'decision': 'client_write_error', 'phase': 'client_write',
+                             'error_type': 'BrokenPipeError'},
+                        ])
+                        return {'timed_out': True}
+                    reply = response(travel_hotel.HOTEL_ORDER_DETAIL_PATH, body)
+                    for handler in self.handlers:
+                        handler(reply)
+                    return {'status': reply.status, 'body': body}
+                if 'let u=window.user' in expression:
+                    if len(orders_read) - reads_at_start == 2 and fault['after_orders'] == 'identity':
+                        return {**trip_identity, 'tenant': 'different'}
+                    return trip_identity
+                if 'window.bxdAppData' in expression:
+                    return {'state': 0, 'dom': {key: ['0'] for key in arg}}
+                if 'const lines=' in expression:
+                    return [marker, '预订住宿 2026-10-20 至 2026-10-22']
+                if "querySelectorAll('input,textarea,select')" in expression:
+                    return []
+                return True
+
+        def new_page():
+            page = Page(True)
+            page.on('response', session._observe)
+            return page
+
+        session.context = SimpleNamespace(new_page=new_page, cookies=lambda *_: [])
+        session._verify_oa(deadline)
+
+    monkeypatch.setattr(sessions.TravelReadSession, '_start_engine', start_browser)
+    workflow = json.loads((Path(__file__).parent.parent / 'collection' / 'fixtures' / 'travel_empty_placeholders.json').read_text())
+    for field in workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields']:
+        if field['fieldName'] == 'fjsl':
+            field['fieldValue'] = '<a href="/sn_slv_bxbz.jsp">0</a>'
+    api = FakeOA()
+    api.rows = [{**api.rows[0], 'request_id': number} for number in ('12', '13')]
+    api.request_context = lambda request_id: ({**deepcopy(workflow), 'requestId': request_id}, [])
+
+    def create(engine):
+        policy = replace(POLICY, travel_read=TravelReadPolicy(engine, 'api')) if engine == 'moli' else POLICY
+        return Approval(tmp_path / 'runtime', api=api, writer=api, configs=[TRAVEL_CONFIG], source_policy=policy)
+
+    return create, api, failures, fault, orders_read
+
+
+@pytest.mark.parametrize('engine,timed_out', [
+    ('playwright', set()), ('playwright', {'hotel-1'}), ('playwright', {'hotel-1', 'hotel-2'}),
+    ('moli', set()),
+])
+def test_collection_preserves_each_hotels_read_and_stay_date_semantics(collected_hotels, engine, timed_out):
+    create, api, failures, _, orders_read = collected_hotels
+    failures.update(timed_out)
+    app = create(engine)
+    started = app.pending(batch_size=2)
+    first, second = (task['id'] for task in started['tasks'])
+    try:
+        result = app.collect(started['run_id'], expected_task_id=first)
+        material = json.loads(Path(result['material_file']).read_text())
+        assert result['status'] == 'prepared'
+        assert material['attachment_presence']['status'] == 'confirmed_empty'
+        facts = material['authority_facts']
+        if engine == 'moli':
+            amount, = [fact for fact in facts if fact['name'] == '财务审批补助金额']
+            assert amount['source_endpoint'] == '/fcecf/fcc/pcapi/COMM_B2G_LoadBxdBaseInfoDetails'
+            assert amount['source_json_path'] == 'result.fkBxdKzb.cwspbzje'
+        details = [json.loads(fact['value']) for fact in facts if fact['name'] == '商旅住宿订单详情']
+        assert [detail['order_no'] for detail in details] == ['hotel-1', 'hotel-2']
+        for detail in details:
+            assert detail['diagnostics']['elapsed_ms'] >= 0
+            if detail['order_no'] in timed_out:
+                assert detail['read_status'] == 'failed' and detail['reason'] == 'hotel_order_detail_timeout'
+                assert detail['diagnostics']['exception_type'] == 'TimeoutError'
+                assert 'check_in' not in detail and 'check_out' not in detail
+            else:
+                assert detail['read_status'] == 'read' and detail['date_semantics'] == 'reserved'
+                assert (detail['check_in'], detail['check_out']) == ('2026-10-20', '2026-10-22')
+        assert orders_read == ['hotel-1', 'hotel-2']
+        assert 'synthetic private detail' not in json.dumps(material)
+        assert not material.get('travel_read_exception') and api.posts == []
+        app.fail(started['run_id'], first, 'synthetic test stops after verifying collection')
+        failures.clear()
+        normal = app.collect(started['run_id'], expected_task_id=second)
+        assert normal['status'] == 'prepared'
+        assert orders_read == ['hotel-1', 'hotel-2'] * 2
+    finally:
+        app.store.connection.close()
+
+
+@pytest.mark.parametrize('timed_out', [{'hotel-1'}, {'hotel-1', 'hotel-2'}])
+def test_compatible_collection_rejects_undelivered_hotel_responses(collected_hotels, timed_out):
+    create, api, failures, _, orders_read = collected_hotels
+    failures.update(timed_out)
+    app = create('moli')
+    started = app.pending(batch_size=1)
+    task_id = started['tasks'][0]['id']
+    try:
+        with pytest.raises(RuntimeError, match='^travel_attachment_discovery_failed$'):
+            app.collect(started['run_id'], expected_task_id=task_id)
+        result = app.inspect(task_id)
+        assert result['task']['status'] == 'failed' and not result['task']['material_file']
+        diagnostics = result['collection_failure']['diagnostics']
+        assert diagnostics[0]['reason'] == 'travel_delivery_incomplete'
+        assert sum(row['reason'] == 'client_write_error' for row in diagnostics) == 2 * len(timed_out)
+        reads = [row for row in diagnostics if row['stage'] == 'hotel_detail']
+        assert [(row['browser'], row['source_path'], row['read_status'], row['reason']) for row in reads] == [
+            (engine, f'hotel_details[{index}]',
+             'failed' if order in timed_out else 'read',
+             'hotel_order_detail_timeout' if order in timed_out else 'hotel_order_detail_read')
+            for engine in ('moli', 'chromium')
+            for index, order in enumerate(('hotel-1', 'hotel-2'))
+        ]
+        assert all(row['elapsed_ms'] >= 0 for row in reads)
+        assert orders_read == ['hotel-1', 'hotel-2'] * 2
+        assert '合成市' not in json.dumps(diagnostics, ensure_ascii=False)
+        assert 'synthetic private detail' not in json.dumps(diagnostics)
+        assert api.posts == []
+    finally:
+        app.store.connection.close()
+
+
+@pytest.mark.parametrize('engine,late_failure', [
+    ('playwright', 'scan'), ('playwright', 'deadline'), ('moli', 'deadline'),
+])
+def test_collection_keeps_completed_hotel_reads_after_a_later_failure(
+        collected_hotels, browser_transport, tmp_path, engine, late_failure):
+    from apps.oa.runtime import collection_budget
+
+    create, api, _, fault, orders_read = collected_hotels
+    phase_file = tmp_path / 'phase.json'
+
+    def check_partial_receipt():
+        checkpoint = phase_file.with_suffix('.read.json').read_text()
+        progress = json.loads(checkpoint)['read_results'][-1]
+        assert progress['scope'] == 'hotel_order'
+        assert progress['diagnostics'][0]['source_path'] == 'hotel_details[0]'
+        assert progress['status'] == 'read'
+        assert '合成市' not in checkpoint and 'hotel-1' not in checkpoint
+
+    if late_failure == 'deadline':
+        fault['deadline_order'] = 'hotel-2'
+        fault['before_deadline'] = check_partial_receipt
+    else:
+        browser_transport.outcomes[True]['scan_failure'] = True
+    browser_transport.outcomes[False] = browser_transport.outcomes[True]
+    app = create(engine)
+    started = app.pending(batch_size=1)
+    task_id = started['tasks'][0]['id']
+    try:
+        with collection_budget.tracking(phase_file), pytest.raises(
+                RuntimeError, match='^travel_attachment_discovery_failed$'):
+            app.collect(started['run_id'], expected_task_id=task_id)
+        result = app.inspect(task_id)
+        assert result['task']['status'] == 'failed' and not result['task']['material_file']
+        diagnostics = result['collection_failure']['diagnostics']
+        completed = [row for row in diagnostics if row['stage'] == 'hotel_detail']
+        indexes = [0] if late_failure == 'deadline' else [0, 1]
+        browsers = ('headless', 'visible') if engine == 'playwright' else ('moli', 'chromium')
+        candidate_count = 2 if late_failure == 'scan' else 1
+        assert [(row['browser'], row['source_path'], row['read_status']) for row in completed] == [
+            (browser, f'hotel_details[{index}]', 'read')
+            for browser in browsers for _ in range(candidate_count) for index in indexes
+        ]
+        assert all(row['elapsed_ms'] >= 0 for row in completed)
+        assert orders_read == ['hotel-1', 'hotel-2'] * (2 * candidate_count)
+        assert '合成市' not in json.dumps(diagnostics, ensure_ascii=False)
+        assert 'synthetic private' not in json.dumps(diagnostics)
+        assert api.posts == []
+    finally:
+        app.store.connection.close()
+
+
+def test_compatible_hotel_diagnostics_preserve_the_late_identity_guard(collected_hotels):
+    create, api, failures, session_fault, orders_read = collected_hotels
+    failures.add('hotel-1')
+    session_fault['after_orders'] = 'identity'
+    app = create('moli')
+    started = app.pending(batch_size=1)
+    task_id = started['tasks'][0]['id']
+    try:
+        with pytest.raises(RuntimeError, match='travel_attachment_discovery_failed'):
+            app.collect(started['run_id'], expected_task_id=task_id, travel_read_exception={
+                'request_id': '12', 'authorization_note': 'Synthetic missing-account rule',
+                'allowed_reasons': ['travel_sso_account_missing'],
+            })
+        inspection = app.inspect(task_id)
+        assert inspection['task']['status'] == 'failed' and not inspection['task']['material_file']
+        diagnostics = inspection['collection_failure']['diagnostics']
+        assert diagnostics[0]['reason'] == 'travel_session_identity_mismatch'
+        assert [(detail['browser'], detail['source_path'], detail['reason'])
+                for detail in diagnostics if detail['stage'] == 'hotel_detail'] == [
+            ('moli', 'hotel_details[0]', 'hotel_order_detail_timeout'),
+            ('moli', 'hotel_details[1]', 'hotel_order_detail_read'),
+        ]
+        assert orders_read == ['hotel-1', 'hotel-2']
+        assert 'synthetic private detail' not in json.dumps(diagnostics)
+        assert '合成市' not in json.dumps(diagnostics, ensure_ascii=False)
+        assert api.posts == []
+    finally:
+        app.store.connection.close()

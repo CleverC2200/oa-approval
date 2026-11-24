@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import json
 import time
@@ -84,24 +85,12 @@ class _OfflineExpense:
 
 def read_details(
     request, orders: list[dict], *, origin: str, timeout_sec: float
-) -> list[dict]:
-    details = []
+) -> Iterator[dict]:
     deadline = time.monotonic() + max(0.5, float(timeout_sec))
     for order in orders:
-        remaining = deadline - time.monotonic()
+        started = time.monotonic()
+        remaining = deadline - started
         order_no = str(order.get("order_no") or "").strip()
-        if not order_no:
-            continue
-        if remaining <= 0:
-            details.append(
-                {
-                    **order,
-                    "read_status": "failed",
-                    "reason": "hotel_order_detail_timeout",
-                    "diagnostics": {"stage": "hotel_detail"},
-                }
-            )
-            continue
         protocol = (
             _OfflineExpense()
             if str(order.get("sjly") or "").strip() not in {"", "2"}
@@ -109,16 +98,19 @@ def read_details(
         )
         detail = {**order, "detail_source": protocol.source}
         diagnostics: dict[str, Any] = {"stage": "hotel_detail"}
-        prepared = protocol.prepare(origin, order, order_no)
+        prepared = None
+        if remaining <= 0:
+            reason = "hotel_order_detail_timeout"
+        elif not order_no:
+            reason = "hotel_order_identity_missing"
+        else:
+            prepared = protocol.prepare(origin, order, order_no)
+            reason = "hotel_expense_identity_missing"
         if prepared is None:
-            details.append(
-                {
-                    **detail,
-                    "read_status": "failed",
-                    "reason": "hotel_expense_identity_missing",
-                    "diagnostics": diagnostics,
-                }
-            )
+            yield {
+                **detail, "read_status": "failed", "reason": reason,
+                "diagnostics": {**diagnostics, "elapsed_ms": max(0, round((time.monotonic() - started) * 1000))},
+            }
             continue
         reason, payload = "", None
         try:
@@ -179,6 +171,7 @@ def read_details(
                 str(result[key]).strip() != value for key, value in identities.items()
             ):
                 reason = "hotel_order_identity_mismatch"
+        diagnostics["elapsed_ms"] = max(0, round((time.monotonic() - started) * 1000))
         if reason:
             if isinstance(result, dict):
                 diagnostics["identity_present"] = all(
@@ -188,24 +181,29 @@ def read_details(
                     str(result.get(key) or "").strip() == value
                     for key, value in identities.items()
                 )
-            details.append(
-                {
-                    **detail,
-                    "read_status": "failed",
-                    "reason": reason,
-                    "diagnostics": diagnostics,
-                }
-            )
+            yield {**detail, "read_status": "failed", "reason": reason, "diagnostics": diagnostics}
             continue
-        details.append(
-            {
-                **detail,
-                "read_status": "read",
-                "order_detail": result,
-                **protocol.project(result),
-            }
-        )
-    return details
+        yield {
+            **detail,
+            "read_status": "read",
+            "order_detail": result,
+            "diagnostics": diagnostics,
+            **protocol.project(result),
+        }
+
+
+def detail_diagnostic(detail: dict, index: int, browser: str) -> dict:
+    diagnostics = detail["diagnostics"]
+    return {
+        **{key: diagnostics[key] for key in (
+            "stage", "elapsed_ms", "http_status", "exception_type", "result_type",
+            "api_success", "identity_present", "identity_matches",
+        ) if key in diagnostics},
+        "source_path": f"hotel_details[{index}]",
+        "browser": browser,
+        "read_status": detail["read_status"],
+        "reason": detail.get("reason") or "hotel_order_detail_read",
+    }
 
 
 def orders_from_expenses(payload: Any) -> list[dict[str, str]]:
@@ -218,7 +216,6 @@ def orders_from_expenses(payload: Any) -> list[dict[str, str]]:
             if (
                 str(value.get("cpbh") or "").strip() == "0300"
                 and str(value.get("ddlx") or "").strip() == "03001"
-                and order_no
             ):
                 order = {
                     "order_no": order_no,
@@ -276,7 +273,11 @@ def fields_for_details(
                 continue
             subject_ref = f"travel_order:{order_no}"
         body = json.dumps(detail, ensure_ascii=False, sort_keys=True)
-        identity = (subject_ref, body)
+        stable = dict(detail)
+        diagnostics = detail.get("diagnostics")
+        if isinstance(diagnostics, dict):
+            stable["diagnostics"] = {key: value for key, value in diagnostics.items() if key != "elapsed_ms"}
+        identity = (subject_ref, json.dumps(stable, ensure_ascii=False, sort_keys=True))
         if identity in seen:
             continue
         seen.add(identity)

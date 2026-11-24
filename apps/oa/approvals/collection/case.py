@@ -66,6 +66,10 @@ class CollectionFailure(RuntimeError):
                 if key in {"stage", "reason", "browser", "exception_type", "result_type", "cause_type"}:
                     if isinstance(value, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
                         kept[key] = value
+                elif key == "source" and value in ("invoice_cloud", "invoice_original"):
+                    kept[key] = value
+                elif key == "read_status" and value in ("read", "failed"):
+                    kept[key] = value
                 elif key == "request_id":
                     if isinstance(value, str) and re.fullmatch(r"r[0-9]{1,12}", value):
                         kept[key] = value
@@ -78,6 +82,11 @@ class CollectionFailure(RuntimeError):
                     kept[key] = value
                 elif key == 'elapsed_ms' and type(value) is int and 0 <= value <= 900_000:
                     kept[key] = value
+                elif key == 'response_shape' and isinstance(value, str) and value in invoice_titles.RESPONSE_SHAPES:
+                    kept[key] = value
+                elif key in {'response_bytes_read', 'widget_url_count', 'session_count'}:
+                    if type(value) is int and 0 <= value <= invoice_titles.MAX_RESPONSE_BYTES + 1:
+                        kept[key] = value
                 elif key in {"api_success", "identity_present", "identity_matches"} and isinstance(value, bool):
                     kept[key] = value
                 elif key in {"attachment_ref", "owner_ref", "file_ref"}:
@@ -648,20 +657,21 @@ def _collect_case(
             target = dict(resource)
             target["id"] = descriptor["raw_resource_id"]
             download_targets.append(target)
-        download_result = attachments.download_resources(
-            download_targets, sources=download_sources,
-            dest_dir=attachment_dir
-            / str(config.get("flow_key") or "unknown")
-            / str(request_id),
-            timeout_sec=attachment_timeout_sec,
-            allow_browser_download=allow_browser_download,
-            request_id=str(request_id),
-            flow_key=str(config.get("flow_key") or ""),
-            volume_sources={descriptor["raw_resource_id"]: (
-                descriptor["source_system"], descriptor["source_request_id"] or str(request_id),
-                descriptor["owner_detail_id"] or "", descriptor["source_field_path"],
-            ) for descriptor in descriptors},
-        )
+        with invoice_originals.preserve_collection_diagnostics(invoice_evidence, "attachment_download"):
+            download_result = attachments.download_resources(
+                download_targets, sources=download_sources,
+                dest_dir=attachment_dir
+                / str(config.get("flow_key") or "unknown")
+                / str(request_id),
+                timeout_sec=attachment_timeout_sec,
+                allow_browser_download=allow_browser_download,
+                request_id=str(request_id),
+                flow_key=str(config.get("flow_key") or ""),
+                volume_sources={descriptor["raw_resource_id"]: (
+                    descriptor["source_system"], descriptor["source_request_id"] or str(request_id),
+                    descriptor["owner_detail_id"] or "", descriptor["source_field_path"],
+                ) for descriptor in descriptors},
+            )
         downloaded, download_errors = download_result.items, download_result.errors
         if download_errors or len(downloaded) != len(download_targets):
             code = (
@@ -669,9 +679,12 @@ def _collect_case(
                 if download_errors
                 else "attachment_download_incomplete"
             )
-            raise CollectionFailure(code, diagnostics=[
-                diagnostic for error in download_errors for diagnostic in error.diagnostics
-            ])
+            failures = [
+                diagnostic for error in download_errors
+                for diagnostic in (error.diagnostics or ({"stage": "attachment_download", "reason": error.code},))
+            ] or [{"stage": "attachment_download", "reason": code}]
+            raise CollectionFailure(code, diagnostics=invoice_originals.collection_diagnostics(
+                invoice_evidence, failures))
         descriptors_by_raw_id = {
             str(item["raw_resource_id"]): item for item in descriptors
         }
@@ -702,17 +715,19 @@ def _collect_case(
             ):
                 bound_item["parent_resource_id"] = descriptor["resource_id"]
             bound_downloads.append(bound_item)
-        prepared_result = attachment_extractors.prepare_materials(
-            bound_downloads,
-            compact_pdf=config.get("flow_key") == "general_expense",
-            compact_spreadsheet=config.get("flow_key") == "tpm_small_marketing_fee",
-            out_dir=Path(
-                prepared_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_prepared"
-            ).expanduser().resolve()
-            / str(request_id),
-        )
+        with invoice_originals.preserve_collection_diagnostics(invoice_evidence, "preparation"):
+            prepared_result = attachment_extractors.prepare_materials(
+                bound_downloads,
+                compact_pdf=config.get("flow_key") == "general_expense",
+                compact_spreadsheet=config.get("flow_key") == "tpm_small_marketing_fee",
+                out_dir=Path(
+                    prepared_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_prepared"
+                ).expanduser().resolve()
+                / str(request_id),
+            )
     prepared = prepared_result.to_record()
-    invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared_result)
+    with invoice_originals.preserve_collection_diagnostics(invoice_evidence, "invoice_original_coverage"):
+        invoice_originals.bind_prepared_bodies(invoice_evidence, descriptors, prepared_result)
     warnings = [
         {
             "code": "invoice_document_reference_unresolved",

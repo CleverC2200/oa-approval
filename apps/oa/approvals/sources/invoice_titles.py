@@ -17,6 +17,7 @@ WORKFLOWS = frozenset({
     'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense',
 })
 MAX_RESPONSE_BYTES = 2_000_000
+RESPONSE_SHAPES = frozenset({'empty', 'markup', 'json_like', 'text', 'report'})
 READ_FAILED = 'invoice_title_reference_read_failed'
 
 
@@ -91,11 +92,13 @@ def snapshot():
     attempt = 0
     http_status = None
     request_started = monotonic()
+    response_facts = {}
 
     def record(error):
         item = {'stage': stage, 'source_path': source_path, 'attempt': attempt,
                 'reason': _failure_reason(error), 'exception_type': type(error).__name__,
-                'elapsed_ms': max(0, int((monotonic() - request_started) * 1000))}
+                'elapsed_ms': max(0, int((monotonic() - request_started) * 1000)),
+                **response_facts}
         status = error.code if isinstance(error, HTTPError) else http_status
         if status is not None:
             item['http_status'] = status
@@ -108,6 +111,7 @@ def snapshot():
         for attempt in range(1, 4):
             request_started = monotonic()
             http_status = None
+            response_facts.clear()
             try:
                 remaining = deadline - request_started
                 if remaining <= 0:
@@ -117,9 +121,15 @@ def snapshot():
                     if http_status != 200:
                         raise HTTPError(request.full_url, http_status, '', None, None)
                     body = response.read(MAX_RESPONSE_BYTES + 1)
+                response_facts['response_bytes_read'] = len(body)
                 if len(body) > MAX_RESPONSE_BYTES:
                     raise ValueError('response_size')
-                return body.decode('utf-8')
+                text = body.decode('utf-8')
+                first = text.lstrip()[:1]
+                response_facts['response_shape'] = {
+                    '': 'empty', '<': 'markup', '{': 'json_like', '[': 'json_like',
+                }.get(first, 'text')
+                return text
             except Exception as error:
                 record(error)
                 if isinstance(error, HTTPError):
@@ -140,6 +150,7 @@ def snapshot():
             for url in widget_urls
             for session_id in parse_qs(urlsplit(url).query).get('sessionID', [])
         }
+        response_facts.update(widget_url_count=len(widget_urls), session_count=len(session_ids))
         if not session_ids:
             raise ValueError('session_missing')
         if len(session_ids) != 1:
@@ -164,6 +175,7 @@ def snapshot():
             if (not isinstance(result, dict) or result.get('totalPage') != 1
                     or result.get('currentPage') != 1 or not isinstance(result.get('htmlTag'), str)):
                 raise ValueError('report_shape')
+            response_facts['response_shape'] = 'report'
             parser = _Cells()
             parser.feed(result['htmlTag'])
             return parser.cells
