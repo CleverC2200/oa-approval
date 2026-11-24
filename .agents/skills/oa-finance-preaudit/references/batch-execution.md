@@ -48,9 +48,9 @@
 
 无写授权时，先 `deliver`，再用 `preview --task-id <ID>` 或默认 `submit` 保存预览状态。有写授权时，核对已保存交付后用 `submit --task-id <ID> --confirm-write YES` 串行提交，不先积累预览；海外同时要求独立授权及 `--allow-overseas YES`。`submit` / `preview` 只消费已保存交付，不接受意见、识别、观察或审核结果文件。之后另行授权提交已有预览时，暂停新领取，按本次有界范围串行处理，继续核对目标和冻结材料。
 
-收取结果时按[审核交付](../SKILL.md#形成并交回意见)的一次最终交付核对实际 Agent 身份、代次、`task_id` 和冻结材料版本，旧代次消息不能覆盖新任务。队列、实际 Agent 领取计数、在途容量、下一候选及回执验收统一读取 `status --run-id <本轮 run_id> --view batch`。主 Agent 工作表只补充授权范围、逻辑槽位、原生工具会话及文件引用，计数引用公开状态快照，不另行加减维护。主 Agent 将 CLI 原始 JSON 保存到本轮 runtime，工具返回只投影状态、计数、任务身份、文件路径和必要错误；整份材料、逐页识别、观察和意见正文由审核 Agent 从文件读取。定期验收只展示批次汇总，逐单事实保留在原始状态文件中。
+收取结果时按[审核交付](../SKILL.md#形成并交回意见)的一次最终交付核对实际 Agent 身份、代次、`task_id` 和冻结材料版本，旧代次消息不能覆盖新任务。队列、实际 Agent 领取计数、在途容量、下一候选及回执验收统一读取 `status --run-id <本轮 run_id> --view batch`。主 Agent 工作表只补充授权范围、逻辑槽位、原生工具会话及文件引用，计数引用公开状态快照，不另行加减维护。批次目录只落状态汇总、任务标识及回执。需要落盘的完整 show、人工补单、排障和复读文件，都放在其实际 `material_file` 同级的 `diagnostics/` 等可见子目录，用普通材料、图片或 JSON 文件。采集尚未生成材料时用本单诊断记录的 `material_directory`。随单文件在最终回执核实后由审批入口一起清理。已确认的意见、待核事项和回执可从审批账本查询。
 
-关闭后需要核对耗时时，使用 `bash .codex/python.sh .codex/approval_timings.py --case-dir <本轮私有目录>`。它读取已保存的 `delivery-*` 实际交付路径、`collect-*`、`preserved-*` 和 `submit-*` 回执；不从审核结果的可选字段推断路径，原路径清理后仍可读取保全副本。文件时间仅供诊断，不替代原生交付时间、材料覆盖或审核结论。
+关闭后需要核对耗时时，使用 `bash .codex/python.sh .codex/approval_timings.py --root "$OA_RUNTIME_ROOT" --run-id "$OA_RUN_ID"`。账本提供材料落库、审核落库、识别和提交回查的时间。这些时间用于核对流程，业务审核仍以原始来源和归属为准。
 
 补位循环已无可推进动作时，等活动工具结果或原生审核完成通知，每次约 30 秒。多个独立进程可并行等待；一有结果就返回补位循环。进程结束后直接接管最终返回，识别仍在运行且需要查看进度时使用公开 `progress`。原生审核以完成通知为准，进展反馈只传新增事实或阻断。
 
@@ -111,4 +111,4 @@
 bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" status --run-id "${OA_RUN_ID:?}" --view batch
 ```
 
-`finish` 等待当前采集与 Writer 完成并落盘，再关闭本轮、socket 并释放 `approval.lock`；正常批次先完成逐单验收再调用它。保留关闭回执，等待原 owner 工具会话退出，最后确认指定轮次 `run.status=closed`、`owner.reachable=false`；整批完成还须 `closeout.complete=true`。提前轮换或停止排空时核对 `closeout.drained=true` 并说明未领取数。`finish` 返回 `closed` 只证明轮次关闭。使用上述公开查询收尾，无需临时读库。EOF 同样触发安全关闭；采集或 Writer 客户端断开仍完成并保存原操作；采集进程异常登记技术失败，Writer 异常退出保留已保存交付，已有 started 尝试转为 unknown 并阻断。进程收到 SIGTERM/SIGHUP 时同样等待两者收尾；强制终止不清除未结束回执，不重发。
+`finish` 等待当前采集与 Writer 完成并落盘，再关闭本轮、socket 并释放 `approval.lock`；正常批次先完成逐单验收再调用它。关闭回执和批次状态的 `cleanup` 记录当时待清理的单据及原因。普通关闭执行清理。失联关闭先保存当时的待清理记录，启动或普通关闭时补扫。保留关闭回执，等待原 owner 工具会话退出，最后确认指定轮次 `run.status=closed`、`owner.reachable=false`；整批完成还须 `closeout.complete=true`。提前轮换或停止排空时核对 `closeout.drained=true` 并说明未领取数。`finish` 返回 `closed` 只证明轮次关闭。使用上述公开查询收尾，无需临时读库。EOF 同样触发安全关闭；采集或 Writer 客户端断开仍完成并保存原操作；采集进程异常登记技术失败，Writer 异常退出保留已保存交付，已有 started 尝试转为 unknown 并阻断。进程收到 SIGTERM/SIGHUP 时同样等待两者收尾；强制终止不清除未结束回执，不重发。

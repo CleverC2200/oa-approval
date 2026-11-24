@@ -138,22 +138,56 @@ def _older_collection_states(root, task_ids):
     return states
 
 
-def cleanup(store, *, execute=False, task_id=None, history=False):
+def pending_cleanup(store, *, task_id=None, run_id=None, reasons=None, default='cleanup_pending'):
+    reasons = reasons or {}
+    return [{'task_id': row['id'], 'reason': reasons.get(row['id']) or
+             ('submission_confirmation_required' if row['error'] else default)}
+            for row in store.connection.execute("""
+                SELECT id,error FROM tasks WHERE materials_cleanup_pending=1
+                AND (? IS NULL OR id=?) AND (? IS NULL OR last_run_id=?) ORDER BY id
+            """, (task_id, task_id, run_id, run_id))]
+
+
+def _report_pending(store, result, task_id):
+    reasons = {item['task_id']: item['reason'] for item in result.pop('pending_tasks', [])}
+    pending = pending_cleanup(store, task_id=task_id, reasons=reasons, default=result.get('reason', 'cleanup_pending'))
+    if pending:
+        result['pending_tasks'] = pending
+        if result['status'] == 'completed':
+            result['status'] = 'deferred'
+
+
+def cleanup(store, *, execute=False, task_id=None, history=False, closed_run_id=None):
     cutoff = datetime.now(timezone.utc) - timedelta(days=365)
     try:
         with store.connection:
             store.connection.execute('BEGIN IMMEDIATE' if execute else 'BEGIN')
             result = _cleanup(store, execute=execute, task_id=task_id, history=history, cutoff=cutoff)
-        if execute and result['status'] == 'completed' and task_id is None and not history:
+            expire = execute and result['status'] == 'completed' and task_id is None and not history
+            if execute and not history:
+                _report_pending(store, result, task_id)
+                if closed_run_id is not None:
+                    store.record_cleanup(closed_run_id, result)
+        if expire:
             result['expired_tasks'] = store.expire_history(cutoff)
         return result
     except (OSError, sqlite3.Error, ValueError) as error:
-        return {'status': 'failed', 'error': type(error).__name__}
+        result = {'status': 'failed', 'error': type(error).__name__, 'reason': 'cleanup_failed'}
+        if execute and not history:
+            try:
+                with store.connection:
+                    _report_pending(store, result, task_id)
+                    if closed_run_id is not None:
+                        store.record_cleanup(closed_run_id, result)
+            except sqlite3.Error:
+                pass
+        return result
 
 
 def _cleanup(store, *, execute, task_id, history, cutoff):
     root = store.path.parent.resolve()
-    collecting = store.connection.execute("SELECT 1 FROM tasks WHERE status='preparing' LIMIT 1").fetchone() is not None
+    collecting = store.connection.execute("""SELECT 1 FROM tasks t JOIN runs r ON r.id=t.last_run_id
+        WHERE t.status='preparing' AND r.status IN ('running','blocked') LIMIT 1""").fetchone() is not None
     if execute and collecting:
         return {'status': 'deferred', 'reason': 'collection_in_progress'}
     result = {'status': 'completed' if execute else 'preview', 'files': 0, 'bytes': 0,
@@ -236,6 +270,7 @@ def _cleanup(store, *, execute, task_id, history, cutoff):
 
         if any(path in protected or any(parent in closed_materials for parent in path.parents) for path in files):
             result['protected_tasks'] += 1
+            result.setdefault('pending_tasks', []).append({'task_id': task_id, 'reason': 'shared_material_in_use'})
             if 'items' in result:
                 result['items'].append({'task_id': task_id, 'request_id': submission['request_id'],
                                         'status': 'shared_material_in_use'})
@@ -264,6 +299,7 @@ def _cleanup(store, *, execute, task_id, history, cutoff):
                 failures += 1
         result['failed_files'] += failures
         if failures:
+            result.setdefault('pending_tasks', []).append({'task_id': task_id, 'reason': 'file_cleanup_failed'})
             continue
         for path in sorted(directories, key=lambda path: len(path.parts), reverse=True):
             try:

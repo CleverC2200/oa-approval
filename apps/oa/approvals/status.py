@@ -77,6 +77,7 @@ def batch_status(store, run, tasks, owner):
         'execution': execution,
         'closure': stored.get('closure'),
         'closed_batch': stored.get('closed_batch'),
+        'cleanup': stored.get('cleanup'),
         'handoff': {key: stored['handoff'][key] for key in ('status', 'remaining', 'reason')
                     if key in stored['handoff']} if stored.get('handoff') else None,
         'hourly_dispatch': dispatch_plan(run, stored, owner, blockers, unresolved),

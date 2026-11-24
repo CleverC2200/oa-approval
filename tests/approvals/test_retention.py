@@ -125,8 +125,14 @@ def test_deletion_failure_preserves_verified_receipt_and_can_retry(tmp_path, mon
     result = deliver_and_submit(app, 1, opinion='合成意见', confirm_write=True, review_assessment=completed_review(app, 1))
     assert result['status'] == 'submitted' and result['cleanup']['status'] == 'partial'
     assert app.inspect(1)['submissions'][0]['status'] == 'submitted'
+    run_id = app.store.latest_run()['id']
+    closed = app.close(run_id)
+    assert closed['cleanup']['pending_tasks'] == [{'task_id': 1, 'reason': 'file_cleanup_failed'}]
+    from apps.oa.approvals.client import query
+
+    assert query(tmp_path, 'status', run_id=run_id, view='batch')['cleanup'] == closed['cleanup']
     monkeypatch.setattr(Path, 'unlink', unlink)
-    app.close(app.store.latest_run()['id'])
+    assert app.close(run_id)['cleanup']['status'] == 'completed'
     assert not Path(task['material_file']).exists()
     assert app.inspect(1)['task']['materials_cleanup_pending'] == 0
     assert len(api.posts) == 1
@@ -336,3 +342,24 @@ def test_reappeared_submitted_occurrence_blocks_deferred_cleanup(tmp_path):
     assert app.store.get_task(1)['error'] == 'submitted_pending_confirmation'
     assert Path(task['material_file']).exists()
     assert retention.cleanup(app.store, history=True)['items'] == []
+
+
+def test_closed_stopped_collection_reports_and_allows_later_sweep(tmp_path):
+    app, api = service(tmp_path)
+    api.rows.append({**api.rows[0], 'request_id': '102'})
+    collected_task = collected(app)
+    run_id = collected_task['run_id']
+    with patch.object(retention, 'cleanup', return_value={'status': 'deferred'}):
+        deliver_and_submit(app, 1, opinion='Synthetic approval', confirm_write=True,
+                           review_assessment=completed_review(app, 1))
+    assert app.store.claim(run_id, expected_task_id=2)['status'] == 'claimed'
+    partial = tmp_path / 'materials' / '2' / 'stopped' / 'attachment.txt'
+    partial.parent.mkdir(parents=True)
+    partial.write_text('Synthetic partial download')
+    closed = app.store.close(run_id, collection_stopped_note='Synthetic owner stopped', closure={'kind': 'orphaned'})
+    assert closed['cleanup']['pending_tasks'] == [{'task_id': 1, 'reason': 'awaiting_cleanup_sweep'}]
+    assert Path(collected_task['material_file']).exists()
+
+    app.pending(request_ids=['103'])
+    assert not Path(collected_task['material_file']).exists()
+    assert partial.read_text() == 'Synthetic partial download'
