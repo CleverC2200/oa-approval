@@ -255,19 +255,23 @@ def _resource_descriptor(
 
     source = str(resource.get("source") or "").strip()
     source_system = source or ("travel_platform" if trip_content_id else "weaver_e9")
+    references = evidence_packet.source_references(resource)
+    source_field_path = str(resource.get("_trusted_source_field_path") or "")
+    source_field_name = str(resource.get("_trusted_source_field_name") or "")
+    if not source_field_path and len(references) == 1:
+        reference = references[0]
+        if reference["source_field_path"].startswith("workflowRequestLogs["):
+            source_field_path = reference["source_field_path"]
+            source_field_name = reference["source_field_name"]
     return {
         "resource_id": resource_id,
         "source_resource_id": raw_id,
         "raw_resource_id": raw_id,
         "request_id": request_id,
         "owner_detail_id": owner_detail_id,
-        "source_field_path": str(
-            resource.get("_trusted_source_field_path") or ""
-        ),
-        "source_field_name": str(
-            resource.get("_trusted_source_field_name") or ""
-        ),
-        "source_references": evidence_packet.source_references(resource),
+        "source_field_path": source_field_path,
+        "source_field_name": source_field_name,
+        "source_references": references,
         "review_role": str(resource.get("_trusted_review_role") or ""),
         "source_system": source_system,
         "source_request_id": str(

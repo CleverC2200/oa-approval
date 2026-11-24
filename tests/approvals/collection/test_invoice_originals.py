@@ -747,7 +747,8 @@ def test_explicit_original_cache_reuse_checks_current_document_and_bytes(
     }]
     before = sum(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
     download_result = attachments.download_resources(
-        targets, dest_dir=path.parent, timeout_sec=1, allow_browser_download=True,
+        targets, dest_dir=tmp_path / 'attachments' / CONFIG['flow_key'] / '101',
+        timeout_sec=1, allow_browser_download=True,
         request_id='101', flow_key=CONFIG['flow_key'], reuse_cache=True,
      sources=attachments.build_download_sources(POLICY))
     files = list(download_result.items)
@@ -816,7 +817,7 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     errors = [error.to_record() for error in download_result.errors]
     expected = 'resource_ownership_untrusted' if failure == 'binding_changed' else 'oa_run_stopped'
     assert files == [] and errors[0]['code'] == expected
-    assert list(destination.glob('*.pdf'))
+    assert list(destination.rglob('*.pdf'))
     state.detail['oa']['doc_id'] = '303'
     stopped.clear()
     state.client.request_context = context

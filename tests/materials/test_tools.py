@@ -195,7 +195,7 @@ def test_download_retains_each_identical_image_original(tmp_path, monkeypatch):
     assert [item['name'] for item in downloaded] == ['A.png', 'B.png']
     assert downloaded[0]['path'] != downloaded[1]['path']
     assert Path(downloaded[0]['path']).read_bytes() == Path(downloaded[1]['path']).read_bytes()
-    assert len(list((tmp_path / 'files').glob('*.png'))) == 2
+    assert len(list((tmp_path / 'files').rglob('*.png'))) == 2
 
 
 def test_compression_preserves_original_and_creates_bounded_reading_copy(tmp_path, monkeypatch):

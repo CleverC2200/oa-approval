@@ -279,17 +279,18 @@ def _html_attachment_resources(data: dict[str, Any], *, origins) -> dict[str, di
             references = rows[resource_id][_TRUSTED_SOURCE_REFERENCES_KEY]
             if reference not in references:
                 references.append(reference)
-    for row in rows.values():
-        references = row[_TRUSTED_SOURCE_REFERENCES_KEY]
-        fields = [ref for ref in references if not ref["source_field_path"].startswith("workflowRequestLogs[")]
-        primary = fields or references
-        if len(primary) == 1:
-            source = primary[0]
-            row[_TRUSTED_SOURCE_FIELD_PATH_KEY] = source["source_field_path"]
-            row[_TRUSTED_SOURCE_FIELD_NAME_KEY] = source["source_field_name"]
-            if source["owner_detail_id"]:
-                row[_TRUSTED_OWNER_DETAIL_KEY] = source["owner_detail_id"]
     return rows
+
+
+def _bind_html_attachment(resource: dict[str, Any], *, listed: bool) -> None:
+    references = resource[_TRUSTED_SOURCE_REFERENCES_KEY]
+    fields = [ref for ref in references if not ref["source_field_path"].startswith("workflowRequestLogs[")]
+    if len(fields) == 1 and fields[0]["owner_detail_id"]:
+        resource[_TRUSTED_OWNER_DETAIL_KEY] = fields[0]["owner_detail_id"]
+    primary = fields if listed else references
+    if len(primary) == 1:
+        resource[_TRUSTED_SOURCE_FIELD_PATH_KEY] = primary[0]["source_field_path"]
+        resource[_TRUSTED_SOURCE_FIELD_NAME_KEY] = primary[0]["source_field_name"]
 
 
 def source_references(resource: dict[str, Any]) -> list[dict[str, str | None]]:
@@ -325,14 +326,17 @@ def logical_attachment_resources(
         resource_id = str(
             item.get("id") or item.get("resourceId") or item.get("fileId") or ""
         ).strip()
-        attachment = discovered.get(resource_id, {})
         for key in _TRUSTED_ATTACHMENT_BINDING_KEYS:
             item.pop(key, None)
-            if key in attachment:
-                item[key] = attachment[key]
+        if resource_id in discovered:
+            item[_TRUSTED_SOURCE_REFERENCES_KEY] = discovered[resource_id][_TRUSTED_SOURCE_REFERENCES_KEY]
+            _bind_html_attachment(item, listed=True)
         rows.append(item)
         known_ids.add(resource_id)
-    rows.extend(item for resource_id, item in discovered.items() if resource_id not in known_ids)
+    for resource_id, item in discovered.items():
+        if resource_id not in known_ids:
+            _bind_html_attachment(item, listed=False)
+            rows.append(item)
     known_urls = {}
     for item in rows:
         url = str(item.get("downloadUrl") or item.get("download_url") or "").strip()

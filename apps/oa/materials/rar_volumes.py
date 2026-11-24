@@ -22,6 +22,7 @@ MAIN_HEADER = 1
 FILE_HEADER = 2
 ENCRYPTION_HEADER = 4
 END_HEADER = 5
+DIRECTORY_FLAG = 0x01
 VOLUME_FLAG = 0x01
 VOLUME_NUMBER_FLAG = 0x02
 MORE_VOLUMES_FLAG = 0x01
@@ -39,6 +40,7 @@ class Volume:
     split_before: bool
     split_after: bool
     size: int
+    file_sizes: tuple[int, ...]
 
 
 def _vint(read_byte, limit=10):
@@ -108,14 +110,20 @@ def inspect(path: Path, *, named_part: bool) -> Volume | None:
             raise VolumeError('rar_volume_name_invalid')
         number = 1 + (next_integer() if flags & VOLUME_NUMBER_FLAG else 0)
         split_before = split_after = False
+        file_sizes = []
         header_bytes = len(first) + 7
         while stream.tell() < metadata.st_size:
             header = _header(stream, MAX_HEADER_BYTES - header_bytes)
             header_bytes += len(header) + 7
             kind, flags, data_size, next_integer = _fields(header)
             if kind == FILE_HEADER:
-                split_before |= bool(flags & SPLIT_BEFORE)
-                split_after |= bool(flags & SPLIT_AFTER)
+                if next_integer() & DIRECTORY_FLAG:
+                    if data_size or flags & (SPLIT_BEFORE | SPLIT_AFTER):
+                        raise VolumeError('rar_volume_header_invalid')
+                else:
+                    file_sizes.append(data_size)
+                    split_before |= bool(flags & SPLIT_BEFORE)
+                    split_after |= bool(flags & SPLIT_AFTER)
             if stream.tell() + data_size > metadata.st_size:
                 raise VolumeError('rar_volume_header_invalid')
             if kind == END_HEADER:
@@ -123,6 +131,6 @@ def inspect(path: Path, *, named_part: bool) -> Volume | None:
                 if data_size or padding > MAX_HEADER_BYTES or any(stream.read(padding)):
                     raise VolumeError('rar_volume_header_invalid')
                 return Volume(number, bool(next_integer() & MORE_VOLUMES_FLAG),
-                              split_before, split_after, metadata.st_size)
+                              split_before, split_after, metadata.st_size, tuple(file_sizes))
             stream.seek(data_size, os.SEEK_CUR)
         raise VolumeError('rar_volume_header_invalid')

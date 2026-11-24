@@ -64,6 +64,7 @@ def tpm_attachment_approval(tmp_path, monkeypatch):
         source_request_id = None
         field_code = 'fj'
         log_annex = ''
+        unlisted_resources = ()
 
         def request_context(self, request_id):
             fields = [{
@@ -77,7 +78,7 @@ def tpm_attachment_approval(tmp_path, monkeypatch):
             workflow['requestId'] = self.source_request_id or request_id
             workflow['workflowRequestLogs'] = [{'annexDocHtmls': self.log_annex}]
             return workflow, [{'id': rid, 'name': name, 'downloadUrl': self.urls.get(rid, f'/download?fileid={rid}')}
-                              for rid, name in self.resources.items()]
+                              for rid, name in self.resources.items() if rid not in self.unlisted_resources]
 
     api = AttachmentOA()
     api.rows[0]['workflow_key'] = 'tpm_small_marketing_fee'
@@ -162,6 +163,16 @@ def test_tpm_attachment_exception_refuses_wrong_source_or_invoice(tpm_attachment
     app, api, run_id, scope, calls, _ = tpm_attachment_approval
     vars(api).update(change)
     with pytest.raises(ValueError, match='attachment_read_exception_target_changed'):
+        app.collect(run_id, expected_task_id=1, attachment_read_exception=scope)
+    assert not calls
+
+
+def test_tpm_attachment_exception_refuses_ambiguous_html_only_resource(tpm_attachment_approval):
+    app, api, run_id, scope, calls, _ = tpm_attachment_approval
+    api.unlisted_resources = ('901',)
+    api.log_annex = '<a href="/news/download.do?fileid=901&filename=photo.jpg.crdownload">签字附件</a>'
+
+    with pytest.raises(ValueError, match='^attachment_read_exception_target_changed$'):
         app.collect(run_id, expected_task_id=1, attachment_read_exception=scope)
     assert not calls
 

@@ -39,6 +39,32 @@ ARCHIVE_EXTRACT_TIMEOUT_SEC = int(
 )
 
 
+@dataclass(slots=True)
+class _RarVolumeBudget:
+    remaining_bytes: int
+    deadline: float
+
+    def check_deadline(self) -> None:
+        if monotonic() >= self.deadline:
+            raise rar_volumes.VolumeError('rar_archive_timeout')
+
+    def reserve(self, byte_count: int) -> None:
+        self.check_deadline()
+        if byte_count > self.remaining_bytes:
+            raise rar_volumes.VolumeError('rar_archive_total_size_limit')
+        self.remaining_bytes -= byte_count
+
+
+@dataclass(frozen=True, slots=True)
+class _ArchiveDeadlineReader:
+    source: zipfile.ZipExtFile
+    budget: _RarVolumeBudget
+
+    def read(self, size: int) -> bytes:
+        self.budget.check_deadline()
+        return self.source.read(size)
+
+
 def _is_zip_symlink(info: zipfile.ZipInfo) -> bool:
     mode = (info.external_attr >> 16) & 0o170000
     return stat.S_ISLNK(mode)
@@ -62,7 +88,7 @@ def _safe_archive_target(root: Path, member_name: str) -> Path | None:
 
 
 def extract_zip_safely(
-    path: Path, *, dest_dir: Path, resource: Dict[str, Any]
+    path: Path, *, dest_dir: Path, resource: Dict[str, Any], budget: _RarVolumeBudget | None = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     key = safe_filename(resource_key(resource), "archive")
     extract_root = dest_dir / EXTRACT_DIR_NAME / key
@@ -104,9 +130,12 @@ def extract_zip_safely(
                     )
                 if _is_archive_metadata(info.filename):
                     continue
+                if budget is not None:
+                    budget.reserve(info.file_size)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(info) as src:
-                    material_store.copy_stream(target, src, expected_bytes=info.file_size, source={
+                    stream = src if budget is None else _ArchiveDeadlineReader(src, budget)
+                    material_store.copy_stream(target, stream, expected_bytes=info.file_size, source={
                         'resource_id': resource.get('id') or resource.get('resource_id'), 'kind': 'archive_member',
                     })
                 extracted.append(
@@ -120,6 +149,8 @@ def extract_zip_safely(
                         "archive_path": info.filename,
                     }
                 )
+    except rar_volumes.VolumeError as error:
+        return [], str(error)
     except Exception as err:
         return [], f"{resource_name(resource) or path.name}: zip 解压失败: {err}"
     return extracted, ""
@@ -256,7 +287,7 @@ def _rar_extract(tool, path, extract_root, members, resource, *, deadline=None):
             raise rar_volumes.VolumeError('rar_archive_extract_failed') from None
 
 
-def _rar_member_limit(members, root, *, max_file, max_total):
+def _rar_member_limit(members, root, *, max_file, max_total, budget=None):
     if sum(not member["is_dir"] for member in members) > ARCHIVE_MAX_FILES:
         return 'archive_file_limit'
     if len(members) > 2 * ARCHIVE_MAX_FILES:
@@ -277,6 +308,8 @@ def _rar_member_limit(members, root, *, max_file, max_total):
         total += member['size']
         if total > max_total:
             return 'rar_archive_total_size_limit'
+    if budget is not None:
+        budget.reserve(total)
     return ''
 
 
@@ -293,7 +326,7 @@ def _rar_children(root, members, resource):
 
 
 def extract_rar_safely(
-    path: Path, *, dest_dir: Path, resource: Dict[str, Any]
+    path: Path, *, dest_dir: Path, resource: Dict[str, Any], budget: _RarVolumeBudget | None = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     tool = _rar_tool()
     if not tool:
@@ -307,23 +340,27 @@ def extract_rar_safely(
         shutil.rmtree(extract_root)
     extract_root.mkdir(parents=True, exist_ok=True)
     try:
-        members = _rar_list_members(tool, path, monotonic() + ARCHIVE_EXTRACT_TIMEOUT_SEC)
+        deadline = budget.deadline if budget is not None else monotonic() + ARCHIVE_EXTRACT_TIMEOUT_SEC
+        members = _rar_list_members(tool, path, deadline)
         if failure := _rar_member_limit(members, extract_root, max_file=ARCHIVE_MAX_FILE_BYTES,
-                                        max_total=ARCHIVE_MAX_TOTAL_BYTES):
+                                        max_total=ARCHIVE_MAX_TOTAL_BYTES, budget=budget):
             return [], f"{failure}: {resource_name(resource) or path.name}"
-        _rar_extract(tool, path, extract_root, members, resource)
+        _rar_extract(tool, path, extract_root, members, resource,
+                     deadline=deadline if budget is not None else None)
         return _rar_children(extract_root, members, resource), ""
     except (OSError, ValueError) as error:
+        if budget is not None and isinstance(error, rar_volumes.VolumeError):
+            return [], str(error)
         return [], f"{resource_name(resource) or path.name}: rar 解包失败: {error}"
 
 
 def _extract_archive(
-    path: Path, *, dest_dir: Path, resource: Dict[str, Any]
+    path: Path, *, dest_dir: Path, resource: Dict[str, Any], budget: _RarVolumeBudget | None = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     return (
-        extract_zip_safely(path, dest_dir=dest_dir, resource=resource)
+        extract_zip_safely(path, dest_dir=dest_dir, resource=resource, budget=budget)
         if path.suffix.lower() in ZIP_EXTS
-        else extract_rar_safely(path, dest_dir=dest_dir, resource=resource)
+        else extract_rar_safely(path, dest_dir=dest_dir, resource=resource, budget=budget)
     )
 
 
@@ -333,10 +370,12 @@ def _flatten_archive_children(
     *,
     root_resource_id: str,
     depth: int,
-    max_total: int = ARCHIVE_MAX_TOTAL_BYTES,
+    budget: _RarVolumeBudget | None = None,
 ) -> Tuple[List[Dict[str, Any]], str]:
     flattened: List[Dict[str, Any]] = []
     for child in children:
+        if budget is not None:
+            budget.check_deadline()
         path = Path(str(child.get("path") or ""))
         if rar_volumes.LEGACY_PART_NAME.fullmatch(path.name):
             return [], 'rar_volume_nested_unsupported'
@@ -361,7 +400,7 @@ def _flatten_archive_children(
                 "name": str(child.get("name") or path.name),
             }
             nested_children, err = _extract_archive(
-                path, dest_dir=dest_dir, resource=nested_resource
+                path, dest_dir=dest_dir, resource=nested_resource, budget=budget,
             )
             if err:
                 return [], err
@@ -370,7 +409,7 @@ def _flatten_archive_children(
                 nested_children,
                 root_resource_id=root_resource_id,
                 depth=depth + 1,
-                max_total=max_total,
+                budget=budget,
             )
             if err:
                 return [], err
@@ -383,11 +422,10 @@ def _flatten_archive_children(
             flattened.extend(nested_flattened)
         if len(flattened) > ARCHIVE_MAX_FILES:
             return [], f"archive_file_limit: 压缩包展开后文件数超过限制 {ARCHIVE_MAX_FILES}"
-        total_size = sum(
-            Path(str(item.get("path") or "")).stat().st_size for item in flattened
-        )
-        if total_size > max_total:
-            return [], "压缩包展开后总大小超过限制"
+        if budget is None:
+            total_size = sum(Path(item["path"]).stat().st_size for item in flattened)
+            if total_size > ARCHIVE_MAX_TOTAL_BYTES:
+                return [], "压缩包展开后总大小超过限制"
     return flattened, ""
 
 
@@ -512,6 +550,7 @@ def _extract_volume_group(tool, group_root, entries, *, physical_size):
                 raise rar_volumes.VolumeError('rar_volume_source_changed')
         start = Path(directory) / f'evidence.part{1:0{width}d}.rar'
         deadline = monotonic() + ARCHIVE_EXTRACT_TIMEOUT_SEC
+        budget = _RarVolumeBudget(RAR_VOLUME_MAX_TOTAL_BYTES, deadline)
         try:
             members = _verified_rar_members(tool, start, volumes=len(entries),
                                             physical_size=physical_size, deadline=deadline)
@@ -520,8 +559,12 @@ def _extract_volume_group(tool, group_root, entries, *, physical_size):
                 raise rar_volumes.VolumeError('rar_volume_listing_failed') from None
             raise
         if failure := _rar_member_limit(members, extract_root, max_file=RAR_VOLUME_MAX_FILE_BYTES,
-                                        max_total=RAR_VOLUME_MAX_TOTAL_BYTES):
+                                        max_total=RAR_VOLUME_MAX_TOTAL_BYTES, budget=budget):
             raise rar_volumes.VolumeError(failure)
+        if sum(not member['is_dir'] for member in members) != 1 or any(len(volume.file_sizes) != 1 for _, volume in entries):
+            raise rar_volumes.VolumeError('rar_volume_multiple_members_unverified')
+        if any(not volume.file_sizes[0] for _, volume in entries):
+            raise rar_volumes.VolumeError('rar_volume_group_unverified')
         try:
             with _rar_output([tool, 't', '-tRar5', '-p-', '-bd', '-bso0', '-bse0', '-bsp0',
                               '--', str(start)], deadline) as output:
@@ -539,7 +582,7 @@ def _extract_volume_group(tool, group_root, entries, *, physical_size):
             raise
     children, error = _flatten_archive_children(
         group_root, _rar_children(extract_root, members, first.resource),
-        root_resource_id=first.item['resource_id'], depth=1, max_total=RAR_VOLUME_MAX_TOTAL_BYTES,
+        root_resource_id=first.item['resource_id'], depth=1, budget=budget,
     )
     if error:
         if error.startswith('archive_file_limit:'):
@@ -547,6 +590,7 @@ def _extract_volume_group(tool, group_root, entries, *, physical_size):
         raise rar_volumes.VolumeError(error if re.fullmatch(r'rar_[a-z_]+', error) else 'rar_archive_nested_failed')
     if not children:
         raise rar_volumes.VolumeError('rar_archive_members_empty')
+    budget.check_deadline()
     return children
 
 

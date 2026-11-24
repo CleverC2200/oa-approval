@@ -8,6 +8,7 @@ import json
 import hashlib
 import os
 from pathlib import Path
+from tempfile import mkdtemp
 import time
 from typing import Any, Dict, List, Literal, Protocol, Tuple
 from urllib.parse import urlsplit
@@ -470,16 +471,20 @@ class _DownloadBatch:
         )
 
     def _direct(self, resource) -> TransferOutcome:
+        dest_dir = self._original_destination()
         if resource.get("_invoice_original") and self.original_context is not None:
             return self.sources.originals.read(
                 self.original_context,
                 resource,
-                dest_dir=self.dest_dir,
+                dest_dir=dest_dir,
                 timeout_sec=self.timeout_sec,
             )
         return self.sources.transfer.direct(
-            resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+            resource, dest_dir=dest_dir, timeout_sec=self.timeout_sec
         )
+
+    def _original_destination(self) -> Path:
+        return Path(mkdtemp(prefix='original-', dir=self.dest_dir))
 
     def _obtain(self):
         pending = []
@@ -537,7 +542,7 @@ class _DownloadBatch:
             return outcome.item
         if isinstance(outcome, Unavailable):
             outcome = self.sources.transfer.browser(
-                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+                resource, dest_dir=self._original_destination(), timeout_sec=self.timeout_sec
             )
         if not isinstance(outcome, Downloaded):
             return outcome

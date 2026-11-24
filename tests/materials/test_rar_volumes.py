@@ -1,3 +1,4 @@
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,11 @@ from zipfile import ZipFile
 
 import pytest
 
-from apps.oa.materials import cli
-from tests.rar_fixtures import FIRST, LAST, MEMBER_OVER_LIMIT, SINGLE, TOTAL_OVER_LIMIT, WRONG_LAST
+from apps.oa.materials import archives, cli
+from tests.rar_fixtures import (
+    FIRST, LAST, MEMBER_OVER_LIMIT, SINGLE, TOTAL_OVER_LIMIT, WRONG_LAST,
+    stored_rar5_archive, stored_rar5_volumes,
+)
 
 
 @pytest.mark.skipif(not shutil.which('7zz'), reason='7zz is required for RAR volume integration')
@@ -88,6 +92,26 @@ def test_invalid_rar_volume_sets_preserve_originals_and_fail_before_preparation(
     assert [first.read_bytes(), last.read_bytes()] == [first_bytes, last_bytes]
 
 
+@pytest.mark.skipif(not shutil.which('7zz'), reason='7zz is required for RAR volume integration')
+def test_matching_boundary_member_cannot_verify_other_files_in_mixed_rar_volumes(tmp_path, capsys, monkeypatch):
+    def invoice(amount):
+        return f'<Invoice><Amount>{amount}</Amount></Invoice>'.encode()
+
+    boundary = invoice('9.25') + b' ' * 1000
+    first_bytes, _ = stored_rar5_volumes('shared.xml', boundary, preceding=[('first.xml', invoice('1.01'))],
+                                         following=[('last.xml', invoice('1.02'))])
+    _, last_bytes = stored_rar5_volumes('shared.xml', boundary, preceding=[('first.xml', invoice('2.01'))],
+                                        following=[('last.xml', invoice('2.02'))])
+    first, last = (tmp_path / f'evidence.part{number}.rar' for number in (1, 2))
+    first.write_bytes(first_bytes)
+    last.write_bytes(last_bytes)
+    commands = _trace_7zz(tmp_path, monkeypatch)
+
+    assert _failed_prepare(capsys, tmp_path / 'output', [first, last]) == {'rar_volume_multiple_members_unverified'}
+    assert commands.read_text().splitlines() == ['l']
+    assert [first.read_bytes(), last.read_bytes()] == [first_bytes, last_bytes]
+
+
 def test_complete_rar_volume_set_requires_7zz(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv('PATH', str(tmp_path))
     first, last = (tmp_path / f'evidence.part{index}.rar' for index in (1, 2))
@@ -113,6 +137,31 @@ def test_rar_volume_limits_check_real_inventory_before_testing_or_extracting(
     assert _failed_prepare(capsys, tmp_path / 'output', paths) == {reason}
     assert commands.read_text().splitlines() == ['l']
     assert [path.read_bytes() for path in paths] == list(parts)
+
+
+@pytest.mark.skipif(not shutil.which('7zz'), reason='7zz is required for RAR volume integration')
+@pytest.mark.parametrize('total_limit', [1703, 1704], ids=['over-limit', 'exact-limit'])
+def test_nested_zip_expansion_counts_container_and_member_against_rar_group_limit(tmp_path, capsys, monkeypatch, total_limit):
+    with BytesIO() as payload:
+        with ZipFile(payload, 'w') as nested:
+            nested.writestr('manifest.xml', b'<Invoice><Amount>73.12</Amount></Invoice>' + b' ' * 750)
+        parts = stored_rar5_volumes('nested.zip', payload.getvalue())
+    monkeypatch.setattr(archives, 'RAR_VOLUME_MAX_TOTAL_BYTES', total_limit)
+    first, last = (tmp_path / f'evidence.part{number}.rar' for number in (1, 2))
+    for path, part in zip((first, last), parts):
+        path.write_bytes(part)
+    output = tmp_path / 'output'
+
+    if total_limit == 1703:
+        assert _failed_prepare(capsys, output, [first, last]) == {'rar_archive_total_size_limit'}
+    else:
+        assert cli.main(['prepare', '--file', str(first), '--file', str(last), '--output-dir', str(output)]) == 0
+        result = json.loads(capsys.readouterr().out)
+        material = json.loads(Path(result['material_file']).read_text())
+        assert material['resources'][0]['extracted_files'][0]['archive_path'] == 'nested.zip::manifest.xml'
+        assert cli.main(['read', result['material_file'], '--format', 'json']) == 0
+        assert '73.12' in json.loads(capsys.readouterr().out)['text']
+    assert [first.read_bytes(), last.read_bytes()] == list(parts)
 
 
 @pytest.mark.skipif(not shutil.which('7zz'), reason='7zz is required for RAR volume integration')
@@ -186,6 +235,27 @@ def test_rar_group_times_out_and_does_not_publish_partial_children(tmp_path, mon
     assert {item['reason'] for item in result['diagnostics']} == {'rar_archive_timeout'}
     assert commands.read_text().splitlines() == ['l', 't', 'x']
     assert not [path for path in output.rglob('*') if path.is_file() and path.name != 'material.json']
+
+
+@pytest.mark.skipif(not shutil.which('7zz'), reason='7zz is required for RAR volume integration')
+def test_nested_rar_extractor_shares_the_parent_group_deadline(tmp_path, monkeypatch, capsys):
+    completed_extracts = tmp_path / 'completed-extracts'
+    real_7zz = shlex.quote(shutil.which('7zz'))
+    slow_extract = (f'/bin/sleep 1.1\nprintf "complete\\n" >> {shlex.quote(str(completed_extracts))}\n'
+                    f'exec {real_7zz} "$@"')
+    commands = _trace_7zz(tmp_path, monkeypatch, extract=f'/bin/sh -c {shlex.quote(slow_extract)} sh "$@"')
+    monkeypatch.setenv('PATH', str(tmp_path))
+    monkeypatch.setattr(archives, 'ARCHIVE_EXTRACT_TIMEOUT_SEC', 2)
+    first, last = (tmp_path / f'evidence.part{number}.rar' for number in (1, 2))
+    nested = stored_rar5_archive('manifest.xml', b'<Invoice><Amount>73.12</Amount></Invoice>')
+    parts = stored_rar5_volumes('nested.rar', nested)
+    for path, part in zip((first, last), parts):
+        path.write_bytes(part)
+
+    assert _failed_prepare(capsys, tmp_path / 'output', [first, last]) == {'rar_archive_timeout'}
+    assert completed_extracts.read_text().splitlines() == ['complete']
+    assert commands.read_text().splitlines() == ['l', 't', 'x', 'l', 'x']
+    assert [first.read_bytes(), last.read_bytes()] == list(parts)
 
 
 def test_manifest_cannot_certify_a_missing_rar_volume(tmp_path, capsys):

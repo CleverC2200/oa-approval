@@ -147,19 +147,44 @@ def test_collection_preserves_signature_and_detail_originals(
     assert (detail_image['path'] == signature_image['path']) == (signature_amount == 'recorded amount')
 
 
-def test_collection_preserves_each_verified_reference_to_same_id(collect_attachments, workbook_bytes):
+def test_collection_keeps_originals_when_two_ids_yield_the_same_download_filename(collect_attachments):
+    collect, calls = collect_attachments
+    original_name = '101_1_evidence.xml'
+    originals = {
+        '101': b'<Invoice><Amount>73.12</Amount></Invoice>',
+        '101_1': b'<Invoice><Amount>28.46</Amount></Invoice>',
+    }
+    listed = [{**resource, 'name': original_name} for resource in resources(originals)]
+    links = [attachment_link(resource_id).replace('recorded.xlsx', original_name) for resource_id in originals]
+
+    material = collect(detail_fields=links[:1], logs=links[1:], listed=listed, originals=originals)
+
+    assert Counter(calls) == Counter(('recorded', resource_id) for resource_id in originals)
+    paths = {item['resource_id']: Path(item['local_readonly_path']) for item in material['resources']}
+    assert len(set(paths.values())) == 2
+    assert {resource_id: path.read_bytes() for resource_id, path in paths.items()} == originals
+    contents = {item['resource_id']: item for item in material['prepared']['structured_contents']}
+    for resource_id, amount in [('101', '73.12'), ('101_1', '28.46')]:
+        assert contents[resource_id]['source_path'] == str(paths[resource_id])
+        assert any(amount in line for line in contents[resource_id]['key_text'])
+
+
+@pytest.mark.parametrize('included_in_list', [False, True], ids=['html-only', 'listed'])
+def test_collection_preserves_each_verified_reference_to_same_id(collect_attachments, workbook_bytes, included_in_list):
     collect, calls = collect_attachments
     attachment = attachment_link('101')
     listed = resources(['101'])
     listed[0]['_trusted_source_references'] = [{'source_field_path': 'injected'}]
     material = collect(
         detail_fields=[attachment, attachment.replace('/news', 'https://external.invalid/news')],
-        logs=[attachment, attachment + attachment], listed=listed, originals={'101': workbook_bytes},
+        logs=[attachment, attachment + attachment], listed=listed if included_in_list else [],
+        originals={'101': workbook_bytes},
     )
 
     assert calls == [('recorded', '101')]
     resource, = material['resources']
     assert resource['owner_detail_id'] == 'detail[0].row[0]'
+    assert resource['source_field_path'] == ('detail[0].row[0].field[0]' if included_in_list else '')
     assert resource['source_references'] == [
         {'source_field_path': 'detail[0].row[0].field[0]', 'source_field_name': '附件',
          'owner_detail_id': 'detail[0].row[0]'},
@@ -260,7 +285,7 @@ def test_download_keeps_each_original_even_with_identical_content(
     assert Counter(recorded_download) == Counter(['first', 'second', 'different'])
     assert [item['resource_id'] for item in files] == ['first', 'second', 'different']
     paths = [Path(item['path']) for item in files]
-    assert set(paths) == set((tmp_path/'downloads').glob('*.xlsx'))
+    assert set(paths) == set((tmp_path/'downloads').rglob('*.xlsx'))
     assert len(set(paths)) == 3
     assert [path.read_bytes() for path in paths] == [workbook_bytes, workbook_bytes, workbook_bytes + b'changed']
 

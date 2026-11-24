@@ -1,9 +1,53 @@
 from base64 import b64decode
-from zlib import decompress
+from zlib import crc32, decompress
 
 
 def _fixture(encoded):
     return decompress(b64decode(encoded))
+
+
+def _vint(value):
+    result = bytearray()
+    while value >= 128:
+        result.append((value & 127) | 128)
+        value >>= 7
+    result.append(value)
+    return bytes(result)
+
+
+def _rar5_header(fields):
+    encoded = _vint(len(fields)) + fields
+    return crc32(encoded).to_bytes(4, 'little') + encoded
+
+
+def _stored_rar5_file(name, data, *, offset=0, stop=None):
+    chunk = data[offset:stop]
+    header_flags = 2 | (8 if offset else 0) | (16 if stop is not None else 0)
+    checksum = crc32(chunk if stop is not None else data).to_bytes(4, 'little')
+    filename = name.encode()
+    fields = (bytes((2, header_flags)) + _vint(len(chunk)) + b'\x04' + _vint(len(data))
+              + b'\x20' + checksum + b'\x00\x01' + _vint(len(filename)) + filename)
+    return _rar5_header(fields) + chunk
+
+
+def _stored_rar5_archive(blocks, *, volume=None, more_volumes=False):
+    archive_flags = {None: b'\x00', 1: b'\x01', 2: b'\x03\x01'}[volume]
+    return (b'Rar!\x1a\x07\x01\x00' + _rar5_header(b'\x01\x04' + archive_flags)
+            + b''.join(blocks) + _rar5_header(bytes((5, 4, more_volumes))))
+
+
+def stored_rar5_archive(name, data):
+    return _stored_rar5_archive([_stored_rar5_file(name, data)])
+
+
+def stored_rar5_volumes(name, data, *, preceding=(), following=()):
+    boundary = len(data) // 2
+    first = [_stored_rar5_file(*item) for item in preceding]
+    first.append(_stored_rar5_file(name, data, stop=boundary))
+    last = [_stored_rar5_file(name, data, offset=boundary)]
+    last.extend(_stored_rar5_file(*item) for item in following)
+    return (_stored_rar5_archive(first, volume=1, more_volumes=True),
+            _stored_rar5_archive(last, volume=2))
 
 
 FIRST = _fixture(
