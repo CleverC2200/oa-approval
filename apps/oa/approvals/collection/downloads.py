@@ -8,9 +8,10 @@ import json
 import hashlib
 import os
 from pathlib import Path
-import threading
+from tempfile import mkdtemp
 import time
 from typing import Any, Dict, List, Literal, Protocol, Tuple
+from urllib.parse import urlsplit
 
 from apps.oa.approvals.collection import cache as attachment_cache
 from apps.oa.approvals.sources import downloads as remote
@@ -23,7 +24,7 @@ from apps.oa.approvals.sources.download_errors import (
     TransferOutcome,
 )
 from apps.oa.approvals.sources.originals import OriginalContext, valid_original_file
-from apps.oa.materials import archives
+from apps.oa.materials import archives, rar_volumes
 from apps.oa.materials.resources import (
     attachment_resources,
     resource_name,
@@ -334,34 +335,6 @@ def build_download_sources(source_policy) -> DownloadSources:
     )
 
 
-class _ContentPool:
-    def __init__(self, dest_dir: Path):
-        self.dest_dir = dest_dir
-        self.existing_paths = frozenset(dest_dir.iterdir())
-        self.paths = {}
-        self.lock = threading.Lock()
-
-    def share(self, path: Path, *, newly_downloaded: bool = False) -> Path:
-        with self.lock:
-            digest = _attachment_content_sha256(path)
-            if not digest:
-                raise RuntimeError("attachment_content_unreadable")
-            key = (path.suffix.lower(), digest)
-            previous = self.paths.get(key)
-            if previous is None:
-                self.paths[key] = path
-                return path
-            if (
-                newly_downloaded
-                and path != previous
-                and path not in self.existing_paths
-                and path.parent.resolve() == self.dest_dir.resolve()
-                and not path.is_symlink()
-            ):
-                path.unlink()
-            return previous
-
-
 def _stop_error() -> DownloadError:
     return DownloadError(
         runtime_control.STOP_CODE, "已请求停止财务预审，停止本单附件下载"
@@ -379,6 +352,7 @@ class _DownloadBatch:
         request_id,
         flow_key,
         reuse_cache,
+        volume_sources,
     ):
         self.targets = targets
         self.sources = sources
@@ -389,12 +363,11 @@ class _DownloadBatch:
             dest_dir, request_id=request_id, flow_key=flow_key
         )
         self.reuse_cache = reuse_cache
-        self.content = _ContentPool(dest_dir)
+        self.volume_sources = volume_sources
         self.legacy_resources = _load_manifest(dest_dir).setdefault("resources", {})
         self.original_context = None
         self.outcomes = [Unavailable() for _ in targets]
-        self.items = []
-        self.errors = []
+        self.errors = {}
         self.cache_entries = []
 
     def run(self) -> DownloadResult:
@@ -406,16 +379,19 @@ class _DownloadBatch:
                 return DownloadResult((), errors, "blocked")
         self._obtain()
         self._materialize()
+        self._expand_archives()
         if self.original_context is not None:
             errors = self._check_terminal_sources()
             if errors:
                 return DownloadResult((), errors, "blocked")
         self._publish_cache()
         _remove_legacy_manifest(self.dest_dir)
+        errors = [self.errors[key] for resource in self.targets if (key := resource_key(resource)) in self.errors]
+        errors.sort(key=lambda error: error.code not in _FATAL_DOWNLOAD_ERROR_CODES)
         return DownloadResult(
-            tuple(self.items),
-            tuple(self.errors),
-            "partial" if self.errors else "complete",
+            tuple(item for _, item in self.cache_entries),
+            tuple(errors),
+            "partial" if errors else "complete",
         )
 
     def _check_originals(self) -> tuple[DownloadError, ...]:
@@ -472,7 +448,7 @@ class _DownloadBatch:
         )
 
     def _cached(self, resource) -> dict | None:
-        if not self.reuse_cache:
+        if not self.reuse_cache or rar_volumes.PART_NAME.fullmatch(resource_name(resource)):
             return None
         entry = _cached_attachment_entry(
             self.dest_dir,
@@ -495,27 +471,26 @@ class _DownloadBatch:
         )
 
     def _direct(self, resource) -> TransferOutcome:
+        dest_dir = self._original_destination()
         if resource.get("_invoice_original") and self.original_context is not None:
-            outcome = self.sources.originals.read(
+            return self.sources.originals.read(
                 self.original_context,
                 resource,
-                dest_dir=self.dest_dir,
+                dest_dir=dest_dir,
                 timeout_sec=self.timeout_sec,
             )
-        else:
-            outcome = self.sources.transfer.direct(
-                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
-            )
-        if isinstance(outcome, Downloaded):
-            return Downloaded(self.content.share(outcome.path, newly_downloaded=True))
-        return outcome
+        return self.sources.transfer.direct(
+            resource, dest_dir=dest_dir, timeout_sec=self.timeout_sec
+        )
+
+    def _original_destination(self) -> Path:
+        return Path(mkdtemp(prefix='original-', dir=self.dest_dir))
 
     def _obtain(self):
         pending = []
         for index, resource in enumerate(self.targets):
             cached = self._cached(resource)
             if cached:
-                cached["path"] = str(self.content.share(Path(cached["path"])))
                 self.outcomes[index] = _Cached(cached)
             else:
                 pending.append((index, resource))
@@ -542,29 +517,33 @@ class _DownloadBatch:
                         )
                     )
 
-    def _expanded(self, resource, item, *, cached):
-        if not valid_original_file(resource, Path(item['path'])):
-            return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
-        item, error = archives._attach_archive_children(self.dest_dir, resource, item)
-        if error:
-            code = (
-                "attachment_download_failed" if cached else "attachment_archive_failed"
-            )
-            reason = "archive_file_limit" if error.startswith("archive_file_limit: ") else "archive_expansion_failed"
-            return Failed(DownloadError(code, error, ({'stage': 'archive_expand', 'reason': reason},)))
-        return item
+    def _volume_source(self, resource):
+        if not rar_volumes.PART_NAME.fullmatch(resource_name(resource)):
+            return None
+        scope = self.volume_sources.get(str(resource.get('id') or ''))
+        if scope is None:
+            return None
+        raw_url = str(resource.get('downloadUrl') or resource.get('download_url') or '')
+        try:
+            origin = urlsplit(self.sources.transfer.normalize_download_url(
+                raw_url, allow_extra_hosts=bool(resource.get('allowExtraDownloadHost')),
+            ))
+            port = origin.port or 443
+        except ValueError:
+            return None
+        if origin.scheme != 'https' or not origin.hostname or origin.username or origin.password:
+            return None
+        return (origin.scheme, origin.hostname, str(port), *scope)
 
     def _materialize_one(self, resource, outcome):
         if isinstance(outcome, _Cached):
-            return self._expanded(resource, outcome.item, cached=True)
+            if not valid_original_file(resource, Path(outcome.item['path'])):
+                return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
+            return outcome.item
         if isinstance(outcome, Unavailable):
             outcome = self.sources.transfer.browser(
-                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+                resource, dest_dir=self._original_destination(), timeout_sec=self.timeout_sec
             )
-            if isinstance(outcome, Downloaded):
-                outcome = Downloaded(
-                    self.content.share(outcome.path, newly_downloaded=True)
-                )
         if not isinstance(outcome, Downloaded):
             return outcome
         path = outcome.path
@@ -576,27 +555,45 @@ class _DownloadBatch:
                 )
             )
         item = {
-            "resource_id": str(resource.get("id") or ""),
+            "resource_id": str(resource.get("id") or resource_key(resource)),
             "name": resource_name(resource) or path.name,
             "path": str(path),
             "reused": False,
         }
-        return self._expanded(resource, item, cached=False)
+        if not valid_original_file(resource, path):
+            return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
+        return item
 
     def _materialize(self):
         for resource, outcome in zip(self.targets, self.outcomes):
             item = self._materialize_one(resource, outcome)
             if isinstance(item, Failed):
-                self.errors.append(item.error)
+                self.errors[resource_key(resource)] = item.error
                 if item.error.code in _FATAL_DOWNLOAD_ERROR_CODES:
-                    self.errors.insert(0, self.errors.pop())
                     break
             elif isinstance(item, dict):
-                self.items.append(item)
                 self.cache_entries.append((resource, item))
+
+    def _expand_archives(self):
+        failures = archives.expand_attachment_archives([
+            archives.ArchiveAttachment(resource, item, self.dest_dir, self._volume_source(resource))
+            for resource, item in self.cache_entries
+        ])
+        if not failures:
+            return
+        failed_ids = {failure.resource_id for failure in failures}
+        attachments = {item['resource_id']: (resource, item) for resource, item in self.cache_entries}
+        for failure in failures:
+            resource, item = attachments[failure.resource_id]
+            code = 'attachment_download_failed' if item['reused'] else 'attachment_archive_failed'
+            self.errors[resource_key(resource)] = DownloadError(code, failure.message, (failure.diagnostic(),))
+        self.cache_entries = [(resource, item) for resource, item in self.cache_entries
+                              if item['resource_id'] not in failed_ids]
 
     def _publish_cache(self):
         for resource, item in self.cache_entries:
+            if item.get('archive_volume_set'):
+                continue
             metadata = {}
             if resource.get("_invoice_original"):
                 digest = _attachment_content_sha256(Path(item["path"]))
@@ -626,6 +623,7 @@ def download_resources(
     request_id: str = "",
     flow_key: str = "",
     reuse_cache: bool = False,
+    volume_sources: dict[str, tuple[str, ...]] | None = None,
 ) -> DownloadResult:
     targets, errors = _unique_attachment_resources(resources, transfer=sources.transfer)
     if errors:
@@ -658,4 +656,5 @@ def download_resources(
         request_id=str(request_id).strip(),
         flow_key=flow_key,
         reuse_cache=reuse_cache,
+        volume_sources=volume_sources or {},
     ).run()

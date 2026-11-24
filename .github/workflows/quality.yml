@@ -8,5 +8,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
+      - name: Set up 7-Zip for RAR volume tests
+        run: |
+          set -eu
+          tool_dir="$(mktemp -d "$RUNNER_TEMP/oa-7zip.XXXXXX")"
+          package=7z2606-linux-x64.tar.xz
+          cd "$tool_dir"
+          curl --fail --silent --show-error --location --max-time 120 \
+            "https://github.com/ip7z/7zip/releases/download/26.06/$package" --output "$package"
+          echo "2b539cf067b2ad48e1baa5093dbaa8818b73542d1222a0ffde9dc5f2922ea62e  $package" | sha256sum --check
+          tar -xJf "$package" 7zz
+          test -x ./7zz
+          echo "$tool_dir" >> "$GITHUB_PATH"
       - run: bash .codex/python.sh setup
       - run: bash .codex/python.sh check

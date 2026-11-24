@@ -92,12 +92,21 @@ def prepare(*, files=None, manifest=None, output_dir: Path):
     artifact = {'schema_version': 1, 'kind': 'local_material', 'status': 'preparing', 'resources': resources,
                 'prepared': {'images': [], 'manifest': [], 'structured_contents': []}}
     try:
-        for index, item in enumerate(resources, 1):
-            expanded, error = archives._attach_archive_children(output / 'archives' / str(index), item, item)
-            if error or expanded is None:
-                raise ValueError('material_archive_invalid')
-            resources[index - 1] = _record(expanded, base=Path.cwd(), fallback=item['resource_id'])
-            for source in _sources([resources[index - 1]]):
+        failures = archives.expand_attachment_archives([
+            archives.ArchiveAttachment(item, item, output / 'archives' / str(index),
+                                       ('local', str(Path(item['path']).parent.resolve())),
+                                       original_name=Path(item['path']).name)
+            for index, item in enumerate(resources, 1)
+        ])
+        if failures:
+            artifact['diagnostics'] = [failure.diagnostic() for failure in failures]
+            raise ValueError('material_archive_invalid')
+        for index, item in enumerate(resources):
+            resources[index] = _record(item, base=Path.cwd(), fallback=item['resource_id'])
+            if item.get('archive_volume_set'):
+                resources[index]['archive_volume_set'] = item['archive_volume_set']
+                resources[index]['archive_status'] = item['archive_status']
+            for source in _sources([resources[index]]):
                 if sources.setdefault(source['path'], source['content_sha256']) != source['content_sha256']:
                     raise ValueError('material_source_changed')
         identities = {}
@@ -119,4 +128,4 @@ def prepare(*, files=None, manifest=None, output_dir: Path):
     return {'status': artifact['status'], 'material_file': str(material_file), 'resources': len(resources),
             'images': len(artifact['prepared']['images']),
             'structured_contents': len(artifact['prepared']['structured_contents']),
-            **({'error_code': artifact['error_code']} if 'error_code' in artifact else {})}
+            **({key: artifact[key] for key in ('error_code', 'diagnostics') if key in artifact})}

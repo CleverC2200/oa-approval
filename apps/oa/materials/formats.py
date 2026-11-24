@@ -981,6 +981,10 @@ class _Preparation:
     def run(self, attachments: list[dict]) -> PreparedMaterial:
         images, manifest, structured, validation = [], [], [], []
         for item in attachments:
+            if item.get('archive_status') == 'volume_verified':
+                manifest.append({'resource_id': str(item.get('resource_id') or ''), 'name': str(item.get('name') or ''),
+                                 'status': 'archive_volume_verified', 'archive_volume_set': item['archive_volume_set']})
+                continue
             extracted = item.get('extracted_files') if isinstance(item.get('extracted_files'), list) else []
             results = []
             for child in [entry for entry in extracted if isinstance(entry, dict)] if extracted else [item]:

@@ -21,6 +21,8 @@ def copy_stream(path: Path, stream, *, expected_bytes: int | None = None,
                 size += len(chunk)
                 if size > MAX_FILE_BYTES:
                     raise ValueError('attachment_file_too_large')
+                if expected_bytes is not None and size > expected_bytes:
+                    raise ValueError('attachment_content_incomplete')
                 output.write(chunk)
             output.flush()
             os.fsync(output.fileno())

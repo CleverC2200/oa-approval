@@ -255,18 +255,23 @@ def _resource_descriptor(
 
     source = str(resource.get("source") or "").strip()
     source_system = source or ("travel_platform" if trip_content_id else "weaver_e9")
+    references = evidence_packet.source_references(resource)
+    source_field_path = str(resource.get("_trusted_source_field_path") or "")
+    source_field_name = str(resource.get("_trusted_source_field_name") or "")
+    if not source_field_path and len(references) == 1:
+        reference = references[0]
+        if reference["source_field_path"].startswith("workflowRequestLogs["):
+            source_field_path = reference["source_field_path"]
+            source_field_name = reference["source_field_name"]
     return {
         "resource_id": resource_id,
         "source_resource_id": raw_id,
         "raw_resource_id": raw_id,
         "request_id": request_id,
         "owner_detail_id": owner_detail_id,
-        "source_field_path": str(
-            resource.get("_trusted_source_field_path") or ""
-        ),
-        "source_field_name": str(
-            resource.get("_trusted_source_field_name") or ""
-        ),
+        "source_field_path": source_field_path,
+        "source_field_name": source_field_name,
+        "source_references": references,
         "review_role": str(resource.get("_trusted_review_role") or ""),
         "source_system": source_system,
         "source_request_id": str(
@@ -380,7 +385,7 @@ def _merge_resources(
     discovered_resources: list[dict[str, Any]], *, origins,
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
-    identities: dict[str, tuple[str, str]] = {}
+    identities: dict[str, tuple[str, str, dict[str, Any]]] = {}
 
     def add(resource: dict[str, Any], *, weaker_discovery: bool) -> None:
         raw_id = str(
@@ -408,16 +413,18 @@ def _merge_resources(
         owner = str(resource.get("_trusted_owner_detail_id") or "").strip()
         previous = identities.get(key)
         if previous is None:
-            identities[key] = (content_identity, owner)
-            merged.append(resource)
+            item = dict(resource)
+            identities[key] = (content_identity, owner, item)
+            merged.append(item)
             return
-        previous_content, previous_owner = previous
+        previous_content, previous_owner, item = previous
         if previous_content != content_identity:
             raise RuntimeError(attachments.ATTACHMENT_IDENTITY_CONFLICT_CODE)
         if previous_owner != owner:
             if weaker_discovery and trip_id and not owner:
                 return
             raise RuntimeError("resource_ownership_untrusted")
+        evidence_packet.merge_source_references(item, resource)
 
     for resource in form_resources:
         add(resource, weaker_discovery=False)
@@ -650,6 +657,10 @@ def _collect_case(
             allow_browser_download=allow_browser_download,
             request_id=str(request_id),
             flow_key=str(config.get("flow_key") or ""),
+            volume_sources={descriptor["raw_resource_id"]: (
+                descriptor["source_system"], descriptor["source_request_id"] or str(request_id),
+                descriptor["owner_detail_id"] or "", descriptor["source_field_path"],
+            ) for descriptor in descriptors},
         )
         downloaded, download_errors = download_result.items, download_result.errors
         if download_errors or len(downloaded) != len(download_targets):
@@ -675,6 +686,13 @@ def _collect_case(
                 "application/octet-stream"
             )
             normalized_item = dict(item)
+            if volume_set := item.get("archive_volume_set"):
+                descriptor["archive_volume_set"] = {
+                    **volume_set,
+                    "volume_resource_ids": [descriptors_by_raw_id[raw_id]["resource_id"]
+                                            for raw_id in volume_set["volume_resource_ids"]],
+                }
+                normalized_item["archive_volume_set"] = descriptor["archive_volume_set"]
             normalized_item["path"] = str(path)
             bound_item = _bind_downloaded_item(normalized_item, descriptor)
             if (

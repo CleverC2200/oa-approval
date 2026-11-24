@@ -173,7 +173,7 @@ def test_archive_pdf_and_excel_preserve_all_content_and_logical_resources(tmp_pa
     assert sheets['detail-b'] == sheets['detail-a']
 
 
-def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, monkeypatch):
+def test_download_retains_each_identical_image_original(tmp_path, monkeypatch):
     monkeypatch.setenv('OA_AUTH_ENV_FILE', str(tmp_path / 'no-auth.env'))
     from apps.oa.approvals.collection import downloads as attachments
 
@@ -193,8 +193,9 @@ def test_download_reuses_content_but_retains_each_attachment_identity(tmp_path, 
     assert errors == []
     assert [item['resource_id'] for item in downloaded] == ['a', 'b']
     assert [item['name'] for item in downloaded] == ['A.png', 'B.png']
-    assert downloaded[0]['path'] == downloaded[1]['path']
-    assert len(list((tmp_path / 'files').glob('*.png'))) == 1
+    assert downloaded[0]['path'] != downloaded[1]['path']
+    assert Path(downloaded[0]['path']).read_bytes() == Path(downloaded[1]['path']).read_bytes()
+    assert len(list((tmp_path / 'files').rglob('*.png'))) == 2
 
 
 def test_compression_preserves_original_and_creates_bounded_reading_copy(tmp_path, monkeypatch):

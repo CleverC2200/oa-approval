@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -134,7 +135,7 @@ def test_fatal_result_keeps_order_and_waits_for_all_direct_transfers(
         "attachment_download_failed",
     ]
     assert calls == [("direct", name) for name in names] + [("browser", "fallback")]
-    assert (tmp_path / "downloads" / "later.txt").read_text() == "later evidence"
+    assert [path.read_text() for path in (tmp_path / "downloads").rglob("later.txt")] == ["later evidence"]
 
 
 def test_cache_write_failure_does_not_change_download_result(tmp_path, monkeypatch):
@@ -157,4 +158,4 @@ def test_cache_write_failure_does_not_change_download_result(tmp_path, monkeypat
     assert result.disposition == "complete"
     assert result.errors == ()
     assert result.items[0]["resource_id"] == "one"
-    assert (tmp_path / "downloads" / "recorded.txt").read_text() == "recorded evidence"
+    assert Path(result.items[0]["path"]).read_text() == "recorded evidence"

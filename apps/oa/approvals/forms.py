@@ -19,6 +19,11 @@ TRIP_ATTACHMENT_ID_RE = re.compile(
 _TRUSTED_OWNER_DETAIL_KEY = "_trusted_owner_detail_id"
 _TRUSTED_SOURCE_FIELD_PATH_KEY = "_trusted_source_field_path"
 _TRUSTED_SOURCE_FIELD_NAME_KEY = "_trusted_source_field_name"
+_TRUSTED_SOURCE_REFERENCES_KEY = "_trusted_source_references"
+_TRUSTED_ATTACHMENT_BINDING_KEYS = (
+    _TRUSTED_OWNER_DETAIL_KEY, _TRUSTED_SOURCE_FIELD_PATH_KEY,
+    _TRUSTED_SOURCE_FIELD_NAME_KEY, _TRUSTED_SOURCE_REFERENCES_KEY,
+)
 _COMPANY_NAME_COMPANION_FIELDS = {"bxgs": ("bxgsmc",)}
 
 
@@ -165,38 +170,42 @@ def _resource_name_from_url(url: str) -> str:
     return attachments.safe_filename(name, "attachment.bin")
 
 
+def _field_attachment_reference(field: dict[str, Any]) -> dict[str, str | None]:
+    path = field["path"]
+    return {
+        "source_field_path": path,
+        "source_field_name": field["name"],
+        "owner_detail_id": path.rpartition(".field[")[0] if field["table"].startswith("detail_") else None,
+    }
+
+
 def attachment_url_resources_from_fields(
     data: dict[str, Any], *, origins,
 ) -> list[dict[str, Any]]:
-    resources: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    resources: dict[str, dict[str, Any]] = {}
     for field in extract_fields(data):
-        if "附件" not in str(field.get("name") or ""):
+        if "附件" not in field["name"]:
             continue
-        text = "\n".join(str(field.get(key) or "") for key in ("raw_value", "value"))
+        reference = _field_attachment_reference(field)
+        text = "\n".join(field[key] for key in ("raw_value", "value"))
         for match in ATTACHMENT_FIELD_URL_RE.finditer(text):
-            url = match.group(0).strip()
-            parsed = urllib.parse.urlparse(url)
-            if (
-                not origins.permits_field_url(url)
-                or url in seen
-            ):
+            url = match.group(0)
+            if not origins.permits_field_url(url):
                 continue
-            seen.add(url)
-            resources.append(
-                {
-                    "id": (
-                        f"field_{field.get('table')}_{field.get('row')}_"
-                        f"{len(resources) + 1}"
-                    ),
+            if url not in resources:
+                resources[url] = {
+                    "id": f"field_{field['table']}_{field['row']}_{len(resources) + 1}",
                     "name": _resource_name_from_url(url),
                     "downloadUrl": url,
                     "allowExtraDownloadHost": True,
-                    _TRUSTED_SOURCE_FIELD_PATH_KEY: str(field.get("path") or ""),
-                    _TRUSTED_SOURCE_FIELD_NAME_KEY: str(field.get("name") or ""),
+                    _TRUSTED_SOURCE_FIELD_PATH_KEY: reference["source_field_path"],
+                    _TRUSTED_SOURCE_FIELD_NAME_KEY: reference["source_field_name"],
+                    _TRUSTED_SOURCE_REFERENCES_KEY: [],
                 }
-            )
-    return resources
+            references = resources[url][_TRUSTED_SOURCE_REFERENCES_KEY]
+            if reference not in references:
+                references.append(reference)
+    return list(resources.values())
 
 
 def _trip_attachment_identity(resource: dict[str, Any], *, origins) -> str:
@@ -208,34 +217,6 @@ def _trip_attachment_identity(resource: dict[str, Any], *, origins) -> str:
         return ""
     match = TRIP_ATTACHMENT_ID_RE.search(parsed.path)
     return str(match.group(1)) if match else ""
-
-
-def _attachment_resource_bindings(data: dict[str, Any], *, origins) -> dict[str, dict[str, str]]:
-    candidates: dict[str, set[tuple[str, str, str]]] = {}
-    for field in extract_fields(data):
-        table = str(field.get("table") or "")
-        owner_detail_id = ""
-        if table.startswith("detail_"):
-            table_index = table.removeprefix("detail_")
-            owner_detail_id = f"detail[{table_index}].row[{field.get('row')}]"
-        binding = (
-            str(field.get("path") or ""),
-            str(field.get("name") or ""),
-            owner_detail_id,
-        )
-        for resource_id, _filename, _link in _validated_html_links(str(field.get("attachment_html") or ""), origins=origins):
-            candidates.setdefault(resource_id, set()).add(binding)
-    bindings: dict[str, dict[str, str]] = {}
-    for resource_id, values in candidates.items():
-        if len(values) != 1:
-            continue
-        path, name, owner_detail_id = next(iter(values))
-        bindings[resource_id] = {
-            "source_field_path": path,
-            "source_field_name": name,
-            "owner_detail_id": owner_detail_id,
-        }
-    return bindings
 
 
 class _AttachmentLinkParser(HTMLParser):
@@ -254,7 +235,7 @@ class _AttachmentLinkParser(HTMLParser):
             self.links.append(match.group(1))
 
 
-def _validated_html_links(markup: str, *, origins) -> list[tuple[str, str, str]]:
+def _validated_html_links(markup: str, *, origins) -> list[tuple[str, str]]:
     parser = _AttachmentLinkParser()
     parser.feed(markup)
     links = []
@@ -274,99 +255,107 @@ def _validated_html_links(markup: str, *, origins) -> list[tuple[str, str, str]]
         filenames = query.get("filename", [f"attachment-{ids[0]}.bin"])
         if len(filenames) != 1 or not filenames[0]:
             continue
-        links.append((ids[0], filenames[0], link))
+        links.append((ids[0], filenames[0]))
     return links
 
 
-def _html_attachment_resources(data: dict[str, Any], *, origins) -> list[dict[str, Any]]:
-    sources = [
-        (str(field.get("path") or ""), str(field.get("name") or ""), str(field.get("attachment_html") or ""))
-        for field in extract_fields(data)
-    ]
+def _html_attachment_resources(data: dict[str, Any], *, origins) -> dict[str, dict[str, Any]]:
+    sources = [(_field_attachment_reference(field), field["attachment_html"]) for field in extract_fields(data)]
     for index, log in enumerate(data.get("workflowRequestLogs") or []):
         if isinstance(log, dict):
-            sources.append((f"workflowRequestLogs[{index}].annexDocHtmls", "签字附件", str(log.get("annexDocHtmls") or "")))
+            sources.append(({
+                "source_field_path": f"workflowRequestLogs[{index}].annexDocHtmls",
+                "source_field_name": "签字附件",
+                "owner_detail_id": None,
+            }, str(log.get("annexDocHtmls") or "")))
     rows: dict[str, dict[str, Any]] = {}
-    paths: dict[str, set[str]] = {}
-    for path, name, markup in sources:
-        for resource_id, filename, link in _validated_html_links(markup, origins=origins):
+    for reference, markup in sources:
+        for resource_id, filename in _validated_html_links(markup, origins=origins):
             rows.setdefault(resource_id, {
                 "id": resource_id, "name": filename,
                 "downloadUrl": "/weaver/weaver.file.FileDownload?" + urllib.parse.urlencode({"fileid": resource_id}),
-                _TRUSTED_SOURCE_FIELD_PATH_KEY: path,
-                _TRUSTED_SOURCE_FIELD_NAME_KEY: name,
+                _TRUSTED_SOURCE_REFERENCES_KEY: [],
             })
-            paths.setdefault(resource_id, set()).add(path)
-    for resource_id, row in rows.items():
-        if len(paths[resource_id]) != 1:
-            row.pop(_TRUSTED_SOURCE_FIELD_PATH_KEY, None)
-            row.pop(_TRUSTED_SOURCE_FIELD_NAME_KEY, None)
-    return list(rows.values())
+            references = rows[resource_id][_TRUSTED_SOURCE_REFERENCES_KEY]
+            if reference not in references:
+                references.append(reference)
+    return rows
+
+
+def _bind_html_attachment(resource: dict[str, Any], *, listed: bool) -> None:
+    references = resource[_TRUSTED_SOURCE_REFERENCES_KEY]
+    fields = [ref for ref in references if not ref["source_field_path"].startswith("workflowRequestLogs[")]
+    if len(fields) == 1 and fields[0]["owner_detail_id"]:
+        resource[_TRUSTED_OWNER_DETAIL_KEY] = fields[0]["owner_detail_id"]
+    primary = fields if listed else references
+    if len(primary) == 1:
+        resource[_TRUSTED_SOURCE_FIELD_PATH_KEY] = primary[0]["source_field_path"]
+        resource[_TRUSTED_SOURCE_FIELD_NAME_KEY] = primary[0]["source_field_name"]
+
+
+def source_references(resource: dict[str, Any]) -> list[dict[str, str | None]]:
+    if _TRUSTED_SOURCE_REFERENCES_KEY in resource:
+        return resource[_TRUSTED_SOURCE_REFERENCES_KEY]
+    if not (path := resource.get(_TRUSTED_SOURCE_FIELD_PATH_KEY)):
+        return []
+    return [{
+        "source_field_path": path,
+        "source_field_name": resource.get(_TRUSTED_SOURCE_FIELD_NAME_KEY),
+        "owner_detail_id": resource.get(_TRUSTED_OWNER_DETAIL_KEY),
+    }]
+
+
+def merge_source_references(resource: dict[str, Any], other: dict[str, Any]) -> None:
+    combined = list(source_references(resource))
+    for reference in source_references(other):
+        if reference not in combined:
+            combined.append(reference)
+    if combined:
+        resource[_TRUSTED_SOURCE_REFERENCES_KEY] = combined
 
 
 def logical_attachment_resources(
     data: dict[str, Any],
     resources: list[dict[str, Any]], *, origins,
 ) -> list[dict[str, Any]]:
-    bindings = _attachment_resource_bindings(data, origins=origins)
+    discovered = _html_attachment_resources(data, origins=origins)
     rows = []
+    known_ids = set()
     for resource in attachments.attachment_resources(resources):
         item = dict(resource)
-        item.pop(_TRUSTED_OWNER_DETAIL_KEY, None)
-        item.pop(_TRUSTED_SOURCE_FIELD_PATH_KEY, None)
-        item.pop(_TRUSTED_SOURCE_FIELD_NAME_KEY, None)
         resource_id = str(
             item.get("id") or item.get("resourceId") or item.get("fileId") or ""
         ).strip()
-        binding = bindings.get(resource_id)
-        if binding is not None:
-            owner_detail_id = binding["owner_detail_id"]
-            if owner_detail_id:
-                item[_TRUSTED_OWNER_DETAIL_KEY] = owner_detail_id
-            item[_TRUSTED_SOURCE_FIELD_PATH_KEY] = binding["source_field_path"]
-            item[_TRUSTED_SOURCE_FIELD_NAME_KEY] = binding["source_field_name"]
-        rows.append(item)
-    known_ids = {str(item.get("id") or item.get("resourceId") or item.get("fileId") or "") for item in rows}
-    for item in _html_attachment_resources(data, origins=origins):
-        resource_id = item["id"]
-        if resource_id in known_ids:
-            continue
-        binding = bindings.get(resource_id)
-        if binding and binding["owner_detail_id"]:
-            item[_TRUSTED_OWNER_DETAIL_KEY] = binding["owner_detail_id"]
+        for key in _TRUSTED_ATTACHMENT_BINDING_KEYS:
+            item.pop(key, None)
+        if resource_id in discovered:
+            item[_TRUSTED_SOURCE_REFERENCES_KEY] = discovered[resource_id][_TRUSTED_SOURCE_REFERENCES_KEY]
+            _bind_html_attachment(item, listed=True)
         rows.append(item)
         known_ids.add(resource_id)
-    known_urls = {
-        str(item.get("downloadUrl") or item.get("download_url") or "").strip()
-        for item in rows
-    }
-    for item in attachment_url_resources_from_fields(data, origins=origins):
-        url = str(item.get("downloadUrl") or "").strip()
-        if url and url not in known_urls:
+    for resource_id, item in discovered.items():
+        if resource_id not in known_ids:
+            _bind_html_attachment(item, listed=False)
             rows.append(item)
-            known_urls.add(url)
+    known_urls = {}
+    for item in rows:
+        url = str(item.get("downloadUrl") or item.get("download_url") or "").strip()
+        known_urls.setdefault(url, item)
+    for item in attachment_url_resources_from_fields(data, origins=origins):
+        existing = known_urls.get(item["downloadUrl"])
+        if existing is None:
+            rows.append(item)
+        else:
+            merge_source_references(existing, item)
 
     deduplicated: list[dict[str, Any]] = []
-    seen_trip_ids: set[str] = set()
+    trips: dict[str, dict[str, Any]] = {}
     for item in rows:
         trip_id = _trip_attachment_identity(item, origins=origins)
-        if trip_id and trip_id in seen_trip_ids:
-            continue
         if trip_id:
-            seen_trip_ids.add(trip_id)
+            if trip_id in trips:
+                merge_source_references(trips[trip_id], item)
+                continue
+            trips[trip_id] = item
         deduplicated.append(item)
-    bound_names = {
-        attachments.resource_name(item)
-        for item in deduplicated
-        if str(item.get(_TRUSTED_OWNER_DETAIL_KEY) or "").strip()
-        or str(item.get(_TRUSTED_SOURCE_FIELD_PATH_KEY) or "").strip()
-    }
-    if not bound_names:
-        return deduplicated
-    return [
-        item
-        for item in deduplicated
-        if str(item.get(_TRUSTED_OWNER_DETAIL_KEY) or "").strip()
-        or str(item.get(_TRUSTED_SOURCE_FIELD_PATH_KEY) or "").strip()
-        or attachments.resource_name(item) not in bound_names
-    ]
+    return deduplicated
