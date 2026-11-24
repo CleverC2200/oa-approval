@@ -104,6 +104,7 @@ class Store:
 
         for table, column, definition in (
                 ('tasks', 'recognition_json', 'TEXT'),
+                ('tasks', 'materials_cleanup_pending', 'INTEGER'),
                 ('reviews', 'delivery_json', "TEXT NOT NULL DEFAULT '{}'")):
             if column not in {row['name'] for row in self.connection.execute(f'PRAGMA table_info({table})')}:
                 self.connection.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
@@ -559,6 +560,7 @@ class Store:
                     "UPDATE runs SET status='blocked' WHERE id=(SELECT run_id FROM submissions WHERE id=?) AND ended_at IS NULL",
                     (submission_id,))
             elif status == "submitted":
+                self.connection.execute('UPDATE tasks SET materials_cleanup_pending=1 WHERE id=? AND materials_cleanup_pending IS NULL', (row[0],))
                 self.connection.execute("""UPDATE runs SET status='closed'
                     WHERE id=(SELECT run_id FROM submissions WHERE id=?)
                     AND status='blocked' AND ended_at IS NOT NULL AND json_type(summary_json,'$.execution')='object'""",

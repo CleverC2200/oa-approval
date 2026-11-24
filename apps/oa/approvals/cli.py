@@ -24,7 +24,7 @@ def main(argv=None):
     prediction.add_argument('--timeout', type=int, default=60, help='取得 API 令牌后，账号及发起人核验、预测轮询和办理人读取的总等待秒数，1–300，默认60')
     prediction.add_argument('--refresh', action='store_true', help='重新计算预测，更新 OA 预测缓存；默认读取或生成现有预测')
     prediction.add_argument('--format', choices=['text', 'json'], default='text')
-    cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
+    cleanup = commands.add_parser('cleanup', help='预览已核实提交的历史材料清理；--execute 执行')
     cleanup.add_argument('--execute', action='store_true')
     history = commands.add_parser('anomaly-archive-plan', help='用已核验的历史清单预览异常定时对话归档')
     history.add_argument('--history-file', type=Path, required=True)
@@ -154,10 +154,13 @@ def main(argv=None):
             if not (root / 'approval.sqlite3').is_file():
                 emit({'status': 'not_initialized'})
                 return 0
-            with round_lock(root, shared_root=PROJECT_ROOT / 'runtime'):
+            from contextlib import nullcontext
+
+            lock = round_lock(root, shared_root=PROJECT_ROOT / 'runtime') if args.execute else nullcontext()
+            with lock:
                 store = Store(root / 'approval.sqlite3', read_only=not args.execute)
                 try:
-                    result = retention.cleanup(store, execute=args.execute)
+                    result = retention.cleanup(store, execute=args.execute, history=True)
                     emit(result)
                 finally:
                     store.connection.close()

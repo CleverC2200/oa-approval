@@ -136,7 +136,7 @@ def test_sso_handoff_cannot_be_submitted_as_fully_verified(sso_case, capsys):
     assert submit_cli(app, collected, capsys)[0] == 0
 
 
-def test_exact_failed_delivery_is_recollected_without_erasing_failure_or_resending(sso_case, capsys, monkeypatch):
+def test_exact_failed_delivery_is_recollected_and_cleaned_without_resending(sso_case, capsys, monkeypatch):
     app, api, _, policy, authorization, run = sso_case
     code, failed = collect_cli(app, 1, capsys)
     assert code == 1 and failed['error'] == 'travel_attachment_discovery_failed'
@@ -160,11 +160,14 @@ def test_exact_failed_delivery_is_recollected_without_erasing_failure_or_resendi
     assert app.store.get_task(1)['failure_count'] == 1
     assert diagnostics.read_bytes() == original
     assert submit_cli(app, collected, capsys)[0] == 0
-    assert submit_cli(app, collected, capsys)[0] == 0
+    assert cli.main(['--root', str(app.root), 'submit', '--task-id', '1', '--confirm-write', 'YES']) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'submitted'
     assert [request_id for request_id, _ in api.posts].count('12') == 1
     assert len(api.posts) == 2
-    assert len(app.inspect(1)['submissions']) == 1
-    assert diagnostics.read_bytes() == original
+    details = app.inspect(1)
+    assert len(details['submissions']) == 1
+    assert details['review_assessments'][0]['assessment']['status'] == 'business_pending'
+    assert not diagnostics.exists() and not Path(collected['material_file']).exists()
 
 
 def test_unknown_sso_handoff_stops_fifo_and_never_resends(sso_case, capsys):
@@ -254,6 +257,8 @@ def test_sso_handoff_reads_known_attachments_and_keeps_each_resource_before_subm
     report = json.loads(Path(recognition['report_file']).read_text())
     assert {p['resource_id'] for p in report['parts']} == {'201', '202'}
     assert all(p['source'] == 'parser' for p in report['parts'])
+    assert {a['resource_id'] for a in app.inspect(1)['attachments']} == {'201', '202'}
     assert submit_cli(app, collected, capsys, recognition_file=recognition['report_file'])[0] == 0
     assert len(api.posts) == 1
-    assert {a['resource_id'] for a in app.inspect(1)['attachments']} == {'201', '202'}
+    assert app.inspect(1)['attachments'] == []
+    assert not Path(recognition['report_file']).exists()

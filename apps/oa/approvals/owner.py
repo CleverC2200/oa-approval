@@ -339,7 +339,10 @@ class _Collection:
         context = multiprocessing.get_context('spawn')
         receiver, output = context.Pipe(duplex=False)
         directory = root / 'collection-states'
-        directory.mkdir(exist_ok=True, mode=0o700)
+        task_id = request.get('expected_task_id')
+        if type(task_id) is int and task_id > 0:
+            directory /= str(task_id)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         phase_file = directory / f'{uuid4().hex}.json'
         process = context.Process(target=collect_process, args=(root, demo, run_id, request, output, source_policy, phase_file))
         try:

@@ -71,7 +71,15 @@ def main():
                '--opinion-file', str(opinion), '--review-file', review)
         submitted = invoke('submit', '--task-id', '1', '--confirm-write', 'YES')
         assert all(submitted[k] is True for k in ['submit_ok', 'done_hit', 'postcheck_done_hit'])
-        assert material.exists() and conflict.exists()
+        assert not material.exists() and not conflict.exists()
+        saved = invoke('show', '--task-id', '1', '--full')
+        assert saved['reviews'][0]['opinion'] == opinion.read_text()
+        assert saved['review_assessments'][0]['assessment'] == {
+            'status': 'business_pending', 'reason': 'Synthetic completed review with fixture uncertainty',
+            'rule_basis': 'Synthetic rule allows an unknown value',
+        }
+        assert json.loads(saved['submissions'][0]['result_json'])['postcheck_done_hit'] is True
+        assert saved['attachments'] == saved['contents'] == []
         stop = root / 'invalid-stop.json'
         stop.write_text(json.dumps({'kind': 'material_read_failure', 'task_id': 1, 'reason': 'Synthetic business unknown'}))
         refused = invoke('finish', '--run-id', started['run_id'], '--require-drained', '--stop-file', str(stop), expected=1)
@@ -90,11 +98,11 @@ def main():
         assert (execution['verified_count'], execution['failure_count'], execution['unclaimed_count']) == (1, 1, 1)
         assert execution['headline'].startswith('❌ 部分失败') and not execution['archive_eligible']
         assert status['owner']['reachable'] is False
-        assert material.exists() and conflict.exists() and Path(next_task['material_file']).exists()
+        assert not material.exists() and not conflict.exists() and Path(next_task['material_file']).exists()
         assert invoke('cleanup')['files'] == 0
         proof = {'synthetic_only': True, 'run_id': started['run_id'], 'execution': execution,
                  'business_unknown_refill': True, 'failed_stop_rejected': True,
-                 'failure_evidence_preserved': True, 'owner_exited': True, 'events': events}
+                 'failure_evidence_preserved': True, 'confirmed_materials_cleaned': True, 'owner_exited': True, 'events': events}
         (root / 'proof.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2))
         print(json.dumps({'status': 'passed', 'proof_file': str(root / 'proof.json')}, ensure_ascii=False))
     finally:
