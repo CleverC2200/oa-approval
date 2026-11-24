@@ -34,7 +34,7 @@ def dispatch_plan(run, stored, owner, blockers, unresolved):
             'continuation_unresolved_tasks', 'continuation_unverified_submission'}:
         action, reason = 'blocked', handoff.get('reason', 'continuation_blocked')
     elif (handoff.get('status') == 'blocked' or 'tasks_inflight' in blockers or execution.get('unfinished_count')
-          or stop.get('kind') in {'unexplained', 'execution_incomplete', 'material_read_failure'}):
+          or stop.get('kind') in {'unexplained', 'execution_incomplete', 'material_read_failure', 'source_unavailable'}):
         action, reason = 'confirm_stopped', 'incomplete_closed_round'
     else:
         action, reason = 'start', 'closed_round'

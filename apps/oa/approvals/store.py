@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import hashlib
 from pathlib import Path
@@ -18,6 +18,7 @@ RESULT_BACKPRESSURE = 3
 REVIEW_STATUSES = ("reviewing",)
 RESULT_STATUSES = ("reviewed", "submitting")
 UNFINISHED_STATUSES = ("preparing", "prepared", *REVIEW_STATUSES, *RESULT_STATUSES)
+INVOICE_TITLE_RECHECK = timedelta(minutes=1)
 
 
 def now():
@@ -151,7 +152,7 @@ class Store:
         return stored['selection']
 
     def start_run(self, rows, batch_size=None, *, continue_from=None, selection=None, retry_failed=False, retry_reviewed=False,
-                  recovery_request_ids=None, pending_count=None):
+                  recovery_request_ids=None, pending_count=None, hourly=False):
         if batch_size is not None and (isinstance(batch_size,bool) or not isinstance(batch_size,int) or batch_size < 0):
             raise ValueError("batch_size_invalid")
         run_id, timestamp = uuid4().hex, now()
@@ -159,6 +160,8 @@ class Store:
             self.connection.execute('BEGIN IMMEDIATE')
             self.continuation_options(continue_from)
             stored = {'selection':selection} if selection is not None else {}
+            if hourly:
+                stored['hourly'] = True
             pending = {'snapshot_at': timestamp, 'raw_count': len(rows) if pending_count is None else pending_count,
                        'selected_count': len(rows), 'outside_selection_count': 0 if pending_count is None else pending_count - len(rows),
                        'excluded': []}
@@ -265,6 +268,21 @@ class Store:
             raise ValueError("task_not_found")
         return dict(row)
 
+    def collection_queue(self, run, tasks):
+        stored = json.loads(run['summary_json'])
+        batch = stored.get('batch')
+        queued = [task for task in tasks if task['status'] == 'queued'
+                  and (batch is None or task['id'] in batch['task_ids'])]
+        pause = stored.get('source_pause')
+        if pause is None or pause.get('recovered_at'):
+            return queued, pause
+        from apps.oa.approvals.sources import invoice_titles
+
+        waiting = [task['id'] for task in queued if task['workflow_key'] in invoice_titles.WORKFLOWS]
+        recheck_due = datetime.fromisoformat(now()) >= datetime.fromisoformat(pause['recheck_at'])
+        return ([task for task in queued if recheck_due or task['id'] not in waiting],
+                {**pause, 'waiting_task_ids': waiting, 'recheck_due': recheck_due})
+
     def claim(self, run_id, *, expected_task_id=None, authorize=None):
         with self.connection:
             self.connection.execute('BEGIN IMMEDIATE')
@@ -282,13 +300,13 @@ class Store:
                 return decision('refused', 'claim_guards_required')
             if self.pipeline_capacity(run, tasks)['preparation'] >= PREPARATION_BUFFER:
                 return decision('waiting', 'preparation_buffer_full')
-            batch = json.loads(run['summary_json']).get('batch')
-            queued = [task for task in tasks if task['status'] == 'queued'
-                      and (batch is None or task['id'] in batch['task_ids'])]
+            queued, pause = self.collection_queue(run, tasks)
             if not queued:
+                if pause and pause.get('waiting_task_ids'):
+                    return decision('waiting', 'source_unavailable') | {'source_pause': pause}
                 if any(task['status'] in UNFINISHED_STATUSES for task in tasks):
                     return decision('waiting', 'in_flight')
-                return decision('done', 'batch_exhausted' if batch is not None else 'queue_exhausted')
+                return decision('done', 'batch_exhausted' if 'batch' in json.loads(run['summary_json']) else 'queue_exhausted')
             candidate = queued[0]
             if candidate['id'] != expected_task_id:
                 return decision('refused', 'expected_task_changed')
@@ -389,6 +407,25 @@ class Store:
                 (error, task_id, run_id))
         return self.get_task(task_id)
 
+    def is_hourly(self, run_id):
+        return json.loads(self.run(run_id)['summary_json']).get('hourly', False)
+
+    def pause_invoice_title_source(self, run_id, task_id, report):
+        observed_at = now()
+        recheck_at = (datetime.fromisoformat(observed_at) + INVOICE_TITLE_RECHECK).isoformat()
+        pause = {'source': 'invoice_title_reference', 'observed_at': observed_at, 'recheck_at': recheck_at,
+                 'task_id': task_id, 'diagnostics_file': str(report)}
+        with self.connection:
+            released = self.connection.execute("""UPDATE tasks SET status='queued'
+                WHERE id=? AND last_run_id=? AND status='preparing'
+                AND EXISTS(SELECT 1 FROM runs WHERE id=last_run_id AND status IN ('running','blocked'))""",
+                (task_id, run_id))
+            if released.rowcount != 1:
+                raise ValueError('collection_run_changed')
+            self.connection.execute("UPDATE runs SET summary_json=json_set(summary_json,'$.source_pause',json(?)) WHERE id=?",
+                                    (encoded(pause), run_id))
+        return pause
+
     def freeze(self, run_id, task_id, material, material_file, material_sha256, frozen, rule_file):
         resources = {str(item["resource_id"]):item for item in material.get("resources", [])}
         prepared = material.get("prepared", {})
@@ -406,6 +443,10 @@ class Store:
                 (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),task_id,run_id))
             if frozen_task.rowcount != 1:
                 raise ValueError('collection_run_changed')
+            if (material.get('invoice_title_reference') or {}).get('status') == 'ready':
+                self.connection.execute("""UPDATE runs SET summary_json=json_set(summary_json,'$.source_pause.recovered_at',?)
+                    WHERE id=? AND json_type(summary_json,'$.source_pause')='object'
+                    AND json_type(summary_json,'$.source_pause.recovered_at') IS NULL""", (now(), run_id))
             ids = {}
             for rid,item in resources.items():
                 path = str(item.get("local_readonly_path") or item.get("path") or "")
@@ -579,7 +620,9 @@ class Store:
         remaining = sum(task['status'] == 'queued' for task in tasks)
         if not remaining:
             return {'status':'done', 'remaining':0}
-        if not (any(task['status'] in {'preview', 'failed'} for task in tasks)
+        stop = stored['execution']['stop'] or {}
+        if not (stop.get('kind') == 'source_unavailable'
+                or any(task['status'] in {'preview', 'failed'} for task in tasks)
                 or any(task['verified_attempt_count'] for task in submitted_facts)):
             return {'status':'blocked', 'reason':'continuation_no_progress'}
         processed = set(stored.get('continuation', {}).get('processed_occurrences', []))
@@ -639,6 +682,8 @@ class Store:
                 stored['handoff'] = self._handoff(run,tasks,stored)
                 if stored['handoff']['status'] == 'blocked':
                     stored['execution'].update(status='blocked', archive_eligible=False)
+                elif stored['handoff']['status'] == 'ready' and stop and stop['kind'] == 'authorized_handoff':
+                    stored['execution']['handoff_remaining_count'] = stored['handoff']['remaining']
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
         result = {'run_id':run_id, 'status':'closed', 'summary':summary, 'execution':stored['execution']}
         if closure is not None:

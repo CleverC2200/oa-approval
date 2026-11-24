@@ -457,7 +457,7 @@ class _RoundSession:
                 from apps.oa.approvals.execution import validate_stop
 
                 stop = validate_stop(self._approval.store, self._run_id, request.get('stop'), handoff=request.get('handoff', False))
-                if request.get('require_drained'):
+                if request.get('require_drained') or (stop and stop['kind'] == 'authorized_handoff'):
                     store = self._approval.store
                     blockers = closeout_blockers(
                         submission_acceptance(store, self._run_id, store.tasks(self._run_id)),
@@ -641,7 +641,8 @@ def serve(root, *, demo=False, workflows=None, limit=20, full=False, batch_size=
                         raise ValueError('user_stop')
                 started = approval.pending(workflows=workflows, batch_size=batch_size, request_ids=request_ids,
                                            continue_from=continue_from, retry_failed=retry_failed, retry_reviewed=retry_reviewed,
-                                           recovery_request_ids=recovery_request_ids, review_slots=review_slots)
+                                           recovery_request_ids=recovery_request_ids, review_slots=review_slots,
+                                           hourly=hourly)
                 if reconciliation is not None:
                     receipt = travel_reconciliation.save(root, started['run_id'], reconciliation)
                     approval.store.record_travel_reconciliation(started['run_id'], receipt)

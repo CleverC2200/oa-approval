@@ -222,6 +222,44 @@ def test_hourly_unknown_uses_postcheck_without_pending_start_or_resubmit(tmp_pat
     app.store.connection.close()
 
 
+@pytest.mark.parametrize('batch_size', [1, 40])
+def test_authorized_handoff_requires_drained_and_reports_remaining_after_close(tmp_path, batch_size):
+    with launch(tmp_path, '--batch-size', str(batch_size)) as original:
+        started = ready(original)
+        run = started['run_id']
+        task = started['tasks'][0]
+        review_cli(tmp_path, lambda *args: invoke(tmp_path, *args),
+                   str(task['id']), 'first', task['workflow_key'])
+        evidence = tmp_path / 'handoff-evidence.txt'
+        evidence.write_text('Synthetic authorization to hand off after the first verified submission')
+        stop = tmp_path / 'handoff.json'
+        stop.write_text(json.dumps({'kind': 'authorized_handoff', 'reason': 'Verified first submission milestone',
+                                    'evidence_file': str(evidence)}))
+        finish = ('finish', '--run-id', run, '--stop-file', str(stop))
+        assert invoke(tmp_path, *finish, exit_code=1)['error'] == 'authorized_handoff_requires_continuation'
+        refused = invoke(tmp_path, *finish, '--handoff', exit_code=1)
+        assert refused['reason'] == 'run_not_drained' and refused['blockers'] == ['tasks_inflight']
+        opinion = tmp_path / 'opinion.txt'
+        opinion.write_text('Synthetic authorized handoff review')
+        submitted = deliver_cli(tmp_path, lambda *args: invoke(tmp_path, *args),
+                               str(task['id']), str(opinion), confirm_write=True)
+        assert submitted['status'] == 'submitted' and submitted['postcheck_done_hit']
+
+        closed = invoke(tmp_path, *finish, '--require-drained', '--handoff')
+        assert original.wait(timeout=10) == 0
+        remaining = len(started['tasks']) - 1
+        assert closed['handoff']['remaining'] == remaining
+        assert closed['execution']['status'] == 'continued'
+        assert closed['execution']['handoff_remaining_count'] == remaining
+        assert Path(closed['execution']['stop']['evidence_file']).read_bytes() == evidence.read_bytes()
+
+        report = invoke(tmp_path, 'status', '--view', 'batch')
+        assert report['execution']['headline'] == f'正常交接｜已提交并验证 1 单，{remaining} 单待接续'
+        assert report['hourly_dispatch']['action'] == 'continue'
+        assert report['execution']['failure_count'] == report['execution']['unknown_count'] == 0
+        assert report['owner']['reachable'] is False
+
+
 def test_hourly_reports_isolated_delivery_in_each_round(tmp_path):
     app = create_demo(tmp_path)
     started = app.pending(batch_size=1)

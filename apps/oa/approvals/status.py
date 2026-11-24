@@ -19,7 +19,8 @@ def batch_status(store, run, tasks, owner):
     outside = [task for task in tasks if task['id'] not in task_ids]
     queued = [task for task in scoped if task['status'] == 'queued']
     inflight = sum(task['status'] in UNFINISHED_STATUSES for task in scoped)
-    candidate = next((task for task in tasks if task['id'] in task_ids and task['status'] == 'queued'), None)
+    candidates, source_pause = store.collection_queue(run, tasks)
+    candidate = next(iter(candidates), None)
     agents = []
     for agent_id in sorted({task['agent_id'] for task in tasks if task['agent_id'] is not None}):
         claimed = [task for task in tasks if task['agent_id'] == agent_id]
@@ -71,6 +72,7 @@ def batch_status(store, run, tasks, owner):
                              else '收尾待验｜等待执行进程退出')
     return {
         'pending': stored.get('pending'),
+        **({'source_pause': source_pause} if source_pause is not None else {}),
         **({'travel_reconciliation': stored['travel_reconciliation']} if 'travel_reconciliation' in stored else {}),
         'execution': execution,
         'closure': stored.get('closure'),

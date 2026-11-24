@@ -10,12 +10,14 @@ def validate_stop(store, run_id, value, *, handoff=False):
     if value is None:
         return None
     if (not isinstance(value, dict) or value.get('kind') not in {
-            'context_limit', 'material_read_failure', 'user_stop', 'execution_incomplete'}
+            'context_limit', 'material_read_failure', 'user_stop', 'execution_incomplete', 'authorized_handoff'}
             or not isinstance(value.get('reason'), str) or not value['reason'].strip()):
         raise ValueError('stop_reason_invalid')
     stop = {'kind': value['kind'], 'reason': value['reason']}
     if value['kind'] == 'user_stop' and handoff:
         raise ValueError('stop_handoff_not_allowed')
+    if value['kind'] == 'authorized_handoff' and not handoff:
+        raise ValueError('authorized_handoff_requires_continuation')
     if value['kind'] == 'material_read_failure':
         task_id = value.get('task_id')
         if type(task_id) is not int:
@@ -24,7 +26,7 @@ def validate_stop(store, run_id, value, *, handoff=False):
         if task['last_run_id'] != run_id or task['status'] != 'failed' or not task['error']:
             raise ValueError('stop_read_failure_not_recorded')
         stop.update(task_id=task_id, error=task['error'])
-    if value['kind'] in {'context_limit', 'execution_incomplete'}:
+    if value['kind'] in {'context_limit', 'execution_incomplete', 'authorized_handoff'}:
         path = Path(value.get('evidence_file', ''))
         root = store.path.parent.resolve()
         if not path.is_absolute() or not path.resolve().is_relative_to(root) or not path.is_file():
@@ -67,14 +69,20 @@ def close_execution(store, run, tasks, stop):
     unfinished = sum(t['status'] in UNFINISHED_STATUSES for t in scoped)
     unverified = sum(t['status'] == 'submitted' and not t['occurrence_verified'] for t in acceptance['tasks'])
     if queued and stop is None:
-        stop = {'kind': 'unexplained', 'reason': 'batch_closed_before_queue_drained'}
+        _, pause = store.collection_queue(run, tasks)
+        if pause and len(pause.get('waiting_task_ids', [])) == queued:
+            stop = {'kind': 'source_unavailable', 'reason': pause['source'], 'diagnostics_file': pause['diagnostics_file']}
+        else:
+            stop = {'kind': 'unexplained', 'reason': 'batch_closed_before_queue_drained'}
     unresolved = store.unresolved_writes()
     if run['status'] == 'blocked' or unresolved or closeout_blockers(acceptance) or review_incomplete:
         status = 'blocked'
     elif failed:
         status = 'partial_failure' if verified else 'failed'
-    elif stop and stop['kind'] in {'unexplained', 'execution_incomplete', 'material_read_failure'}:
+    elif stop and stop['kind'] in {'unexplained', 'execution_incomplete', 'material_read_failure', 'source_unavailable'}:
         status = 'blocked'
+    elif stop and stop['kind'] == 'authorized_handoff' and any(task['status'] == 'queued' for task in tasks):
+        status = 'continued'
     elif queued:
         status = 'continued' if stop['kind'] == 'context_limit' else 'stopped'
     elif preview:
@@ -111,6 +119,8 @@ def execution_headline(execution):
         return ('本次未领取｜待办数量尚未核实' if remaining is None else
                 f'本次未领取｜授权范围内仍有 {remaining} 单待办' if remaining else
                 f"本次未领取｜仍有 {execution['remaining_count']} 单范围外待办")
+    if state == 'continued' and (execution.get('stop') or {}).get('kind') == 'authorized_handoff':
+        return f"正常交接｜已提交并验证 {verified} 单，{execution['handoff_remaining_count']} 单待接续"
     return {'continued': f'接续｜已提交并验证 {verified} 单，按证据轮换',
             'stopped': f'已停止｜已提交并验证 {verified} 单',
             'preview': f"仅预览 {execution.get('preview_count', 0)} 单，未提交",

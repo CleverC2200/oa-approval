@@ -46,8 +46,10 @@ _SAFE_COLLECTION_COUNT_KEYS = {
 
 class CollectionFailure(RuntimeError):
 
-    def __init__(self, code: str, counts: object = None, diagnostics: object = None) -> None:
+    def __init__(self, code: str, counts: object = None, diagnostics: object = None, *,
+                 source_unavailable: bool = False) -> None:
         super().__init__(code)
+        self.source_unavailable = source_unavailable
         self.counts = {
             key: value
             for key, value in (counts.items() if isinstance(counts, dict) else [])
@@ -71,6 +73,8 @@ class CollectionFailure(RuntimeError):
                     if isinstance(value, int) and not isinstance(value, bool):
                         kept[key] = value
                 elif key == 'attempt' and type(value) is int and 1 <= value <= 3:
+                    kept[key] = value
+                elif key == 'source_check' and type(value) is int and value in {1, 2}:
                     kept[key] = value
                 elif key == 'elapsed_ms' and type(value) is int and 0 <= value <= 900_000:
                     kept[key] = value
@@ -466,6 +470,7 @@ def collect_case(
     attachment_timeout_sec: int = 180,
     travel_read_exception: dict | None = None,
     attachment_read_exception: dict | None = None,
+    invoice_title_reader=None,
 ) -> dict[str, Any]:
     read_session = None
     if source_policy.travel_read.enabled:
@@ -476,7 +481,8 @@ def collect_case(
             configs=configs, allow_browser_download=allow_browser_download,
             attachment_root=attachment_root, prepared_root=prepared_root,
             attachment_timeout_sec=attachment_timeout_sec, read_session=read_session,
-            travel_read_exception=travel_read_exception, attachment_read_exception=attachment_read_exception)
+            travel_read_exception=travel_read_exception, attachment_read_exception=attachment_read_exception,
+            invoice_title_reader=invoice_title_reader)
     finally:
         if read_session is not None:
             read_session.close()
@@ -495,6 +501,7 @@ def _collect_case(
     read_session=None,
     travel_read_exception: dict | None = None,
     attachment_read_exception: dict | None = None,
+    invoice_title_reader=None,
 ) -> dict[str, Any]:
     from apps.oa.approvals import attachment_exception, travel_exception
 
@@ -774,9 +781,10 @@ def _collect_case(
     invoice_title_reference = None
     if config.get('flow_key') in invoice_titles.WORKFLOWS:
         try:
-            invoice_title_reference = invoice_titles.snapshot()
+            invoice_title_reference = (invoice_title_reader or invoice_titles.snapshot)()
         except invoice_titles.InvoiceTitleReadError as error:
-            raise CollectionFailure('invoice_title_reference_read_failed', diagnostics=error.diagnostics) from None
+            raise CollectionFailure(invoice_titles.READ_FAILED, diagnostics=error.diagnostics,
+                                    source_unavailable=isinstance(error, invoice_titles.InvoiceTitleSourceUnavailable)) from None
 
     return {
         **({"travel_read_exception": read_exception} if read_exception is not None else {}),
