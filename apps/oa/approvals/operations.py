@@ -543,7 +543,5 @@ class Approval:
 
     def close(self, run_id, *, handoff=False, stop=None):
         result = self.store.close(run_id, handoff=handoff, stop=stop)
-        cleanup = retention.cleanup(self.store, execute=True)
-        if cleanup["status"] != "completed":
-            result["cleanup"] = cleanup
-        return result
+        cleanup = retention.cleanup(self.store, execute=True, closed_run_id=run_id)
+        return {**result, 'cleanup': cleanup}

@@ -248,6 +248,10 @@ class Store:
                 "UPDATE runs SET summary_json=json_set(summary_json,'$.travel_reconciliation',json(?)) WHERE id=?",
                 (encoded(receipt), run_id))
 
+    def record_cleanup(self, run_id, result):
+        self.connection.execute("UPDATE runs SET summary_json=json_set(summary_json,'$.cleanup',json(?)) WHERE id=?",
+                                (encoded(result), run_id))
+
     def tasks(self, run_id):
         tasks = [dict(row) for row in self.connection.execute(
             "SELECT * FROM tasks WHERE last_run_id=? ORDER BY julianday(received_at),CAST(request_id AS INTEGER),request_id,id", (run_id,))]
@@ -448,6 +452,10 @@ class Store:
                  int(collection_error is not None),task_id,run_id))
             if frozen_task.rowcount != 1:
                 raise ValueError('collection_run_changed')
+            if collection_error is None:
+                timing = {'material_ready_at': now(), 'material_sha256': material_sha256}
+                self.connection.execute("UPDATE runs SET summary_json=json_set(summary_json,?,json(?)) WHERE id=?",
+                                        (f'$.artifact_timings."{task_id}"', encoded(timing), run_id))
             if (material.get('invoice_title_reference') or {}).get('status') == 'ready':
                 self.connection.execute("""UPDATE runs SET summary_json=json_set(summary_json,'$.source_pause.recovered_at',?)
                     WHERE id=? AND json_type(summary_json,'$.source_pause')='object'
@@ -514,6 +522,11 @@ class Store:
             self.connection.execute("INSERT INTO reviews(task_id,run_id,opinion,recognition_json,material_sha256,material_file,frozen_json,created_at,delivery_json) VALUES (?,?,?,?,?,?,?,?,?)",
                 (task_id, task['last_run_id'], opinion, recognized, material_sha256, material_file, task['frozen_json'], now(), encoded(delivery)))
             review_id = self.connection.execute('SELECT last_insert_rowid()').fetchone()[0]
+            if isinstance(recognition, dict):
+                timing = {key: recognition[key] for key in ('status', 'created_at', 'completed_at')
+                          if isinstance(recognition.get(key), str) and len(recognition[key]) <= 64}
+                self.connection.execute("UPDATE runs SET summary_json=json_set(summary_json,?,json(?)) WHERE id=?",
+                                        (f'$.artifact_timings."{task_id}".recognition', encoded(timing), task['last_run_id']))
             for item in [*review_contents(recognition), *(observations or [])]:
                 attachment = self.connection.execute('SELECT id FROM attachments WHERE task_id=? AND resource_id=? ORDER BY id DESC LIMIT 1',
                                                      (task_id, str(item['resource_id']))).fetchone()
@@ -642,6 +655,7 @@ class Store:
 
     def close(self, run_id, *, handoff=False, collection_stopped_note=None, stop=None, closure=None):
         from apps.oa.approvals.execution import close_execution, validate_stop
+        from apps.oa.approvals.retention import pending_cleanup
 
         stop = validate_stop(self, run_id, stop, handoff=handoff)
         with self.connection:
@@ -673,7 +687,10 @@ class Store:
                         stored['execution']['archive_eligible'] = False
                     self.connection.execute('UPDATE runs SET summary_json=? WHERE id=?', (encoded(stored), run_id))
                 return {'run_id': run_id, 'status': 'closed', 'summary': summary,
-                        **{key: stored[key] for key in ('execution', 'closure') if key in stored}}
+                        **{key: stored[key] for key in ('execution', 'closure', 'cleanup') if key in stored}}
+            pending = pending_cleanup(self, run_id=run_id, default='awaiting_cleanup_sweep')
+            if pending:
+                stored['cleanup'] = {'status': 'deferred', 'reason': 'awaiting_cleanup_sweep', 'pending_tasks': pending}
             stored['execution'] = close_execution(self, run, tasks, stop)
             if closure is not None:
                 stored['execution']['archive_eligible'] = False
@@ -692,6 +709,8 @@ class Store:
                     stored['execution']['handoff_remaining_count'] = stored['handoff']['remaining']
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
         result = {'run_id':run_id, 'status':'closed', 'summary':summary, 'execution':stored['execution']}
+        if 'cleanup' in stored:
+            result['cleanup'] = stored['cleanup']
         if closure is not None:
             result['closure'] = stored['closure']
         if handoff:
