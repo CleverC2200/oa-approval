@@ -301,7 +301,7 @@ def test_ordinary_attachment_cannot_claim_official_page_pdf_resource_id(page_ori
     assert not any(route == '/invoiceApi/file/download' for route, _, _ in state.requests)
 
 
-@pytest.mark.parametrize('damage', ['truncated', 'encrypted', 'permissions_only'])
+@pytest.mark.parametrize('damage', ['truncated', 'missing_eof', 'encrypted', 'permissions_only'])
 def test_official_page_pdf_requires_an_intact_unencrypted_document(page_original, tmp_path, damage):
     state = page_original
     with fitz.open(stream=state.pdf, filetype='pdf') as document:
@@ -310,12 +310,17 @@ def test_official_page_pdf_requires_an_intact_unencrypted_document(page_original
             document.new_page().insert_text((40, 40), 'Page two')
             full_pdf = document.tobytes()
             state.cloud_pdf = full_pdf[:full_pdf.index(b'\nxref\n') + 1]
+        elif damage == 'missing_eof':
+            state.cloud_pdf = state.pdf.removesuffix(b'%%EOF\n')
+            assert state.cloud_pdf != state.pdf
         else:
             state.cloud_pdf = document.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw='owner',
                                               user_pw='reader' if damage == 'encrypted' else '')
     with fitz.open(stream=state.cloud_pdf, filetype='pdf') as damaged:
         if damage == 'truncated':
             assert damaged.is_repaired and damaged.page_count == 2
+        elif damage == 'missing_eof':
+            assert not damaged.is_repaired and damaged.page_count == 1
         else:
             assert bool(damaged.needs_pass) is (damage == 'encrypted')
     state.cloud_headers['Content-Length'] = str(len(state.cloud_pdf))
@@ -327,6 +332,14 @@ def test_official_page_pdf_requires_an_intact_unencrypted_document(page_original
     assert diagnostic['reason'] == 'cloud_pdf_invalid'
     assert diagnostic['source_path'] == 'invoice_evidence.invoices[0]'
     assert not list((tmp_path / 'prepared').rglob('*.png'))
+
+
+def test_official_page_pdf_allows_trailing_pdf_whitespace(page_original, tmp_path):
+    page_original.cloud_pdf = page_original.pdf + b'\x00\t\n\f\r '
+    material = collect_original(page_original, tmp_path)
+    resource, = material['resources']
+    assert Path(resource['local_readonly_path']).read_bytes() == page_original.cloud_pdf
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'content_read'
 
 
 @pytest.fixture(params=['jpg', 'png'])

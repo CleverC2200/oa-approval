@@ -48,6 +48,8 @@ def _has_original_signature(body: bytes, file_type: str | None) -> bool:
 
 
 def _valid_official_page_pdf(body: bytes) -> bool:
+    if not body.rstrip(b'\x00\t\n\f\r ').endswith(b'%%EOF'):
+        return False
     import fitz
 
     try:
