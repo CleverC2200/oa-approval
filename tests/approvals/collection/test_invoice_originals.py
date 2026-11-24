@@ -8,6 +8,7 @@ from io import BytesIO
 from pathlib import Path
 
 from copy import deepcopy
+from hashlib import sha256
 
 import json
 
@@ -47,7 +48,7 @@ def original_transport(monkeypatch, tmp_path):
     page = document.new_page()
     page.insert_text((40, 40), 'Original invoice ' + NUMBER)
     state = SimpleNamespace(
-        client=client, workflow=workflow, initialized=False, requests=[], actor='77',
+        client=client, workflow=workflow, initialized=False, requests=[], actor='77', account_data=None,
         main_file='202', still_denied=False, pdf=document.tobytes(), cloud_pdf=None,
         after_cloud_download=None, cloud_failure=None, cloud_headers={}, content_type='application/pdf',
         detail={'id': '9001', 'fid': '9001', 'number': NUMBER,
@@ -98,7 +99,7 @@ def original_transport(monkeypatch, tmp_path):
             response.headers.update(state.cloud_headers)
             return response
         elif path == '/api/hrm/login/getAccountList':
-            body = {'data': {'userid': state.actor}}
+            body = {'data': {'userid': state.actor} if state.account_data is None else state.account_data}
         elif path == '/api/doc/detail/basicInfo':
             assert params.get('docid') == ['303']
             if 'requestid' in params:
@@ -149,8 +150,11 @@ def page_original(original_transport):
     return state
 
 
-def test_collect_prepares_official_page_pdf_when_native_ids_are_absent(page_original, tmp_path):
+@pytest.mark.parametrize('account_data', [None, {'accountlist': [{'userid': 77, 'iscurrent': 1}]}],
+                         ids=['top_level', 'current_list_only'])
+def test_collect_prepares_official_page_pdf_when_native_ids_are_absent(page_original, tmp_path, account_data):
     state = page_original
+    state.account_data = account_data
     state.client.pending_rows = lambda: [{
         'request_id': '101', 'workflow_key': CONFIG['flow_key'],
         'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
@@ -232,7 +236,10 @@ def test_official_page_pdf_requires_unambiguous_link_and_file_mapping(page_origi
 
 @pytest.mark.parametrize('failure,code,cloud_reads', [
     ('account', 'rpa_session_invalid', 0),
+    ('foreign_current_account', 'rpa_session_invalid', 0),
+    ('multiple_current_accounts', 'rpa_session_invalid', 0),
     ('actor_after_download', 'rpa_session_invalid', 1),
+    ('current_account_after_download', 'rpa_session_invalid', 1),
     ('http', 'attachment_access_denied', 1),
     ('redirect', 'attachment_download_failed', 1),
     ('partially_reported', 'attachment_content_incomplete', 1),
@@ -248,6 +255,8 @@ def test_official_page_pdf_failure_cannot_prepare_an_invoice(page_original, tmp_
     def source_changed():
         if failure == 'actor_after_download':
             state.actor = '88'
+        elif failure == 'current_account_after_download':
+            state.account_data['accountlist'][0]['userid'] = '88'
         elif failure == 'changed_workflow':
             state.workflow['workflowBaseInfo']['workflowId'] = '22222'
         elif failure == 'changed_source_field':
@@ -262,6 +271,12 @@ def test_official_page_pdf_failure_cannot_prepare_an_invoice(page_original, tmp_
     state.after_cloud_download = source_changed
     if failure == 'account':
         state.actor = '88'
+    elif failure in {'foreign_current_account', 'multiple_current_accounts', 'current_account_after_download'}:
+        state.account_data = {'userid': '77', 'accountlist': [
+            {'userid': '88' if failure == 'foreign_current_account' else '77', 'iscurrent': 1},
+        ]}
+        if failure == 'multiple_current_accounts':
+            state.account_data['accountlist'].append({'userid': '88', 'iscurrent': 1})
     elif failure in {'http', 'redirect', 'partially_reported'}:
         state.cloud_failure = failure
     elif failure == 'invalid_pdf':
@@ -284,6 +299,34 @@ def test_ordinary_attachment_cannot_claim_official_page_pdf_resource_id(page_ori
     with pytest.raises(RuntimeError, match='^attachment_resource_identity_conflict$'):
         collect_original(state, tmp_path)
     assert not any(route == '/invoiceApi/file/download' for route, _, _ in state.requests)
+
+
+@pytest.mark.parametrize('damage', ['truncated', 'encrypted', 'permissions_only'])
+def test_official_page_pdf_requires_an_intact_unencrypted_document(page_original, tmp_path, damage):
+    state = page_original
+    with fitz.open(stream=state.pdf, filetype='pdf') as document:
+        assert document.page_count == 1 and not document.is_repaired
+        if damage == 'truncated':
+            document.new_page().insert_text((40, 40), 'Page two')
+            full_pdf = document.tobytes()
+            state.cloud_pdf = full_pdf[:full_pdf.index(b'\nxref\n') + 1]
+        else:
+            state.cloud_pdf = document.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw='owner',
+                                              user_pw='reader' if damage == 'encrypted' else '')
+    with fitz.open(stream=state.cloud_pdf, filetype='pdf') as damaged:
+        if damage == 'truncated':
+            assert damaged.is_repaired and damaged.page_count == 2
+        else:
+            assert bool(damaged.needs_pass) is (damage == 'encrypted')
+    state.cloud_headers['Content-Length'] = str(len(state.cloud_pdf))
+
+    with pytest.raises(RuntimeError, match='^attachment_content_incomplete$') as caught:
+        collect_original(state, tmp_path)
+
+    diagnostic, = caught.value.diagnostics
+    assert diagnostic['reason'] == 'cloud_pdf_invalid'
+    assert diagnostic['source_path'] == 'invoice_evidence.invoices[0]'
+    assert not list((tmp_path / 'prepared').rglob('*.png'))
 
 
 @pytest.fixture(params=['jpg', 'png'])
@@ -803,6 +846,82 @@ def test_official_page_pdf_preserves_every_linked_row_and_original(many_original
         ('detail[0].row[3]', 'detail[0].row[3].field[0]'),
     ]
     assert by_id['invoice_cloud:9000:2002']['owner_detail_id'] is None
+
+
+@pytest.mark.parametrize('many_originals', [2], indirect=True)
+@pytest.mark.parametrize('change,download_ids', [
+    ('none', ['1000']), ('ticket_conflict', []), ('before', []), ('after', ['1000']),
+])
+def test_collect_verifies_each_linked_id_for_a_shared_official_page_pdf(many_originals, tmp_path, change, download_ids):
+    state = many_originals
+    first, second = state.details['1000'], state.details['1001']
+    first['oa'] = {}
+    first['modify_info']['fileType'] = '2'
+    state.details['1001'] = deepcopy(first)
+    rows = state.workflow['workflowDetailTableInfos'][0]['workflowRequestTableRecords']
+    field = rows[1]['workflowRequestTableFields'][0]
+    if change == 'ticket_conflict':
+        state.details['1001']['number'] = second['number']
+    else:
+        field['fieldShowValue'] = first['number']
+
+    def move_second_reference():
+        fields = rows[1]['workflowRequestTableFields']
+        fields.insert(0, {'fieldName': 'unrelated', 'fieldShowValue': 'detail'})
+
+    if change == 'before':
+        original_context = state.client.request_context
+
+        def change_at_verification(request_id):
+            if state.detail_reads:
+                move_second_reference()
+            return original_context(request_id)
+
+        state.client.request_context = change_at_verification
+    elif change == 'after':
+        state.after_body = move_second_reference
+
+    state.client.pending_rows = lambda: [{
+        'request_id': '101', 'workflow_key': CONFIG['flow_key'],
+        'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
+    }]
+    app = Approval(tmp_path / 'runtime', api=state.client, configs=[CONFIG], source_policy=POLICY)
+    try:
+        run_id = app.pending()['run_id']
+        if change == 'none':
+            app.collect(run_id, expected_task_id=1)
+        else:
+            with pytest.raises(RuntimeError, match='^resource_ownership_untrusted$'):
+                app.collect(run_id, expected_task_id=1)
+        result = app.inspect(1)
+    finally:
+        app.store.connection.close()
+
+    assert state.cloud_reads == download_ids and not result['submissions']
+    assert state.detail_reads.count('1000') == state.detail_reads.count('1001')
+    if change != 'none':
+        assert result['task']['status'] == 'failed' and not result['task']['material_file']
+        assert not list((tmp_path / 'runtime').rglob('prepared'))
+        return
+
+    assert result['task']['status'] == 'prepared' and state.detail_reads.count('1000') == 3
+    material = json.loads(Path(result['task']['material_file']).read_text())
+    resource, = material['resources']
+    assert resource['resource_id'] == 'invoice_cloud:9000:8000'
+    assert Path(resource['local_readonly_path']).read_bytes() == state.pdf
+    invoices = material['invoice_evidence']['invoices']
+    assert [invoice['data_id'] for invoice in invoices] == ['1000', '1001']
+    for index, (invoice, reference) in enumerate(zip(invoices, resource['source_references'], strict=True)):
+        owner = f'detail[0].row[{index}]'
+        assert reference['owner_detail_id'] == owner
+        assert reference['oa_data_id'] == invoice['data_id']
+        assert reference['source_field_path'] == f'{owner}.field[0]'
+        file, = invoice['files']
+        assert file['original_source']['source_field_paths'] == [reference['source_field_path']]
+        assert file['resource_id'] == resource['resource_id']
+        assert file['source_content_sha256'] == sha256(state.pdf).hexdigest()
+        assert invoice['body_read_status'] == file['body_read_status'] == 'content_read'
+    assert len(material['prepared']['images']) == 1
 
 
 @pytest.mark.parametrize('many_originals', [5], indirect=True)

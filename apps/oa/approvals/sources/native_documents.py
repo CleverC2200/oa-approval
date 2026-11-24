@@ -10,6 +10,7 @@ from apps.oa.approvals.sources import browser_session as rpa_session
 from apps.oa.approvals.sources import http as safe_http
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources.download_errors import detect_oa_download_fail_code
+from apps.oa.approvals.sources.travel_read_auth import ACCOUNT_PATH, verified_identity
 
 
 class _DocumentContextRedirect(urllib.request.HTTPRedirectHandler):
@@ -47,12 +48,14 @@ def _read(base_url: str, cookie: str, timeout_sec: int, path: str, params=None) 
     return payload if isinstance(payload, dict) else {}
 
 
-def verify_account(*, base_url: str, cookie: str, timeout_sec: int) -> None:
+def verify_account(*, base_url: str, cookie: str, timeout_sec: int, check_current_account_list: bool = False) -> None:
     safe_http._origin(base_url)
-    account = _read(base_url, cookie, timeout_sec, "/api/hrm/login/getAccountList") if cookie else {}
+    account = _read(base_url, cookie, timeout_sec, ACCOUNT_PATH) if cookie else {}
     data = account.get("data")
     expected_user = auth.env("OA_UID")
-    if not expected_user or not isinstance(data, dict) or str(data.get("userid") or "") != expected_user:
+    matches = (verified_identity(account, expected_user) if check_current_account_list
+               else bool(expected_user and isinstance(data, dict) and str(data.get("userid") or "") == expected_user))
+    if not matches:
         raise rpa_session.RpaSessionError(
             rpa_session.RPA_SESSION_INVALID_CODE, "RPA 文档读取账号与配置不一致"
         )

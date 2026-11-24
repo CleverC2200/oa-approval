@@ -47,6 +47,21 @@ def _has_original_signature(body: bytes, file_type: str | None) -> bool:
         return False
 
 
+def _valid_official_page_pdf(body: bytes) -> bool:
+    import fitz
+
+    try:
+        with fitz.open(stream=body, filetype='pdf') as document:
+            if (not document.is_pdf or document.is_repaired or document.needs_pass
+                    or document.xref_get_key(-1, 'Encrypt')[0] != 'null' or document.page_count < 1):
+                return False
+            for index in range(document.page_count):
+                document.load_page(index)
+            return not document.is_repaired
+    except (RuntimeError, ValueError):
+        return False
+
+
 def valid_original_file(resource: dict, path: Path) -> bool:
     file_type = resource.get('_invoice_original', {}).get('file_type')
     if file_type not in {'jpg', 'png'}:
@@ -122,6 +137,7 @@ class OriginalSources:
                 native_documents.verify_account(
                     base_url=self._policy.attachments.oa_origin,
                     cookie=checked["_ephemeral_cookie_header"], timeout_sec=timeout_sec,
+                    check_current_account_list=True,
                 )
             except browser_session.RpaSessionError:
                 raise
@@ -257,7 +273,8 @@ class OriginalSources:
                     if response.geturl() != request.full_url:
                         return _cloud_download_failure(
                             "attachment_download_failed", "cloud_unexpected_url", resource_id, started)
-                    if source.get("representation") == invoices.OFFICIAL_PAGE_PDF:
+                    official_page_pdf = source.get("representation") == invoices.OFFICIAL_PAGE_PDF
+                    if official_page_pdf:
                         status = response.getcode()
                         if status != 200 or response.headers.get("Content-Range") is not None:
                             return _cloud_download_failure(
@@ -279,6 +296,8 @@ class OriginalSources:
                         reason = 'cloud_signature_mismatch'
                     elif length is not None and len(body) != int(length):
                         reason = 'cloud_length_mismatch'
+                    elif official_page_pdf and not _valid_official_page_pdf(body):
+                        reason = 'cloud_pdf_invalid'
                     if reason:
                         return _cloud_download_failure(
                             "attachment_content_incomplete", reason, resource_id, started)
