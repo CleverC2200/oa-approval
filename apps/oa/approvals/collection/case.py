@@ -653,6 +653,10 @@ def _collect_case(
             allow_browser_download=allow_browser_download,
             request_id=str(request_id),
             flow_key=str(config.get("flow_key") or ""),
+            volume_sources={descriptor["raw_resource_id"]: (
+                descriptor["source_system"], descriptor["source_request_id"] or str(request_id),
+                descriptor["owner_detail_id"] or "", descriptor["source_field_path"],
+            ) for descriptor in descriptors},
         )
         downloaded, download_errors = download_result.items, download_result.errors
         if download_errors or len(downloaded) != len(download_targets):
@@ -678,6 +682,13 @@ def _collect_case(
                 "application/octet-stream"
             )
             normalized_item = dict(item)
+            if volume_set := item.get("archive_volume_set"):
+                descriptor["archive_volume_set"] = {
+                    **volume_set,
+                    "volume_resource_ids": [descriptors_by_raw_id[raw_id]["resource_id"]
+                                            for raw_id in volume_set["volume_resource_ids"]],
+                }
+                normalized_item["archive_volume_set"] = descriptor["archive_volume_set"]
             normalized_item["path"] = str(path)
             bound_item = _bind_downloaded_item(normalized_item, descriptor)
             if (

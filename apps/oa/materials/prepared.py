@@ -7,7 +7,7 @@ from typing import Literal
 
 
 SUCCESSFUL_PREPARATION_STATUSES = {
-    'archive_extracted', 'docx_read', 'image', 'image_converted',
+    'archive_extracted', 'archive_volume_verified', 'docx_read', 'image', 'image_converted',
     'legacy_spreadsheet_read', 'ofd_invoice_read', 'pdf_rendered',
     'spreadsheet_read', 'video_rendered', 'xml_invoice_read',
 }
