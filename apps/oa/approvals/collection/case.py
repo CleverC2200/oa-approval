@@ -596,6 +596,9 @@ def _collect_case(
         str(request_id), workflow, str(config.get("flow_key") or ""), invoice_evidence,
         base_url=source_policy.attachments.oa_origin,
     )
+    page_resource_ids = {item['id'] for item in original_resources if item.get('source') == 'invoice_cloud'}
+    if any(resources.resource_key(item) in page_resource_ids for item in form_resources + discovered_resources):
+        raise RuntimeError(attachments.ATTACHMENT_IDENTITY_CONFLICT_CODE)
     logical_resources = _merge_resources(form_resources, discovered_resources + original_resources, origins=source_policy.attachments)
     original_sources = {item["id"]: item["_invoice_original"] for item in original_resources}
     logical_resources = [
