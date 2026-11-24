@@ -829,7 +829,8 @@ def test_failed_mixed_original_batch_never_publishes_cache(
     assert errors == []
     assert [item['resource_id'] for item in files] == ['202', 'ordinary']
     assert all(item['reused'] is False for item in files)
-    assert files[0]['path'] == files[1]['path']
+    assert files[0]['path'] != files[1]['path']
+    assert all(Path(item['path']).read_bytes() == state.pdf for item in files)
     assert b'session=fixed' not in b''.join(path.read_bytes() for path in destination.rglob('*') if path.is_file())
 
 @pytest.mark.parametrize('failure,reason', [

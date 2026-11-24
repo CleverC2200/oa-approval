@@ -8,7 +8,6 @@ import json
 import hashlib
 import os
 from pathlib import Path
-import threading
 import time
 from typing import Any, Dict, List, Literal, Protocol, Tuple
 
@@ -334,34 +333,6 @@ def build_download_sources(source_policy) -> DownloadSources:
     )
 
 
-class _ContentPool:
-    def __init__(self, dest_dir: Path):
-        self.dest_dir = dest_dir
-        self.existing_paths = frozenset(dest_dir.iterdir())
-        self.paths = {}
-        self.lock = threading.Lock()
-
-    def share(self, path: Path, *, newly_downloaded: bool = False) -> Path:
-        with self.lock:
-            digest = _attachment_content_sha256(path)
-            if not digest:
-                raise RuntimeError("attachment_content_unreadable")
-            key = (path.suffix.lower(), digest)
-            previous = self.paths.get(key)
-            if previous is None:
-                self.paths[key] = path
-                return path
-            if (
-                newly_downloaded
-                and path != previous
-                and path not in self.existing_paths
-                and path.parent.resolve() == self.dest_dir.resolve()
-                and not path.is_symlink()
-            ):
-                path.unlink()
-            return previous
-
-
 def _stop_error() -> DownloadError:
     return DownloadError(
         runtime_control.STOP_CODE, "已请求停止财务预审，停止本单附件下载"
@@ -389,7 +360,6 @@ class _DownloadBatch:
             dest_dir, request_id=request_id, flow_key=flow_key
         )
         self.reuse_cache = reuse_cache
-        self.content = _ContentPool(dest_dir)
         self.legacy_resources = _load_manifest(dest_dir).setdefault("resources", {})
         self.original_context = None
         self.outcomes = [Unavailable() for _ in targets]
@@ -496,26 +466,21 @@ class _DownloadBatch:
 
     def _direct(self, resource) -> TransferOutcome:
         if resource.get("_invoice_original") and self.original_context is not None:
-            outcome = self.sources.originals.read(
+            return self.sources.originals.read(
                 self.original_context,
                 resource,
                 dest_dir=self.dest_dir,
                 timeout_sec=self.timeout_sec,
             )
-        else:
-            outcome = self.sources.transfer.direct(
-                resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
-            )
-        if isinstance(outcome, Downloaded):
-            return Downloaded(self.content.share(outcome.path, newly_downloaded=True))
-        return outcome
+        return self.sources.transfer.direct(
+            resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
+        )
 
     def _obtain(self):
         pending = []
         for index, resource in enumerate(self.targets):
             cached = self._cached(resource)
             if cached:
-                cached["path"] = str(self.content.share(Path(cached["path"])))
                 self.outcomes[index] = _Cached(cached)
             else:
                 pending.append((index, resource))
@@ -561,10 +526,6 @@ class _DownloadBatch:
             outcome = self.sources.transfer.browser(
                 resource, dest_dir=self.dest_dir, timeout_sec=self.timeout_sec
             )
-            if isinstance(outcome, Downloaded):
-                outcome = Downloaded(
-                    self.content.share(outcome.path, newly_downloaded=True)
-                )
         if not isinstance(outcome, Downloaded):
             return outcome
         path = outcome.path

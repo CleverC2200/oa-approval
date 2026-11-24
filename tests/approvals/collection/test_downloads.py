@@ -62,9 +62,160 @@ def resources(ids):
     return [{'id':rid, 'name':'recorded.xlsx', 'downloadUrl':f'/download?fileid={rid}'} for rid in ids]
 
 
+@pytest.fixture
+def collect_attachments(tmp_path, monkeypatch):
+    def collect(*, detail_fields, logs, listed, originals, request_id='recorded', invoice_title_reader=None):
+        class RecordedOaApi:
+            def request_context(self, requested_id):
+                assert requested_id == request_id
+                return {
+                    'requestId': request_id,
+                    'workflowBaseInfo': {'workflowId': '195021', 'workflowName': '通用费用报销申请流程'},
+                    'workflowDetailTableInfos': [{'workflowRequestTableRecords': [
+                        {'workflowRequestTableFields': [{'fieldShowName': '附件', 'filedHtmlShow': field}]}
+                        for field in detail_fields
+                    ]}],
+                    'workflowRequestLogs': [{'annexDocHtmls': log} for log in logs],
+                }, listed
+
+        def download(resource, *, dest_dir, **_kwargs):
+            path = dest_dir / material_resources.deterministic_filename(resource)
+            path.write_bytes(originals[resource['id']])
+            calls.append((resource['_workflow_request_id'], resource['id']))
+            return Downloaded(path)
+
+        monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: download_sources(download))
+        return case_bundle.collect_case(
+            request_id, oa_api=RecordedOaApi(), configs=[{
+                'flow_key': 'general_expense', 'workflow_id': '195021', 'workflow_name': '通用费用报销申请流程',
+            }], allow_browser_download=True, attachment_root=tmp_path / 'downloads',
+            prepared_root=tmp_path / 'prepared', source_policy=POLICY, invoice_title_reader=invoice_title_reader,
+        )
+
+    calls = []
+    return collect, calls
+
+
+def attachment_link(resource_id):
+    return f'<a href="/news/download.do?fileid={resource_id}&amp;filename=recorded.xlsx">附件</a>'
+
+
+@pytest.mark.parametrize('signature_amount', ['recorded amount', 'signed amount'], ids=['same', 'different'])
+def test_collection_preserves_signature_and_detail_originals(
+    collect_attachments, workbook_bytes, signature_amount,
+):
+    collect, calls = collect_attachments
+    detail_id, signature_id = '101', '102'
+    detail_path = 'detail[0].row[0].field[0]'
+    signature_path = 'workflowRequestLogs[0].annexDocHtmls'
+    signature_bytes = workbook_bytes
+    if signature_amount != 'recorded amount':
+        signature_workbook = openpyxl.load_workbook(io.BytesIO(workbook_bytes))
+        signature_workbook.active['A1'] = signature_amount
+        signature_file = io.BytesIO()
+        signature_workbook.save(signature_file)
+        signature_workbook.close()
+        signature_bytes = signature_file.getvalue()
+    originals = {detail_id: workbook_bytes, signature_id: signature_bytes}
+    material = collect(
+        detail_fields=[attachment_link(detail_id)], logs=[attachment_link(signature_id)],
+        listed=resources([detail_id, signature_id]), originals=originals,
+    )
+
+    assert Counter(calls) == Counter([('recorded', detail_id), ('recorded', signature_id)])
+    detail, signature = material['resources']
+    assert (detail['source_resource_id'], detail['source_field_path'], detail['owner_detail_id']) == (
+        detail_id, detail_path, 'detail[0].row[0]',
+    )
+    assert (signature['source_resource_id'], signature['source_field_path'], signature['owner_detail_id']) == (
+        signature_id, signature_path, None,
+    )
+    detail_original, signature_original = (Path(item['local_readonly_path']) for item in material['resources'])
+    assert detail_original != signature_original
+    assert detail_original.read_bytes() == workbook_bytes
+    assert signature_original.read_bytes() == originals[signature_id]
+    detail_body, signature_body = material['prepared']['structured_contents']
+    assert detail_body['resource_id'] == detail_id
+    assert 'Sheet!R1: C1=recorded amount' in detail_body['key_text']
+    assert signature_body['resource_id'] == signature_id
+    assert f'Sheet!R1: C1={signature_amount}' in signature_body['key_text']
+    assert detail_body['source_path'] == str(detail_original)
+    assert signature_body['source_path'] == str(signature_original)
+    detail_image, signature_image = material['prepared']['images']
+    assert (detail_image['path'] == signature_image['path']) == (signature_amount == 'recorded amount')
+
+
+def test_collection_preserves_each_verified_reference_to_same_id(collect_attachments, workbook_bytes):
+    collect, calls = collect_attachments
+    attachment = attachment_link('101')
+    listed = resources(['101'])
+    listed[0]['_trusted_source_references'] = [{'source_field_path': 'injected'}]
+    material = collect(
+        detail_fields=[attachment, attachment.replace('/news', 'https://external.invalid/news')],
+        logs=[attachment, attachment + attachment], listed=listed, originals={'101': workbook_bytes},
+    )
+
+    assert calls == [('recorded', '101')]
+    resource, = material['resources']
+    assert resource['owner_detail_id'] == 'detail[0].row[0]'
+    assert resource['source_references'] == [
+        {'source_field_path': 'detail[0].row[0].field[0]', 'source_field_name': '附件',
+         'owner_detail_id': 'detail[0].row[0]'},
+        {'source_field_path': 'workflowRequestLogs[0].annexDocHtmls', 'source_field_name': '签字附件',
+         'owner_detail_id': None},
+        {'source_field_path': 'workflowRequestLogs[1].annexDocHtmls', 'source_field_name': '签字附件',
+         'owner_detail_id': None},
+    ]
+    assert Path(resource['local_readonly_path']).read_bytes() == workbook_bytes
+
+
+def test_collection_rejects_conflicting_download_addresses_for_the_same_id(collect_attachments):
+    collect, calls = collect_attachments
+    listed = resources(['101', '101'])
+    listed[1]['downloadUrl'] = '/download?fileid=102'
+    with pytest.raises(RuntimeError, match='^attachment_resource_identity_conflict$'):
+        collect(detail_fields=[attachment_link('101')], logs=[attachment_link('101')], listed=listed, originals={})
+    assert calls == []
+
+
+def test_collection_does_not_choose_an_owner_between_distinct_detail_references(collect_attachments, workbook_bytes):
+    collect, calls = collect_attachments
+    attachment = attachment_link('101')
+    material = collect(detail_fields=[attachment, attachment], logs=[attachment], listed=[],
+                       originals={'101': workbook_bytes})
+
+    assert calls == [('recorded', '101')]
+    resource, = material['resources']
+    assert resource['owner_detail_id'] is None
+    assert [source['owner_detail_id'] for source in resource['source_references']] == [
+        'detail[0].row[0]', 'detail[0].row[1]', None,
+    ]
+
+
+def test_collection_obtains_original_and_authority_for_each_case(collect_attachments, workbook_bytes):
+    collect, calls = collect_attachments
+    authority_reads = []
+
+    def invoice_title_reader():
+        title = f'Recorded invoice title {len(authority_reads) + 1}'
+        authority_reads.append(title)
+        return {'status': 'ready', 'rows': [{'title': title}]}
+
+    materials = [collect(detail_fields=[attachment_link('101')], logs=[], listed=resources(['101']),
+                         originals={'101': workbook_bytes}, request_id=request_id,
+                         invoice_title_reader=invoice_title_reader) for request_id in ('901', '902')]
+    assert calls == [('901', '101'), ('902', '101')]
+    assert [material['invoice_title_reference']['rows'] for material in materials] == [
+        [{'title': 'Recorded invoice title 1'}], [{'title': 'Recorded invoice title 2'}],
+    ]
+    originals = [Path(material['resources'][0]['local_readonly_path']) for material in materials]
+    assert originals[0] != originals[1]
+    assert all(path.read_bytes() == workbook_bytes for path in originals)
+
+
 @pytest.mark.parametrize('browser_fallback', [False, True])
-def test_download_shares_identical_content_after_reading_every_resource(
-    tmp_path, monkeypatch, recorded_download, browser_fallback,
+def test_download_keeps_each_original_even_with_identical_content(
+    tmp_path, recorded_download, workbook_bytes, browser_fallback,
 ):
     if browser_fallback:
         transfer = attachments.build_download_sources(POLICY).transfer
@@ -79,10 +230,10 @@ def test_download_shares_identical_content_after_reading_every_resource(
     assert errors == []
     assert Counter(recorded_download) == Counter(['first', 'second', 'different'])
     assert [item['resource_id'] for item in files] == ['first', 'second', 'different']
-    assert files[0]['path'] == files[1]['path']
-    assert files[2]['path'] != files[0]['path']
-    assert len(list((tmp_path/'downloads').glob('*.xlsx'))) == 2
-    assert all(Path(item['path']).is_file() for item in files)
+    paths = [Path(item['path']) for item in files]
+    assert set(paths) == set((tmp_path/'downloads').glob('*.xlsx'))
+    assert len(set(paths)) == 3
+    assert [path.read_bytes() for path in paths] == [workbook_bytes, workbook_bytes, workbook_bytes + b'changed']
 
 
 def test_explicit_cached_content_reuse_preserves_previous_files(tmp_path, recorded_download, workbook_bytes):
@@ -108,38 +259,22 @@ def test_explicit_cached_content_reuse_preserves_previous_files(tmp_path, record
     assert all(item['reused'] is True for item in files)
 
 
-@pytest.mark.parametrize('preexisting', [False, True])
-def test_download_reuses_new_content_and_preserves_preexisting_copy(
-    tmp_path, monkeypatch, workbook_bytes, preexisting,
-):
-    monkeypatch.setenv('OA_ATTACHMENT_DOWNLOAD_CONCURRENCY', '1')
+def test_download_preserves_a_preexisting_copy(tmp_path, recorded_download, workbook_bytes):
     destination = tmp_path / 'downloads'
     destination.mkdir()
-    targets = resources(['first', 'second', 'third'])
-    previous = destination / material_resources.deterministic_filename(targets[1])
-    if preexisting:
-        previous.write_bytes(workbook_bytes)
+    previous = destination / 'previously-collected.xlsx'
+    previous.write_bytes(workbook_bytes)
 
-    def download(resource, *, dest_dir, **_kwargs):
-        path = dest_dir / material_resources.deterministic_filename(resource)
-        path.write_bytes(workbook_bytes)
-        return Downloaded(path)
-
-    sources = download_sources(download)
-    monkeypatch.setattr(attachments, 'build_download_sources', lambda _policy: sources)
-    download_result = attachments.download_resources(
-        targets, dest_dir=destination, timeout_sec=1, allow_browser_download=True,
+    result = attachments.download_resources(
+        resources(['first']), dest_dir=destination, timeout_sec=1, allow_browser_download=True,
         request_id='recorded', flow_key='tpm_small_marketing_fee',
-     sources=attachments.build_download_sources(POLICY))
-    files = list(download_result.items)
-    errors = [error.to_record() for error in download_result.errors]
-    assert errors == []
-    assert [item['resource_id'] for item in files] == [item['id'] for item in targets]
-    assert len({item['path'] for item in files}) == 1
-    assert len(list(destination.glob('*.xlsx'))) == (2 if preexisting else 1)
-    assert all(path.read_bytes() == workbook_bytes for path in destination.glob('*.xlsx'))
-    if preexisting:
-        assert previous.read_bytes() == workbook_bytes
+        sources=attachments.build_download_sources(POLICY),
+    )
+    assert not result.errors
+    assert recorded_download == ['first']
+    original = Path(result.items[0]['path'])
+    assert original != previous
+    assert original.read_bytes() == previous.read_bytes() == workbook_bytes
 
 
 def test_preparation_reuses_content_and_rebinds_each_resource(tmp_path, monkeypatch, workbook_bytes):
@@ -171,8 +306,8 @@ def test_preparation_reuses_content_and_rebinds_each_resource(tmp_path, monkeypa
     assert all(i['spreadsheet_cell'] == 'Sheet!B2' for i in images)
 
 
-def test_collection_preserves_67_resource_bindings_with_one_workbook_and_image(
-    tmp_path, monkeypatch, recorded_download,
+def test_collection_preserves_67_originals_and_reuses_prepared_content(
+    tmp_path, monkeypatch, recorded_download, workbook_bytes,
 ):
     ids = [str(1000 + index) for index in range(67)]
 
@@ -209,8 +344,9 @@ def test_collection_preserves_67_resource_bindings_with_one_workbook_and_image(
     assert Counter(r['owner_detail_id'] for r in material['resources']) == {
         f'detail[0].row[{i}]':3 if i < 7 else 2 for i in range(30)
     }
-    assert len({r['local_readonly_path'] for r in material['resources']}) == 1
-    assert len(list((tmp_path/'downloads').rglob('*.xlsx'))) == 1
+    originals = {Path(r['local_readonly_path']) for r in material['resources']}
+    assert len(originals) == 67
+    assert all(path.read_bytes() == workbook_bytes for path in originals)
     prepared = material['prepared']
     assert [i['resource_id'] for i in prepared['images']] == ids
     assert len({str(i['path']) for i in prepared['images']}) == 1

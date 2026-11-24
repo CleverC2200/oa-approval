@@ -267,6 +267,7 @@ def _resource_descriptor(
         "source_field_name": str(
             resource.get("_trusted_source_field_name") or ""
         ),
+        "source_references": evidence_packet.source_references(resource),
         "review_role": str(resource.get("_trusted_review_role") or ""),
         "source_system": source_system,
         "source_request_id": str(
@@ -380,7 +381,7 @@ def _merge_resources(
     discovered_resources: list[dict[str, Any]], *, origins,
 ) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
-    identities: dict[str, tuple[str, str]] = {}
+    identities: dict[str, tuple[str, str, dict[str, Any]]] = {}
 
     def add(resource: dict[str, Any], *, weaker_discovery: bool) -> None:
         raw_id = str(
@@ -408,16 +409,23 @@ def _merge_resources(
         owner = str(resource.get("_trusted_owner_detail_id") or "").strip()
         previous = identities.get(key)
         if previous is None:
-            identities[key] = (content_identity, owner)
-            merged.append(resource)
+            item = dict(resource)
+            identities[key] = (content_identity, owner, item)
+            merged.append(item)
             return
-        previous_content, previous_owner = previous
+        previous_content, previous_owner, item = previous
         if previous_content != content_identity:
             raise RuntimeError(attachments.ATTACHMENT_IDENTITY_CONFLICT_CODE)
         if previous_owner != owner:
             if weaker_discovery and trip_id and not owner:
                 return
             raise RuntimeError("resource_ownership_untrusted")
+        references = list(evidence_packet.source_references(item))
+        for reference in evidence_packet.source_references(resource):
+            if reference not in references:
+                references.append(reference)
+        if references:
+            item["_trusted_source_references"] = references
 
     for resource in form_resources:
         add(resource, weaker_discovery=False)
