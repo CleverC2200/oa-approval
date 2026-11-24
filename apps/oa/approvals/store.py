@@ -426,7 +426,8 @@ class Store:
                                     (encoded(pause), run_id))
         return pause
 
-    def freeze(self, run_id, task_id, material, material_file, material_sha256, frozen, rule_file):
+    def freeze(self, run_id, task_id, material, material_file, material_sha256, frozen, rule_file, *,
+               collection_error=None):
         resources = {str(item["resource_id"]):item for item in material.get("resources", [])}
         prepared = material.get("prepared", {})
         for item in prepared.get("images", []) + prepared.get("structured_contents", []):
@@ -436,11 +437,14 @@ class Store:
                     "parent_resource_id":item.get("parent_resource_id"),"local_readonly_path":item.get("path")}
         with self.connection:
             frozen_task = self.connection.execute("""UPDATE tasks SET material_file=?,material_sha256=?,frozen_json=?,
-                material_json=?,rule_file=?,status=CASE WHEN status='preparing' THEN 'prepared' ELSE status END,
-                error=CASE WHEN status='preparing' THEN NULL ELSE error END
+                material_json=?,rule_file=?,status=CASE WHEN status='preparing' THEN ? ELSE status END,
+                error=CASE WHEN status='preparing' THEN ? ELSE error END,
+                failure_count=failure_count+CASE WHEN status='preparing' THEN ? ELSE 0 END
                 WHERE id=? AND last_run_id=? AND status IN ('preparing','failed')
                 AND EXISTS(SELECT 1 FROM runs WHERE id=last_run_id AND status IN ('running','blocked'))""",
-                (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),task_id,run_id))
+                (str(material_file),material_sha256,encoded(frozen),encoded(material),str(rule_file),
+                 'failed' if collection_error is not None else 'prepared',collection_error,
+                 int(collection_error is not None),task_id,run_id))
             if frozen_task.rowcount != 1:
                 raise ValueError('collection_run_changed')
             if (material.get('invoice_title_reference') or {}).get('status') == 'ready':
