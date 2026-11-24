@@ -343,10 +343,14 @@ class TravelReadSession:
             expected_resource_count=expected,
             expected_marker=marker,
         )
-        observation = candidate.read()
-        self._remaining(deadline)
-        self._verify_oa(deadline)
-        self._verify_delivery([p["request_id"] for p in self.payloads])
+        try:
+            observation = candidate.read()
+            self._remaining(deadline)
+            self._verify_oa(deadline)
+            self._verify_delivery([p["request_id"] for p in self.payloads])
+        except (_TravelReadDeadline, Exception):
+            self.attempts.extend(candidate.hotel_diagnostics())
+            raise
         self.files = frozenset(str(r["id"]) for r in observation.download_targets) | frozenset(
             str(invoice["resource"]["id"])
             for record in observation.order_invoices for invoice in record["invoices"] if "resource" in invoice

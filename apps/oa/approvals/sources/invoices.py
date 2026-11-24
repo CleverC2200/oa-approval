@@ -212,7 +212,8 @@ def _invoice_evidence(ref: dict, detail: dict) -> dict:
         text = html.unescape(str(value)).strip() if isinstance(value, (str, int, float)) else ""
         fields[name] = {"value": text, "read_status": "present" if text else "not_provided"}
     files = []
-    for item in data.get("flist") or []:
+    file_inventory = data.get("flist")
+    for item in file_inventory if isinstance(file_inventory, list) else ():
         if not isinstance(item, dict) or item.get("del", 0) not in (0, "0"):
             continue
         raw_id = item.get("id")
@@ -229,15 +230,22 @@ def _invoice_evidence(ref: dict, detail: dict) -> dict:
         if isinstance(size, int) and not isinstance(size, bool) and size >= 0:
             record["size_bytes"] = size
         files.append(record)
-    original = original_source(data, ref["invoice_no"])
-    if original:
+    started = time.monotonic()
+    binding = _bind_original(data, ref["invoice_no"])
+    diagnostics = {}
+    if isinstance(binding, dict):
         for record in files:
-            if record["file_id"] == original["cloud_file_id"]:
-                record["original_source"] = original
+            if record["file_id"] == binding["cloud_file_id"]:
+                record["original_source"] = binding
+    else:
+        diagnostics = {"original_binding_diagnostic": {
+            "stage": "invoice_original_binding", "reason": binding,
+            "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+        }}
     return {
         **ref, "read_status": "content_read", "fields": fields, "files": files,
         "file_records_status": "present" if files else "not_provided",
-        "body_read_status": "not_read",
+        "body_read_status": "not_read", **diagnostics,
     }
 
 
@@ -356,47 +364,62 @@ def _positive_id(value: object) -> str:
     return text if re.fullmatch(r'[1-9][0-9]*', text) else ''
 
 
-def original_source(data: dict, invoice_number: str) -> dict:
+def _bind_original(data: dict, invoice_number: str) -> dict | str:
     record_id = _positive_id(data.get('id'))
     if not record_id or str(data.get('number')) != invoice_number:
-        return {}
+        return 'invoice_original_record_identity_unverified'
     if data.get('fid') is not None and str(data['fid']) != record_id:
-        return {}
-    files = [item for item in data.get('flist') or [] if isinstance(item, dict)
+        return 'invoice_original_record_identity_mismatch'
+    inventory = data.get('flist')
+    if inventory is None:
+        return 'invoice_original_inventory_missing'
+    if not isinstance(inventory, list):
+        return 'invoice_original_inventory_invalid'
+    modified, native = data.get('modify_info'), data.get('oa')
+    if not inventory:
+        if any(isinstance(metadata, dict) and any(metadata.get(key) not in (None, '') for key in keys)
+               for metadata, keys in ((modified, ('pdf', 'furl')), (native, ('doc_id', 'img_id')))):
+            return 'invoice_original_inventory_conflict'
+        return 'invoice_original_not_provided'
+    files = [item for item in inventory if isinstance(item, dict)
              and item.get('del', 0) in (0, '0')]
     active = [item for item in files if item.get('type') == 'pdf']
-    modified = data.get('modify_info')
     if len(active) > 1 and isinstance(modified, dict) and str(modified.get('fileType')) == '2':
         reference = _positive_id(modified.get('pdf'))
         if reference and str(modified.get('furl')) == reference:
             active = [item for item in active if _positive_id(item.get('id')) == reference]
     if not active:
-        active = [item for item in files if item.get('type') in {'jpg', 'jpeg', 'png'}]
+        active = [item for item in files if item.get('type') in ('jpg', 'jpeg', 'png')]
+    if not active:
+        return 'invoice_original_candidate_missing'
     if len(active) != 1:
-        return {}
+        return 'invoice_original_candidate_ambiguous'
     cloud_file = _positive_id(active[0].get('id'))
-    native = data.get('oa')
-    if not cloud_file or not isinstance(modified, dict) or not isinstance(native, dict):
-        return {}
+    if not cloud_file:
+        return 'invoice_original_cloud_file_identity_invalid'
+    if not isinstance(modified, dict):
+        return 'invoice_original_file_mapping_missing'
+    if not isinstance(native, dict):
+        return 'invoice_original_native_identity_missing'
     doc_id = _positive_id(native.get('doc_id'))
     file_id = _positive_id(native.get('img_id'))
     file_type = 'jpg' if active[0]['type'] == 'jpeg' else active[0]['type']
     pdf_reference = modified.get('pdf')
     if not doc_id or not file_id:
-        return {}
+        return 'invoice_original_native_identity_invalid'
     original_file = str(modified.get('furl'))
     converted_ofd = file_type == 'pdf' and original_file != cloud_file
     if converted_ofd:
         ofd_files = [item for item in files if item.get('type') == 'ofd']
         if (str(modified.get('fileType')) != '4' or len(ofd_files) != 1
                 or _positive_id(ofd_files[0].get('id')) != original_file):
-            return {}
+            return 'invoice_original_file_mapping_mismatch'
     elif original_file != cloud_file:
-        return {}
+        return 'invoice_original_file_mapping_mismatch'
     if file_type == 'pdf' and str(pdf_reference) != cloud_file:
-        return {}
+        return 'invoice_original_file_mapping_mismatch'
     if file_type in {'jpg', 'png'} and pdf_reference not in (None, ''):
-        return {}
+        return 'invoice_original_file_mapping_mismatch'
     source = {'cloud_record_id': record_id, 'cloud_file_id': cloud_file,
               'document_id': doc_id, 'native_file_id': file_id}
     if converted_ofd:

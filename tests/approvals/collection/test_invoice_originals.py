@@ -27,6 +27,7 @@ from apps.oa.approvals.sources import auth
 from apps.oa.approvals import flows as flow
 from apps.oa.approvals.sources import invoices as invoice_buyers
 from apps.oa.approvals.sources import official_sql
+from apps.oa.approvals.operations import Approval
 
 from apps.oa.approvals.collection.case import collect_case
 from tests.approvals.invoice_fakes import CONFIG, NUMBER, InvoiceApi
@@ -449,7 +450,7 @@ def test_explicit_original_pdf_is_read_without_selecting_the_other_pdf(original_
     assert material['prepared']['manifest'][0]['page_count'] == 1
 
 @pytest.mark.parametrize('change', ['conflict', 'missing', 'deleted', 'duplicate'])
-def test_multiple_pdf_selection_rejects_inconsistent_official_mapping(original_transport, change):
+def test_multiple_pdf_selection_rejects_inconsistent_official_mapping(original_transport, tmp_path, change):
     state = original_transport
     state.detail['flist'].append({'id': '8002', 'type': 'pdf', 'del': 0})
     state.detail['modify_info']['fileType'] = '2'
@@ -461,7 +462,9 @@ def test_multiple_pdf_selection_rejects_inconsistent_official_mapping(original_t
         state.detail['flist'][0]['del'] = 1
     else:
         state.detail['flist'].append(deepcopy(state.detail['flist'][0]))
-    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
+    material = collect_original(state, tmp_path)
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'not_read'
+    assert not material['resources']
 
 def test_original_prepares_every_page_before_claiming_complete_body(original_transport, tmp_path):
     state = original_transport
@@ -547,14 +550,17 @@ def test_exact_native_deduplication_retains_original_verification(original_trans
     assert not any(r[0] == '/weaver/weaver.file.FileDownload' for r in state.requests)
 
 @pytest.fixture
-def many_originals(original_transport, monkeypatch):
+def many_originals(request, original_transport, monkeypatch):
     state = original_transport
     state.details = {}
     state.detail_reads = []
     state.cloud_reads = []
+    state.cloud_bodies = {}
+    state.cloud_errors = {}
+    state.native_responses = {}
     state.after_body = None
     rows = []
-    for index in range(27):
+    for index in range(getattr(request, 'param', 27)):
         data_id = str(1000 + index)
         number = str(1000 + index).zfill(20)
         detail = deepcopy(state.detail)
@@ -592,14 +598,20 @@ def many_originals(original_transport, monkeypatch):
             state.detail_reads.append(data_id)
             body = json.dumps({'actionMsg': {'code': '0'}, 'data': state.details[data_id]}).encode()
         elif path == '/invoiceApi/file/download':
-            state.cloud_reads.append(params['dataId'][0])
+            data_id = params['dataId'][0]
+            state.cloud_reads.append(data_id)
+            if data_id in state.cloud_errors:
+                raise state.cloud_errors[data_id]
             if state.after_body:
                 state.after_body()
-            body = state.pdf
+            body = state.cloud_bodies.get(data_id, state.pdf)
         elif path == '/api/doc/detail/basicInfo':
             index = int(params['docid'][0]) - 3000
             body = json.dumps({'status': 1, 'mainimagefile': str(2000 + index)}).encode()
         elif path == '/weaver/weaver.file.FileDownload':
+            file_id = params['fileid'][0]
+            if file_id in state.native_responses:
+                return Response(*state.native_responses[file_id])
             return Response(b'<html>permission denied</html>', 'https://oa.example.test/notice/noright.jsp')
         else:
             return original_open(request, **kwargs)
@@ -608,6 +620,130 @@ def many_originals(original_transport, monkeypatch):
     monkeypatch.setattr(remote.safe_http, 'urlopen', open_request)
     monkeypatch.setattr(original_source.urllib.request, 'build_opener', lambda *_a: SimpleNamespace(open=open_request))
     return state
+
+@pytest.mark.parametrize('many_originals', [5], indirect=True)
+def test_collection_explains_each_official_original_gap_and_keeps_read_material(many_originals, tmp_path):
+    state = many_originals
+    state.details['1001']['flist'] = []
+    del state.details['1001']['oa'], state.details['1001']['modify_info']
+    del state.details['1002']['flist']
+    state.details['1003']['modify_info']['furl'] = 'private-reference'
+    state.details['1004']['flist'] = []
+    state.client.pending_rows = lambda: [{
+        'request_id': '101', 'workflow_key': CONFIG['flow_key'],
+        'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
+    }]
+    app = Approval(tmp_path / 'runtime', api=state.client, configs=[CONFIG], source_policy=POLICY)
+    with pytest.raises(RuntimeError, match='^invoice_original_coverage_incomplete$'):
+        app.collect(app.pending()['run_id'], expected_task_id=1)
+    result = app.inspect(1)
+    app.store.connection.close()
+    assert result['task']['status'] == 'failed' and not result['submissions']
+    material = json.loads(Path(result['task']['material_file']).read_text())
+    invoices = material['invoice_evidence']['invoices']
+    assert invoices[0]['body_read_status'] == 'content_read'
+    assert [invoice['body_read_status'] for invoice in invoices[1:]] == ['not_read'] * 4
+    assert state.cloud_reads == ['1000']
+    diagnostics = result['collection_failure']['diagnostics']
+    binding = [row for row in diagnostics if row['stage'] == 'invoice_original_binding']
+    assert [(row['source_path'], row['reason']) for row in binding] == [
+        ('invoice_evidence.invoices[1]', 'invoice_original_not_provided'),
+        ('invoice_evidence.invoices[2]', 'invoice_original_inventory_missing'),
+        ('invoice_evidence.invoices[3]', 'invoice_original_file_mapping_mismatch'),
+        ('invoice_evidence.invoices[4]', 'invoice_original_inventory_conflict'),
+    ]
+    assert all(row['elapsed_ms'] >= 0 for row in binding)
+    assert 'private-reference' not in json.dumps(diagnostics)
+
+
+@pytest.mark.parametrize('many_originals', [3], indirect=True)
+@pytest.mark.parametrize('stage,broken_body', [
+    ('invoice_original_download', b'private invoice payload'),
+    ('invoice_original_preparation', b'%PDF-1.7\nprivate invoice payload'),
+])
+def test_collection_keeps_binding_and_body_failures_for_the_actual_invoices(
+        many_originals, tmp_path, stage, broken_body):
+    state = many_originals
+    state.details['1000']['modify_info']['furl'] = 'private-mapping-reference'
+    state.cloud_bodies['1002'] = broken_body
+    state.client.pending_rows = lambda: [{
+        'request_id': '101', 'workflow_key': CONFIG['flow_key'],
+        'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
+    }]
+    app = Approval(tmp_path / 'runtime', api=state.client, configs=[CONFIG], source_policy=POLICY)
+    try:
+        pending = app.pending()
+        task_id = pending['tasks'][0]['id']
+        with pytest.raises(RuntimeError):
+            app.collect(pending['run_id'], expected_task_id=task_id)
+        inspection = app.inspect(task_id)
+        assert inspection['task']['status'] == 'failed' and not inspection['task']['material_file']
+        assert set(state.cloud_reads) == {'1001', '1002'}
+        diagnostics = inspection['collection_failure']['diagnostics']
+        binding, downstream = diagnostics
+        assert binding['source_path'] == 'invoice_evidence.invoices[0]'
+        assert binding['stage'] == 'invoice_original_binding'
+        assert binding['reason'] == 'invoice_original_file_mapping_mismatch'
+        assert binding['source'] == 'invoice_cloud' and binding['elapsed_ms'] >= 0
+        assert downstream['source_path'] == 'invoice_evidence.invoices[2]'
+        assert downstream['stage'] == stage
+        assert downstream['source'] == ('invoice_cloud' if stage == 'invoice_original_download' else 'invoice_original')
+        assert downstream['elapsed_ms'] >= 0
+        assert downstream['reason'] == (
+            'cloud_signature_mismatch' if stage == 'invoice_original_download' else 'preparation_exception'
+        )
+        receipt = json.dumps(diagnostics)
+        for private_value in ('private', '2002', '8002', '9002', 'synthetic-token'):
+            assert private_value not in receipt
+        assert not inspection['submissions']
+    finally:
+        app.store.connection.close()
+
+
+@pytest.mark.parametrize('many_originals', [3], indirect=True)
+@pytest.mark.parametrize('fault,reason,facts', [
+    ('timeout', 'attachment_download_failed', {'exception_type': 'TimeoutError'}),
+    ('http', 'attachment_access_denied', {'http_status': 403}),
+])
+def test_collection_keeps_known_original_failures_after_the_first_fatal_result(
+        many_originals, tmp_path, fault, reason, facts):
+    from urllib.error import HTTPError
+
+    state = many_originals
+    state.native_responses.update({
+        '2000': (b'<html>expired</html>', 'https://oa.example.test/login.jsp'),
+        '2002': (b'', 'https://oa.example.test/weaver/weaver.file.FileDownload'),
+    })
+    state.cloud_errors['1001'] = (
+        TimeoutError('private upstream timeout') if fault == 'timeout'
+        else HTTPError('https://example.invalid/private', 403, 'private upstream error', {}, None)
+    )
+    state.client.pending_rows = lambda: [{
+        'request_id': '101', 'workflow_key': CONFIG['flow_key'],
+        'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester',
+    }]
+    app = Approval(tmp_path / 'runtime', api=state.client, configs=[CONFIG], source_policy=POLICY)
+    try:
+        pending = app.pending()
+        task_id = pending['tasks'][0]['id']
+        with pytest.raises(RuntimeError, match='^oa_session_expired$'):
+            app.collect(pending['run_id'], expected_task_id=task_id)
+        inspection = app.inspect(task_id)
+        assert inspection['task']['status'] == 'failed' and not inspection['task']['material_file']
+        assert not inspection['submissions'] and state.cloud_reads == ['1001']
+        assert not list((tmp_path / 'runtime' / 'materials').rglob('prepared'))
+        diagnostics = inspection['collection_failure']['diagnostics']
+        assert [(row['source_path'], row['reason'], row['source']) for row in diagnostics] == [
+            ('invoice_evidence.invoices[0]', 'oa_session_expired', 'invoice_original'),
+            ('invoice_evidence.invoices[1]', reason, 'invoice_cloud'),
+        ]
+        assert {key: diagnostics[1][key] for key in facts} == facts
+        assert all(row['stage'] == 'invoice_original_download' and row['elapsed_ms'] >= 0 for row in diagnostics)
+        receipt = json.dumps(diagnostics)
+        assert 'private' not in receipt and '2001' not in receipt
+    finally:
+        app.store.connection.close()
+
 
 def test_many_originals_keep_full_body_coverage_with_bounded_context_reads(many_originals, tmp_path):
     material = collect_original(many_originals, tmp_path)
@@ -855,9 +991,13 @@ def test_cloud_incomplete_original_preserves_safe_failure_diagnostics(
         state.cloud_headers['Content-Length'] = 'invalid'
     with pytest.raises(CollectionFailure, match='^attachment_content_incomplete$') as caught:
         collect_original(state, tmp_path)
-    assert caught.value.diagnostics == [{
-        'stage': 'invoice_original_download', 'reason': reason, 'file_ref': '202',
-    }]
+    diagnostic, = caught.value.diagnostics
+    elapsed_ms = diagnostic.pop('elapsed_ms')
+    assert elapsed_ms >= 0
+    assert diagnostic == {
+        'stage': 'invoice_original_download', 'reason': reason, 'source': 'invoice_cloud',
+        'source_path': 'invoice_evidence.invoices[0]',
+    }
     assert 'synthetic-token' not in json.dumps(caught.value.diagnostics)
     assert not list((tmp_path / 'prepared').rglob('*.png'))
 
@@ -881,7 +1021,7 @@ def test_ofd_invoice_reads_its_explicit_official_pdf(original_transport, tmp_pat
 
 
 @pytest.mark.parametrize('change', ['missing_ofd', 'wrong_pdf', 'multiple_ofd'])
-def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, change):
+def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, tmp_path, change):
     state = original_transport
     state.detail['flist'].insert(0, {'id': '8000', 'type': 'ofd', 'del': 0})
     state.detail['modify_info'].update(furl='8000', pdf='8001', fileType='4')
@@ -891,7 +1031,9 @@ def test_ofd_pdf_mapping_requires_a_unique_explicit_pair(original_transport, cha
         state.detail['modify_info']['pdf'] = '8999'
     else:
         state.detail['flist'].append({'id': '8002', 'type': 'ofd', 'del': 0})
-    assert invoice_buyers.original_source(state.detail, NUMBER) == {}
+    material = collect_original(state, tmp_path)
+    assert material['invoice_evidence']['invoices'][0]['body_read_status'] == 'not_read'
+    assert not material['resources']
 
 
 @pytest.mark.parametrize('change,reason', [('pdf', 'resource_ownership_untrusted'),

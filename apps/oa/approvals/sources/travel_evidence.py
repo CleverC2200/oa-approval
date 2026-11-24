@@ -190,7 +190,7 @@ class TravelEvidence:
     ) -> TravelEvidence:
         valid, diagnostics, targets, inventory = [], [], [], []
         seen_ids, seen_bodies = set(), set()
-        page_fields = []
+        page_fields, hotel_diagnostics = [], []
         for observation in observations:
             assessment = observation.assess(
                 expected_marker=flow_mark,
@@ -200,6 +200,10 @@ class TravelEvidence:
             if not assessment.target_usable:
                 continue
             valid.append(observation)
+            hotel_diagnostics.extend(travel_hotel.detail_diagnostic(detail, index, observation.browser)
+                                     for index, detail in enumerate(observation.hotel_details)
+                                     if detail.get("read_status") in ("read", "failed")
+                                     and isinstance(detail.get("diagnostics"), dict))
             merge_inventory(inventory, observation.inventory)
             page_fields.extend(observation.source_facts)
             body = observation.text.strip()
@@ -238,7 +242,7 @@ class TravelEvidence:
             return cls(errors=(TravelReadError(str(error), "商旅订单发票未能完成读取或归属核对",
                 diagnostics=tuple(diagnostic for observation in valid
                     for record in observation.order_invoices
-                    for diagnostic in record.get("diagnostics", []))),))
+                    for diagnostic in record.get("diagnostics", [])) + tuple(hotel_diagnostics)),))
         for item in invoice_targets:
             resource_id = "travel_platform:" + item["id"]
             if resource_id not in seen_ids:
@@ -279,7 +283,7 @@ class TravelEvidence:
                     TravelReadError(
                         "travel_attachment_resources_incomplete",
                         "商旅附件记录含无法读取的文件引用",
-                        diagnostics=tuple(inventory),
+                        diagnostics=tuple(inventory + hotel_diagnostics),
                     ),
                 ),
             )
@@ -295,7 +299,7 @@ class TravelEvidence:
                 "source_request_id": str(request_id),
                 "discovery_ref": f"travel_platform:{flow_mark}",
                 **({"inventory": inventory} if inventory else {}),
-                **({"diagnostics": diagnostics} if diagnostics else {}),
+                **({"diagnostics": diagnostics + hotel_diagnostics} if diagnostics or hotel_diagnostics else {}),
             }
         if targets or any(item.scan_status == "empty" for item in valid):
             return cls(tuple(targets), facts, _scan=scan)
@@ -307,7 +311,7 @@ class TravelEvidence:
                     DISCOVERY_FAILED,
                     "商旅附件页面或附件信息页签未能完成稳定读取",
                     diagnostics=tuple(
-                        diagnostics
+                        diagnostics + hotel_diagnostics
                         or [{"stage": "browser", "reason": "no_candidate_result"}]
                     ),
                 ),
@@ -386,6 +390,9 @@ class TravelEvidence:
                 "order_invoice_resource_count": len(order_invoice_ids),
                 "additional_order_invoice_count": len(additional_order_invoice_ids),
             },
-            tuple(inventory)
+            tuple(inventory) + tuple(
+                item for item in (self._scan or {}).get("diagnostics", [])
+                if item.get("stage") == "hotel_detail"
+            )
             + ({"stage": "attachment_count", "reason": "source_inventory_incomplete"},),
         )

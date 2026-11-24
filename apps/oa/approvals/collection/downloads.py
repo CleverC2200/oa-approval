@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 import json
 import hashlib
@@ -341,6 +341,16 @@ def _stop_error() -> DownloadError:
     )
 
 
+def _original_failure(error: DownloadError, started: float, *, resource: dict | None = None,
+                      stage: str = "invoice_original_download") -> DownloadError:
+    diagnostics = error.diagnostics or ({"stage": stage, "reason": error.code},)
+    identity = {"file_ref": str(resource["id"])} if resource is not None else {}
+    elapsed_ms = max(0, round((time.monotonic() - started) * 1000))
+    return replace(error, diagnostics=tuple({
+        "source": "invoice_original", "elapsed_ms": elapsed_ms, **item, **identity,
+    } for item in diagnostics))
+
+
 class _DownloadBatch:
     def __init__(
         self,
@@ -380,14 +390,14 @@ class _DownloadBatch:
         self._obtain()
         self._materialize()
         self._expand_archives()
-        if self.original_context is not None:
-            errors = self._check_terminal_sources()
-            if errors:
-                return DownloadResult((), errors, "blocked")
-        self._publish_cache()
-        _remove_legacy_manifest(self.dest_dir)
         errors = [self.errors[key] for resource in self.targets if (key := resource_key(resource)) in self.errors]
         errors.sort(key=lambda error: error.code not in _FATAL_DOWNLOAD_ERROR_CODES)
+        if self.original_context is not None:
+            terminal_errors = self._check_terminal_sources()
+            if terminal_errors:
+                return DownloadResult((), terminal_errors + tuple(errors), "blocked")
+        self._publish_cache()
+        _remove_legacy_manifest(self.dest_dir)
         return DownloadResult(
             tuple(item for _, item in self.cache_entries),
             tuple(errors),
@@ -395,57 +405,54 @@ class _DownloadBatch:
         )
 
     def _check_originals(self) -> tuple[DownloadError, ...]:
+        started = time.monotonic()
         try:
             self.original_context = self.sources.originals.snapshot(self.request_id)
         except rpa_session.RpaSessionError as error:
-            return (DownloadError(error.code, "发票原件会话核验失败"),)
+            return (_original_failure(DownloadError(error.code, "发票原件会话核验失败"),
+                                     started, stage="invoice_original_verification"),)
         except Exception:
-            return (
+            return (_original_failure(
                 DownloadError("resource_ownership_untrusted", "发票原件归属核验失败"),
-            )
+                started, stage="invoice_original_verification"),)
         for resource in self.targets:
             if not resource.get("_invoice_original"):
                 continue
+            started = time.monotonic()
             try:
                 valid = self.sources.originals.verify(
                     self.original_context, resource, timeout_sec=self.timeout_sec
                 )
             except rpa_session.RpaSessionError as error:
-                return (DownloadError(error.code, "发票原件会话核验失败"),)
+                return (_original_failure(DownloadError(error.code, "发票原件会话核验失败"),
+                    started, resource=resource, stage="invoice_original_verification"),)
             except ValueError:
                 valid = False
             if not valid:
-                return (
-                    DownloadError(
-                        "resource_ownership_untrusted", "发票原件归属核验失败"
-                    ),
-                )
+                return (_original_failure(
+                    DownloadError("resource_ownership_untrusted", "发票原件归属核验失败"),
+                    started, resource=resource, stage="invoice_original_verification"),)
         return ()
 
     def _check_terminal_sources(self) -> tuple[DownloadError, ...]:
         if runtime_control.stop_requested():
             return (_stop_error(),)
+        started = time.monotonic()
         try:
             current = self.sources.originals.snapshot(self.request_id)
-            valid = (
-                bool(self.original_context.sources)
-                and current.sources == self.original_context.sources
-            )
+            valid = bool(self.original_context.sources) and current.sources == self.original_context.sources
         except rpa_session.RpaSessionError as error:
-            return (DownloadError(error.code, "发票原件会话核验失败"),)
+            return (_original_failure(DownloadError(error.code, "发票原件会话核验失败"),
+                                     started, stage="invoice_original_verification"),)
         except Exception:
             valid = False
         if runtime_control.stop_requested():
             return (_stop_error(),)
-        return (
-            ()
-            if valid
-            else (
-                DownloadError(
-                    "resource_ownership_untrusted", "发票原件批量下载归属已变化"
-                ),
-            )
-        )
+        if valid:
+            return ()
+        return (_original_failure(
+            DownloadError("resource_ownership_untrusted", "发票原件批量下载归属已变化"),
+            started, stage="invoice_original_verification"),)
 
     def _cached(self, resource) -> dict | None:
         if not self.reuse_cache or rar_volumes.PART_NAME.fullmatch(resource_name(resource)):
@@ -471,17 +478,29 @@ class _DownloadBatch:
         )
 
     def _direct(self, resource) -> TransferOutcome:
-        dest_dir = self._original_destination()
-        if resource.get("_invoice_original") and self.original_context is not None:
-            return self.sources.originals.read(
-                self.original_context,
-                resource,
-                dest_dir=dest_dir,
-                timeout_sec=self.timeout_sec,
-            )
-        return self.sources.transfer.direct(
-            resource, dest_dir=dest_dir, timeout_sec=self.timeout_sec
-        )
+        original = bool(resource.get("_invoice_original") and self.original_context is not None)
+        started = time.monotonic()
+        try:
+            dest_dir = self._original_destination()
+            if original:
+                outcome = self.sources.originals.read(
+                    self.original_context,
+                    resource,
+                    dest_dir=dest_dir,
+                    timeout_sec=self.timeout_sec,
+                )
+            else:
+                outcome = self.sources.transfer.direct(
+                    resource, dest_dir=dest_dir, timeout_sec=self.timeout_sec
+                )
+        except Exception as error:
+            outcome = Failed(DownloadError(
+                "attachment_download_failed",
+                f"{resource_name(resource) or 'attachment.bin'}: 附件下载失败: {type(error).__name__}",
+            ))
+        if original and isinstance(outcome, Failed):
+            return Failed(_original_failure(outcome.error, started, resource=resource))
+        return outcome
 
     def _original_destination(self) -> Path:
         return Path(mkdtemp(prefix='original-', dir=self.dest_dir))
@@ -507,15 +526,7 @@ class _DownloadBatch:
                 for index, resource in pending
             ]
             for index, future in futures:
-                try:
-                    self.outcomes[index] = future.result()
-                except Exception as error:
-                    self.outcomes[index] = Failed(
-                        DownloadError(
-                            "attachment_download_failed",
-                            f"{resource_name(self.targets[index]) or 'attachment.bin'}: 附件下载失败: {type(error).__name__}",
-                        )
-                    )
+                self.outcomes[index] = future.result()
 
     def _volume_source(self, resource):
         if not rar_volumes.PART_NAME.fullmatch(resource_name(resource)):
@@ -536,40 +547,49 @@ class _DownloadBatch:
         return (origin.scheme, origin.hostname, str(port), *scope)
 
     def _materialize_one(self, resource, outcome):
+        started = time.monotonic()
         if isinstance(outcome, _Cached):
-            if not valid_original_file(resource, Path(outcome.item['path'])):
-                return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
-            return outcome.item
-        if isinstance(outcome, Unavailable):
-            outcome = self.sources.transfer.browser(
-                resource, dest_dir=self._original_destination(), timeout_sec=self.timeout_sec
-            )
-        if not isinstance(outcome, Downloaded):
-            return outcome
-        path = outcome.path
-        if not remote.valid_attachment_file(path):
-            code = remote._file_download_fail_code(path) or "attachment_download_failed"
-            return Failed(
-                DownloadError(
-                    code, f"{resource_name(resource) or path.name}: 下载文件无效"
+            item = outcome.item
+            path = Path(item['path'])
+        else:
+            if isinstance(outcome, Unavailable):
+                outcome = self.sources.transfer.browser(
+                    resource, dest_dir=self._original_destination(), timeout_sec=self.timeout_sec
                 )
-            )
-        item = {
-            "resource_id": str(resource.get("id") or resource_key(resource)),
-            "name": resource_name(resource) or path.name,
-            "path": str(path),
-            "reused": False,
-        }
+                if resource.get("_invoice_original") and isinstance(outcome, Failed):
+                    outcome = Failed(_original_failure(outcome.error, started, resource=resource))
+            if not isinstance(outcome, Downloaded):
+                return outcome
+            path = outcome.path
+            if not remote.valid_attachment_file(path):
+                code = remote._file_download_fail_code(path) or "attachment_download_failed"
+                error = DownloadError(code, f"{resource_name(resource) or path.name}: 下载文件无效")
+                if resource.get("_invoice_original"):
+                    error = _original_failure(error, started, resource=resource, stage="invoice_original_body_validation")
+                return Failed(error)
+            item = {
+                "resource_id": str(resource.get("id") or resource_key(resource)),
+                "name": resource_name(resource) or path.name,
+                "path": str(path),
+                "reused": False,
+            }
+        started = time.monotonic()
         if not valid_original_file(resource, path):
-            return Failed(DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'))
+            return Failed(_original_failure(
+                DownloadError('attachment_content_incomplete', 'attachment_content_incomplete'),
+                started, resource=resource, stage="invoice_original_body_validation"))
         return item
 
     def _materialize(self):
-        for resource, outcome in zip(self.targets, self.outcomes):
+        pending = zip(self.targets, self.outcomes)
+        for resource, outcome in pending:
             item = self._materialize_one(resource, outcome)
             if isinstance(item, Failed):
                 self.errors[resource_key(resource)] = item.error
                 if item.error.code in _FATAL_DOWNLOAD_ERROR_CODES:
+                    for target, later in pending:
+                        if target.get("_invoice_original") and isinstance(later, Failed):
+                            self.errors[resource_key(target)] = later.error
                     break
             elif isinstance(item, dict):
                 self.cache_entries.append((resource, item))

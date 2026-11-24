@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import time
 import urllib.request
 from zoneinfo import ZoneInfo
 
@@ -90,19 +91,41 @@ def _worker(mode, payload, config):
     env = dict(os.environ)
     env['SAPNWRFC_HOME'] = config['sap_sdk']
     env['DYLD_LIBRARY_PATH'] = str(Path(config['sap_sdk']) / 'lib')
+    started = time.monotonic()
+
+    def failed(stage, reason, **facts):
+        return CollectionFailure('dealer_closure_' + mode + '_read_failed', diagnostics=[
+            {'stage': mode + '_' + stage, 'reason': reason,
+             'elapsed_ms': round((time.monotonic() - started) * 1000), **facts}])
+
     try:
-        result = subprocess.run(command, input=json.dumps(inputs), text=True,
+        result = subprocess.run(command, input=json.dumps(inputs).encode(),
             capture_output=True, timeout=300, env=env)
+    except subprocess.TimeoutExpired as error:
+        raise failed('worker_wait', 'worker_wait_timeout', exception_type=type(error).__name__) from None
+    except (OSError, ValueError) as error:
+        raise failed('worker_start', 'worker_start_failed', exception_type=type(error).__name__) from None
+
+    if not result.stdout.strip():
+        raise failed('worker_exit', 'worker_exited_without_response')
+    try:
         data = json.loads(result.stdout)
-        if result.returncode or data.get('status') != 'ok':
-            raise CollectionFailure('dealer_closure_' + mode + '_read_failed', diagnostics=[
-                {'stage': mode + '_' + str(data.get('stage', 'source')),
-                 'reason': data.get('reason'), 'exception_type': data.get('error_type'),
-                 'result_type': data.get('error_key')}])
-        return data
-    except (OSError, ValueError, subprocess.TimeoutExpired):
-        raise CollectionFailure('dealer_closure_' + mode + '_read_failed', diagnostics=[
-            {'stage': mode, 'reason': 'worker_response_unavailable'}]) from None
+    except UnicodeDecodeError:
+        raise failed('worker_output', 'worker_output_decode_failed', exception_type='UnicodeDecodeError') from None
+    except ValueError as error:
+        raise failed('worker_output', 'worker_output_json_invalid', exception_type=type(error).__name__) from None
+
+    if isinstance(data, dict) and data.get('status') == 'failed':
+        raise failed(str(data.get('stage') or 'source'), data.get('reason') or 'worker_reported_failure',
+            exception_type=data.get('error_type'), result_type=data.get('error_key'))
+    if (not isinstance(data, dict) or data.get('status') != 'ok'
+            or (mode == 'sap' and (not isinstance(data.get('queries'), dict)
+                or any(not isinstance(data.get(key), str) or not data[key]
+                    for key in ('company_code', 'customer_code'))))):
+        raise failed('worker_output', 'worker_output_shape_invalid', result_type=type(data).__name__)
+    if result.returncode:
+        raise failed('worker_exit', 'worker_exit_unsuccessful')
+    return data
 
 
 def _dms(customer, tag, config):

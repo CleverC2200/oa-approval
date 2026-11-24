@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,6 +61,14 @@ def valid_original_file(resource: dict, path: Path) -> bool:
     except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
         return False
     return True
+
+
+def _cloud_download_failure(code: str, reason: str, file_id: str, started: float, **facts) -> Failed:
+    return Failed(DownloadError(code, code, ({
+        "stage": "invoice_original_download", "source": "invoice_cloud",
+        "reason": reason, "file_ref": file_id,
+        "elapsed_ms": max(0, round((monotonic() - started) * 1000)), **facts,
+    },)))
 
 
 class _NoCloudRedirect(urllib.request.HTTPRedirectHandler):
@@ -225,42 +234,38 @@ class OriginalSources:
                     "Referer": "https://inc.mypiaojia.com/",
                 },
             )
-            with urllib.request.build_opener(_NoCloudRedirect()).open(
-                request, timeout=max(1, timeout_sec)
-            ) as response:
-                length = response.headers.get("Content-Length")
-                if length is not None and (
-                    not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES
-                ):
-                    reason = ('cloud_content_length_invalid' if not length.isdecimal()
-                              else 'cloud_content_too_large')
-                    return Failed(
-                        DownloadError(
-                            "attachment_content_incomplete",
-                            "attachment_content_incomplete",
-                            ({'stage': 'invoice_original_download',
-                              'reason': reason,
-                              'file_ref': native_file_id},),
-                        )
-                    )
-                body = response.read(_MAX_ORIGINAL_BYTES + 1)
-                reason = ''
-                if len(body) > _MAX_ORIGINAL_BYTES:
-                    reason = 'cloud_content_too_large'
-                elif not _has_original_signature(body, source.get('file_type')):
-                    reason = 'cloud_signature_mismatch'
-                elif length is not None and len(body) != int(length):
-                    reason = 'cloud_length_mismatch'
-                if reason:
-                    return Failed(
-                        DownloadError(
-                            "attachment_content_incomplete",
-                            "attachment_content_incomplete",
-                            ({'stage': 'invoice_original_download',
-                              'reason': reason,
-                              'file_ref': native_file_id},),
-                        )
-                    )
+            started = monotonic()
+            try:
+                with urllib.request.build_opener(_NoCloudRedirect()).open(
+                    request, timeout=max(1, timeout_sec)
+                ) as response:
+                    length = response.headers.get("Content-Length")
+                    if length is not None and (
+                        not length.isdecimal() or int(length) > _MAX_ORIGINAL_BYTES
+                    ):
+                        reason = ('cloud_content_length_invalid' if not length.isdecimal()
+                                  else 'cloud_content_too_large')
+                        return _cloud_download_failure(
+                            "attachment_content_incomplete", reason, native_file_id, started)
+                    body = response.read(_MAX_ORIGINAL_BYTES + 1)
+                    reason = ''
+                    if len(body) > _MAX_ORIGINAL_BYTES:
+                        reason = 'cloud_content_too_large'
+                    elif not _has_original_signature(body, source.get('file_type')):
+                        reason = 'cloud_signature_mismatch'
+                    elif length is not None and len(body) != int(length):
+                        reason = 'cloud_length_mismatch'
+                    if reason:
+                        return _cloud_download_failure(
+                            "attachment_content_incomplete", reason, native_file_id, started)
+            except urllib.error.HTTPError as error:
+                code = "attachment_access_denied" if error.code in (401, 403) else "attachment_download_failed"
+                return _cloud_download_failure(code, code, native_file_id, started, http_status=error.code)
+            except (urllib.error.URLError, TimeoutError) as error:
+                code = "attachment_download_failed"
+                cause = error.reason if isinstance(error, urllib.error.URLError) else error
+                exception_type = "TimeoutError" if isinstance(cause, TimeoutError) else type(error).__name__
+                return _cloud_download_failure(code, code, native_file_id, started, exception_type=exception_type)
             if not self._verify(context, resource, timeout_sec=timeout_sec):
                 return Failed(
                     DownloadError(

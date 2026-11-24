@@ -187,21 +187,29 @@ def test_reference_does_not_retry_permission_or_tls_failures(monkeypatch, failur
     assert 'private' not in json.dumps(captured.value.diagnostics)
 
 
-def test_reference_is_frozen_by_complete_collection_and_original_cannot_change_it(tmp_path, monkeypatch):
-    from apps.oa.approvals.collection import case
-    from apps.oa.approvals.sources.travel_evidence import TravelEvidence
+def test_reference_is_frozen_without_an_applicable_company_row_and_cannot_change(tmp_path):
+    company = '没有登记的合成公司'
+
+    class FieldApi(RecordedOaApi):
+        def request_context(self, request_id):
+            workflow, resources = super().request_context(request_id)
+            workflow['workflowMainTableInfo']['requestRecords'][0]['workflowRequestTableFields'].append({
+                'fieldName': 'bxgs', 'fieldShowName': '报销公司', 'fieldShowValue': company,
+            })
+            return workflow, resources
 
     config = next(config for config in FLOW_CONFIGS if config['flow_key'] == 'general_expense')
-    api = RecordedOaApi(config['workflow_id'], config['workflow_name'])
+    api = FieldApi(config['workflow_id'], config['workflow_name'])
     api.pending_rows = lambda: [{'request_id': 'synthetic', 'workflow_key': 'general_expense',
                                 'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester'}]
-    monkeypatch.setattr(case, '_authority_facts', lambda **_kwargs: [])
-    monkeypatch.setattr(case, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
     app = Approval(tmp_path, api=api, configs=[config], source_policy=POLICY)
     task = app.collect(app.pending()['run_id'], expected_task_id=1)
+    assert task['status'] == 'prepared'
     material_file = Path(task['material_file'])
     material = json.loads(material_file.read_text())
     assert material['invoice_title_reference']['rows'] == ROWS
+    assert any(field['name'] == '报销公司' and field['value'] == company for field in material['declared_fields'])
+    assert all(row['company_name'] != company for row in material['invoice_title_reference']['rows'])
     assert app.inspect(task['task_id'])['submissions'] == []
     app._frozen(app.store.get_task(task['task_id']))
     material['invoice_title_reference']['rows'][0]['company_name'] = '已篡改名称'
@@ -210,18 +218,27 @@ def test_reference_is_frozen_by_complete_collection_and_original_cannot_change_i
         app._frozen(app.store.get_task(task['task_id']))
 
 
-@pytest.mark.parametrize(('bootstrap', 'reason'), [
-    (b'<html>login</html>', 'session_missing'),
-    (b'{"widgetUrl":"?sessionID=fixture_a","other":{"widgetUrl":"?sessionID=fixture_b"}}', 'session_ambiguous'),
+@pytest.mark.parametrize(('bootstrap', 'stage', 'reason', 'shape', 'count'), [
+    (b'<html>private-login</html>', 'bootstrap', 'session_missing', 'markup', 0),
+    (b'{"widgetUrl":"?sessionID=private_a","other":{"widgetUrl":"?sessionID=private_b"}}',
+     'bootstrap', 'session_ambiguous', 'json_like', 2),
+    (None, 'bootstrap', 'network_error', None, None),
+    (None, 'company_list', 'company_list_empty', 'report', None),
 ])
-def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch, bootstrap, reason):
-    from apps.oa.approvals.collection import case
-    from apps.oa.approvals.sources.travel_evidence import TravelEvidence
+def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch, bootstrap, stage, reason, shape, count):
+    empty_report = b'{"htmlTag":"<table></table>","totalPage":1,"currentPage":1}'
+    transport = InvoiceTitleTransport()
+
+    def read(request, *, timeout):
+        if reason == 'network_error':
+            raise TimeoutError('private-timeout')
+        if stage == 'company_list':
+            return Response(empty_report) if request.data else transport(request, timeout=timeout)
+        return Response(bootstrap)
 
     config = next(config for config in FLOW_CONFIGS if config['flow_key'] == 'general_expense')
-    monkeypatch.setattr(case, '_authority_facts', lambda **_kwargs: [])
-    monkeypatch.setattr(case, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
-    monkeypatch.setattr(invoice_titles, 'urlopen', lambda *_args, **_kwargs: Response(bootstrap))
+    monkeypatch.setattr(invoice_titles, 'urlopen', read)
+    monkeypatch.setattr(invoice_titles, 'sleep', lambda _seconds: None)
     api = RecordedOaApi(config['workflow_id'], config['workflow_name'])
     api.pending_rows = lambda: [{'request_id': 'synthetic', 'workflow_key': 'general_expense',
                                 'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester'}]
@@ -229,12 +246,15 @@ def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch,
     with pytest.raises(CollectionFailure, match='invoice_title_reference_read_failed') as captured:
         collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
                     agent_workflow_key='general_expense')
-    assert captured.value.diagnostics[0]['stage'] == 'bootstrap'
-    assert captured.value.diagnostics[0]['reason'] == reason
     report = json.loads(Path(captured.value.diagnostics_file).read_text())
     assert report['diagnostics'] == captured.value.diagnostics
-    assert report['diagnostics'][0]['http_status'] == 200
-    assert report['diagnostics'][0]['attempt'] == 1
-    assert report['diagnostics'][0]['elapsed_ms'] >= 0
+    first = report['diagnostics'][0]
+    assert first['stage'] == stage and first['reason'] == reason
+    assert first.get('http_status') == (200 if shape else None)
+    assert first.get('response_shape') == shape
+    assert first.get('response_bytes_read') == (len(bootstrap or empty_report) if shape else None)
+    assert first.get('widget_url_count') == count
+    assert first.get('session_count') == count
+    assert first['attempt'] == 1 and first['elapsed_ms'] >= 0
     assert 'private' not in json.dumps({key: value for key, value in report.items() if key != 'material_directory'})
     assert app.inspect(1)['submissions'] == []

@@ -8,7 +8,6 @@ import time
 from playwright.sync_api import Frame
 
 from apps.oa.approvals.sources.travel_browser import _CandidateSession, _browser_roots
-from apps.oa.approvals.sources import travel_hotel
 from apps.oa.approvals.sources.travel_invoices import TRAIN_DETAIL_PATH
 from apps.oa.approvals.sources.travel_evidence import sso_rejection
 
@@ -115,7 +114,7 @@ def source_data(payloads, marker):
                         "name": label,
                         "value": str(row[key]),
                         "subject_ref": "travel_expense:" + rid,
-                        "source_path": EXP_PATH,
+                        "source_endpoint": EXP_PATH,
                         "source_json_path": f"result.bxmxList[{index}].{key}",
                         "field": key,
                         "display_claim": "只读源接口补充，不宣称界面已展示",
@@ -129,7 +128,7 @@ def source_data(payloads, marker):
                 "value": str(amount),
                 "subject_ref": "travel_report:" + marker,
                 "field": "cwspbzje",
-                "source_path": BASE_PATH,
+                "source_endpoint": BASE_PATH,
                 "source_json_path": "result.fkBxdKzb.cwspbzje",
                 "display_claim": "只读源接口补充，不替代界面校验",
             }
@@ -317,17 +316,22 @@ class BrowserRequest:
             raise ReadFailure("travel_page_missing")
         result = self.owner.active_page.evaluate(
             """async p=>{
-            const a=new AbortController();const timer=setTimeout(()=>a.abort(),p.timeout);
+            const signal=AbortSignal.timeout(p.timeout);
             try{const headers={};for(const [k,v] of Object.entries(p.headers))if(k.toLowerCase()!=='referer')headers[k]=v;
                 const body=p.data===null?undefined:typeof p.data==='string'?p.data:new URLSearchParams(p.data).toString();
                 if(body!==undefined&&typeof p.data!=='string')headers['Content-Type']='application/x-www-form-urlencoded';
-                const r=await fetch(p.url,{method:'POST',headers,body,credentials:'include',redirect:'manual',signal:a.signal});
+                const r=await fetch(p.url,{method:'POST',headers,body,credentials:'include',redirect:'manual',signal});
                 const text=await r.text();let value=null;try{value=JSON.parse(text)}catch{}
                 return {status:r.type==='opaqueredirect'?302:r.status,body:value};
-            }finally{clearTimeout(timer)}
+            }catch(error){
+                if(signal.aborted&&['TimeoutError','AbortError'].includes(error.name))return {timed_out:true};
+                throw error;
+            }
         }""",
             {"url": url, "data": data, "headers": headers or {}, "timeout": timeout},
         )
+        if result.get("timed_out") is True:
+            raise TimeoutError("travel_request_timeout")
         return BrowserResponse(result["status"], result["body"])
 
 
@@ -380,14 +384,7 @@ class CompatibleCandidate(_CandidateSession):
             base, _, _ = source_data(self.context.payloads, self.context.marker)
             verify_trip_identity(self.page.raw, base["bxdzb"])
             initial = self.page.locator("body").inner_text()
-            details = travel_hotel.read_details(
-                self.context.request,
-                self.capture.hotel_orders,
-                origin=self.policy.travel_origin,
-                timeout_sec=max(0.1, self.deadline - time.monotonic()),
-            )
-            if any(d.get("read_status") != "read" for d in details):
-                raise ReadFailure("travel_hotel_source_failed")
+            self._read_hotel_details()
             self.page.verify_money("before_attachment_scan")
             _, _, facts = source_data(self.context.payloads, self.context.marker)
             inventory = self.capture.inventory
@@ -409,7 +406,7 @@ class CompatibleCandidate(_CandidateSession):
                 timeout_sec=max(0.1, self.deadline - time.monotonic())
             )
             self.page.verify_money("after_attachment_scan")
-            result = super()._observation(initial, details, snapshot)
+            result = super()._observation(initial, snapshot)
             if not result.assess(
                 expected_marker=self.context.marker, expected_resource_count=len(files)
             ).attempt_complete:
@@ -433,6 +430,9 @@ class CompatibleCandidate(_CandidateSession):
         except Exception as error:
             self.context.session.check_transport()
             raise ReadFailure("travel_engine_read_failed", retryable=True) from error
+
+    def _hotel_browser(self):
+        return self.context.session.engine
 
     def _browser_snapshot(self, page, *, fallback_url):
         snapshot = super()._browser_snapshot(page, fallback_url=fallback_url)

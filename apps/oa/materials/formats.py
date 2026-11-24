@@ -13,7 +13,7 @@ import signal
 import subprocess
 import sys
 from tempfile import mkdtemp
-import time
+from time import monotonic
 from typing import Any, Dict, List, Tuple
 import xml.etree.ElementTree as ET
 import zipfile
@@ -988,17 +988,21 @@ class _Preparation:
             extracted = item.get('extracted_files') if isinstance(item.get('extracted_files'), list) else []
             results = []
             for child in [entry for entry in extracted if isinstance(entry, dict)] if extracted else [item]:
+                started = monotonic()
                 try:
-                    results.append(self.convert(child))
+                    result = self.convert(child)
                 except Exception as error:
                     error.diagnostics = [{'stage': 'preparation', 'reason': 'preparation_exception',
                         'exception_type': type(error).__name__, 'attachment_ref': str(child.get('resource_id') or ''),
+                        'elapsed_ms': max(0, round((monotonic() - started) * 1000)),
                         **({'owner_ref': str(child['parent_resource_id'])} if child.get('parent_resource_id') else {})}]
                     raise
+                elapsed_ms = max(0, round((monotonic() - started) * 1000))
+                validation.extend((entry, elapsed_ms) for entry in result.manifest)
+                results.append(result)
             for result in results:
                 images.extend(result.images)
                 structured.extend(result.structured_contents)
-                validation.extend(result.manifest)
             if extracted:
                 children = [entry for result in results for entry in result.manifest]
                 manifest.append({'resource_id': str(item.get('resource_id') or ''),
@@ -1008,17 +1012,17 @@ class _Preparation:
                     'skipped_videos': skipped_video_sources(children)})
             else:
                 manifest.extend(results[0].manifest)
-        failed = [entry for entry in validation if str(entry.get('status') or '') not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
+        failed = [(entry, elapsed_ms) for entry, elapsed_ms in validation if str(entry.get('status') or '') not in SUCCESSFUL_PREPARATION_STATUSES | SKIPPED_PREPARATION_STATUSES
                or (entry.get('status') == 'pdf_rendered' and (
                    int(entry.get('image_count') or 0) < 1
                    or int(entry.get('image_count') or 0) != int(entry.get('page_count') or 0)))]
         if failed:
             raise PreparationFailure([{'stage': 'preparation', 'reason': str(entry.get('status') or 'unknown'),
-                'attachment_ref': str(entry.get('resource_id') or ''),
+                'attachment_ref': str(entry.get('resource_id') or ''), 'elapsed_ms': elapsed_ms,
                 **({'cause_type': entry['error_message']} if re.fullmatch(r'[a-z][a-z0-9_]{0,63}', str(entry.get('error_message') or '')) else {}),
                 **({'exception_type': entry['exception_type']} if entry.get('exception_type') else {}),
                 **({'owner_ref': str(entry['parent_resource_id'])} if entry.get('parent_resource_id') else {})}
-                for entry in failed])
+                for entry, elapsed_ms in failed])
         return PreparedMaterial({'images': images, 'manifest': manifest, 'structured_contents': structured})
 
 
