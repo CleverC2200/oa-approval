@@ -17,12 +17,32 @@ WORKFLOWS = frozenset({
     'small_marketing_fee', 'tpm_small_marketing_fee', 'general_expense',
 })
 MAX_RESPONSE_BYTES = 2_000_000
+READ_FAILED = 'invoice_title_reference_read_failed'
 
 
 class InvoiceTitleReadError(RuntimeError):
     def __init__(self, diagnostics):
-        super().__init__('invoice_title_reference_read_failed')
+        super().__init__(READ_FAILED)
         self.diagnostics = diagnostics
+
+
+class InvoiceTitleSourceUnavailable(InvoiceTitleReadError):
+    pass
+
+
+def confirmed_snapshot():
+    diagnostics = []
+    for check in (1, 2):
+        try:
+            result = snapshot()
+        except InvoiceTitleReadError as error:
+            diagnostics.extend({**item, 'source_check': check} for item in error.diagnostics)
+        else:
+            if diagnostics:
+                result['diagnostics'] = diagnostics + [{**item, 'source_check': check}
+                                                       for item in result.get('diagnostics', [])]
+            return result
+    raise InvoiceTitleSourceUnavailable(diagnostics)
 
 
 def _failure_reason(error):
@@ -36,8 +56,8 @@ def _failure_reason(error):
         return 'invalid_encoding'
     reason = str(error)
     return reason if reason in {
-        'deadline', 'response_size', 'session_missing', 'session_invalid', 'report_shape',
-        'company_list', 'duplicate_field', 'company_fields', 'duplicate_tax_id',
+        'deadline', 'response_size', 'session_missing', 'session_ambiguous', 'session_invalid', 'report_shape',
+        'company_list', 'company_list_empty', 'duplicate_field', 'company_fields', 'duplicate_tax_id',
         'http_redirect_refused', 'http_redirect_loop', 'http_redirect_limit', 'http_url_invalid',
     } else 'unexpected_error'
 
@@ -120,8 +140,10 @@ def snapshot():
             for url in widget_urls
             for session_id in parse_qs(urlsplit(url).query).get('sessionID', [])
         }
-        if len(session_ids) != 1:
+        if not session_ids:
             raise ValueError('session_missing')
+        if len(session_ids) != 1:
+            raise ValueError('session_ambiguous')
         session_id = session_ids.pop()
         if not re.fullmatch(r'[A-Za-z0-9_-]{1,256}', session_id):
             raise ValueError('session_invalid')
@@ -148,7 +170,9 @@ def snapshot():
 
         names = [cell for cell in report('REPORT1', None)
                  if cell and cell != '开票人员开票时间节点要求']
-        if not 1 <= len(names) <= 100 or len(set(names)) != len(names):
+        if not names:
+            raise ValueError('company_list_empty')
+        if len(names) > 100 or len(set(names)) != len(names):
             raise ValueError('company_list')
         rows = []
         for index, name in enumerate(names):

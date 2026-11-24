@@ -106,7 +106,7 @@ class Approval:
         return api.build_api(self.configs[0],source_policy=self.source_policy)
 
     def pending(self, workflows=None, batch_size=None, request_ids=None, continue_from=None, retry_failed=False, retry_reviewed=False,
-                recovery_request_ids=None, review_slots=None):
+                recovery_request_ids=None, review_slots=None, hourly=False):
         if review_slots is not None and (type(review_slots) is not int or review_slots not in REVIEW_SLOT_OPTIONS):
             raise ValueError('review_slots_invalid')
         if recovery_request_ids is not None and (not isinstance(recovery_request_ids, list)
@@ -151,7 +151,7 @@ class Approval:
         run = self.store.start_run(rows,batch_size=batch_size, continue_from=continue_from, retry_failed=retry_failed,
                                   retry_reviewed=retry_reviewed,
                                   recovery_request_ids=recovery_request_ids,
-                                  pending_count=len(pending_rows),
+                                  pending_count=len(pending_rows), hourly=hourly,
                                   selection={'workflows':workflows, 'batch_size':batch_size, 'request_ids':request_ids,
                                              'recovery_request_ids':recovery_request_ids,
                                              'review_slots': REVIEW_SLOTS if review_slots is None else review_slots})
@@ -189,10 +189,14 @@ class Approval:
                     from apps.oa.approvals.collection import overseas
                     material = overseas.collect(self._api(),task["request_id"],directory,source_policy=self.source_policy)
                 else:
-                    if self.collector is None:
+                    collector = self.collector
+                    if collector is None:
                         from apps.oa.approvals.collection.case import collect_case
-                        self.collector = partial(collect_case, source_policy=self.source_policy)
-                    material = self.collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
+                        from apps.oa.approvals.sources import invoice_titles
+
+                        collector = partial(collect_case, source_policy=self.source_policy,
+                            invoice_title_reader=invoice_titles.confirmed_snapshot if self.store.is_hourly(run_id) else None)
+                    material = collector(task["request_id"],oa_api=self._api(),configs=self.configs or [],
                         allow_browser_download=True,attachment_root=directory / "attachments",prepared_root=directory / "prepared",
                         **exceptions)
                     if material.get("request_id") != task["request_id"] or material.get("workflow_key") != task["workflow_key"]:
@@ -227,7 +231,10 @@ class Approval:
             safe = CollectionFailure(code, getattr(error, 'counts', {}), getattr(error, 'diagnostics', []))
             diagnostics = safe.diagnostics or [{'stage': 'collection', 'reason': code,
                                                'exception_type': type(error).__name__}]
+            source_unavailable = isinstance(error, CollectionFailure) and error.source_unavailable
             report = collection_diagnostics_file(self.root, task)
+            if source_unavailable:
+                report = report.with_suffix('') / f'{directory.name}.json'
             try:
                 control.write_control_bytes_atomic(report, encoded({'run_id': run_id, 'task_id': task['id'],
                     'agent_id': task['agent_id'], 'material_directory': str(directory),
@@ -235,6 +242,11 @@ class Approval:
                 error.diagnostics_file = str(report)
             except OSError:
                 error.diagnostics_write_failed = True
+            else:
+                if source_unavailable:
+                    pause = self.store.pause_invoice_title_source(run_id, task['id'], report)
+                    return {'run_id': run_id, 'task_id': task['id'], 'status': 'waiting',
+                            'reason': 'source_unavailable', 'source_pause': pause}
             self.store.fail_collection(run_id,task["id"],type(error).__name__+":"+code)
             raise
 

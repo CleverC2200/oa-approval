@@ -28,7 +28,7 @@ def test_native_report_keeps_literal_names_and_only_required_reference_fields(mo
     assert 'private' not in json.dumps(reference)
 
 
-@pytest.mark.parametrize('fault', ['login', 'redirect', 'oversize', 'timeout', 'bad_json',
+@pytest.mark.parametrize('fault', ['login', 'redirect', 'oversize', 'timeout', 'bad_json', 'empty_list',
                                  'pagination', 'missing_tax_id', 'wrong_company', 'duplicate_company',
                                  'duplicate_tax_id', 'duplicate_field'])
 def test_incomplete_or_changed_reference_fails_without_leaking_response(monkeypatch, fault):
@@ -52,6 +52,8 @@ def test_incomplete_or_changed_reference_fails_without_leaking_response(monkeypa
                 data = json.loads(raw)
                 if fault == 'pagination':
                     data['totalPage'] = 2
+                elif fault == 'empty_list' and b'REPORT1' in request.data:
+                    data['htmlTag'] = '<table></table>'
                 elif fault == 'missing_tax_id':
                     data['htmlTag'] = data['htmlTag'].replace('税号:', 'private-other-field:')
                 elif fault == 'wrong_company' and b'REPORT0' in request.data:
@@ -73,6 +75,8 @@ def test_incomplete_or_changed_reference_fails_without_leaking_response(monkeypa
     with pytest.raises(invoice_titles.InvoiceTitleReadError) as error:
         invoice_titles.snapshot()
     assert str(error.value) == 'invoice_title_reference_read_failed'
+    if fault == 'empty_list':
+        assert error.value.diagnostics[0]['reason'] == 'company_list_empty'
     assert all(response.closed for response in responses)
 
 
@@ -206,14 +210,18 @@ def test_reference_is_frozen_by_complete_collection_and_original_cannot_change_i
         app._frozen(app.store.get_task(task['task_id']))
 
 
-def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch):
+@pytest.mark.parametrize(('bootstrap', 'reason'), [
+    (b'<html>login</html>', 'session_missing'),
+    (b'{"widgetUrl":"?sessionID=fixture_a","other":{"widgetUrl":"?sessionID=fixture_b"}}', 'session_ambiguous'),
+])
+def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch, bootstrap, reason):
     from apps.oa.approvals.collection import case
     from apps.oa.approvals.sources.travel_evidence import TravelEvidence
 
     config = next(config for config in FLOW_CONFIGS if config['flow_key'] == 'general_expense')
     monkeypatch.setattr(case, '_authority_facts', lambda **_kwargs: [])
     monkeypatch.setattr(case, '_travel_resources', lambda **_kwargs: TravelEvidence.empty())
-    monkeypatch.setattr(invoice_titles, 'urlopen', lambda *_args, **_kwargs: Response(b'<html>login</html>'))
+    monkeypatch.setattr(invoice_titles, 'urlopen', lambda *_args, **_kwargs: Response(bootstrap))
     api = RecordedOaApi(config['workflow_id'], config['workflow_name'])
     api.pending_rows = lambda: [{'request_id': 'synthetic', 'workflow_key': 'general_expense',
                                 'received_at': '2026-01-01 09:00:00', 'operator_id': 'tester'}]
@@ -222,7 +230,7 @@ def test_reference_read_failure_stops_complete_collection(tmp_path, monkeypatch)
         collect_for_review(app, app.pending()['run_id'], agent_id='reviewer', expected_task_id=1,
                     agent_workflow_key='general_expense')
     assert captured.value.diagnostics[0]['stage'] == 'bootstrap'
-    assert captured.value.diagnostics[0]['reason'] == 'session_missing'
+    assert captured.value.diagnostics[0]['reason'] == reason
     report = json.loads(Path(captured.value.diagnostics_file).read_text())
     assert report['diagnostics'] == captured.value.diagnostics
     assert report['diagnostics'][0]['http_status'] == 200

@@ -26,6 +26,9 @@ def main(argv=None):
     prediction.add_argument('--format', choices=['text', 'json'], default='text')
     cleanup = commands.add_parser('cleanup', help='预览已核实提交的材料清理；执行时同时淘汰超过365天的已完成历史')
     cleanup.add_argument('--execute', action='store_true')
+    history = commands.add_parser('anomaly-archive-plan', help='用已核验的历史清单预览异常定时对话归档')
+    history.add_argument('--history-file', type=Path, required=True)
+    history.add_argument('--current-thread-id', required=True)
     pending = commands.add_parser('start', aliases=['pending'], help='重新拉取待办并保持前台owner；EOF或finish安全结束')
     pending.add_argument('--workflow', action='append')
     pending.add_argument('--request-id', action='append', help='仅纳入重新拉取待办中匹配的申请，可重复指定')
@@ -126,6 +129,11 @@ def main(argv=None):
         parser.error('--review-file cannot change a closed review')
     root = args.root.expanduser().resolve()
     try:
+        if args.operation == 'anomaly-archive-plan':
+            from apps.oa.approvals.chat_history import anomaly_archive_plan
+
+            emit(anomaly_archive_plan(json.loads(args.history_file.read_text()), args.current_thread_id))
+            return 0
         if args.operation == 'predict':
             from apps.oa.approvals.sources.prediction import predict, render_text
             from apps.oa.approvals.sources import auth
