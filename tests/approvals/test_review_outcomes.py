@@ -17,7 +17,7 @@ def assessment(app, task_id=1, status='complete'):
             'evidence_files': [task['material_file']]}
 
 
-def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
+def test_business_pending_keeps_summary_and_continues_fifo(tmp_path):
     app, api = service(tmp_path)
     api.rows += [{**api.rows[0], 'request_id': str(i)} for i in [102, 103, 104]]
     run = app.pending(batch_size=3)['run_id']
@@ -28,7 +28,13 @@ def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
     review['evidence_files'].append(str(evidence))
     result = deliver_and_submit(app, 1, opinion='Synthetic unknown value', review_assessment=review, confirm_write=True)
     assert result['submit_ok'] and result['done_hit'] and result['postcheck_done_hit']
-    assert Path(claimed['material_file']).is_file() and evidence.is_file()
+    assert not Path(claimed['material_file']).exists() and not evidence.exists()
+    details = app.inspect(1)
+    assert details['reviews'][0]['opinion'] == 'Synthetic unknown value'
+    assert details['review_assessments'][0]['assessment'] == {
+        'status': 'business_pending', 'reason': review['reason'], 'rule_basis': review['rule_basis'],
+    }
+    assert json.loads(details['submissions'][0]['result_json'])['postcheck_done_hit']
     assert collect_for_review(app, run, agent_id='a', expected_task_id=2, agent_workflow_key='travel_expense')['task_id'] == 2
     deliver_and_submit(app, 2, opinion='Synthetic completed', review_assessment=assessment(app, 2), confirm_write=True)
     collect_for_review(app, run, agent_id='a', expected_task_id=3, agent_workflow_key='travel_expense')
@@ -40,7 +46,7 @@ def test_business_pending_keeps_evidence_and_continues_fifo(tmp_path):
     assert status['execution']['unclaimed_count'] == 0
     assert status['batch']['outside_count'] == 1
     assert retention.cleanup(app.store, execute=True)['files'] == 0
-    assert evidence.is_file()
+    assert not evidence.exists()
     assert deliver_and_submit(app, 1, opinion='Never resend', confirm_write=True)['status'] == 'submitted'
     assert len(api.posts) == 3
 
@@ -197,4 +203,5 @@ def test_synthetic_cli_outcome_proof(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
     proof = json.loads((tmp_path / 'proof.json').read_text())
     assert proof['synthetic_only'] and proof['business_unknown_refill'] and proof['owner_exited']
+    assert proof['confirmed_materials_cleaned'] and proof['failure_evidence_preserved']
     assert proof['execution']['headline'].startswith('❌ 部分失败')

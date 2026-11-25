@@ -178,8 +178,9 @@ def test_hourly_keeps_progressing_batch_and_restores_stalled_batch_in_same_start
             receipt = deliver_cli(tmp_path, lambda *args: invoke(tmp_path, *args),
                                   str(task['id']), str(opinion), confirm_write=True)
             assert receipt['status'] == 'submitted' and receipt['postcheck_done_hit'] is True
-            assert material.read_bytes() == previous_bytes
+            assert not material.exists()
             assert not Path(prepared['material_file']).exists()
+            assert Path(tmp_path / 'materials' / str(next_task['id'])).is_dir()
             invoke(tmp_path, 'finish', '--run-id', new['run_id'], '--require-drained')
             assert replacement.wait(timeout=10) == 0
         finally:
@@ -465,13 +466,15 @@ def test_hourly_preserves_partial_preparation_and_existing_recovery_attempt(tmp_
                 state = invoke(tmp_path, 'status', '--view', 'batch')
                 assert state['recovery_candidates'] == []
                 assert state['isolated_failures']['items'][0]['reason'] == 'synthetic_repeat_failure'
+                assert partial.read_text() == 'Synthetic partial download'
             else:
+                assert partial.read_text() == 'Synthetic partial download'
                 opinion = tmp_path / 'retry-opinion.txt'
                 opinion.write_text('Synthetic review after partial preparation')
                 result = deliver_cli(tmp_path, lambda *args: invoke(tmp_path, *args),
                                      str(task['id']), str(opinion), confirm_write=True)
                 assert result['status'] == 'submitted'
-            assert partial.read_text() == 'Synthetic partial download'
+                assert not partial.exists()
             invoke(tmp_path, 'finish', '--run-id', recovered['run_id'], '--require-drained')
             assert process.wait(timeout=10) == 0
         finally:

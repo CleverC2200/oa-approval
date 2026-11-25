@@ -7,7 +7,7 @@ bash .codex/python.sh -m apps.oa.materials recognize \
   --material-file "$OA_MATERIAL_FILE"
 ```
 
-`OA_MATERIAL_FILE` 使用本单 collect 返回的冻结材料路径。默认在该材料版本目录的 `recognitions/<新标识>/` 保存结果，每次读取使用新目录；需要指定位置时传 `--output-dir` 指向尚不存在的目录，旧报告和原件保留。只有处理独立图片时才使用可重复的 `--file /absolute/path/page.png`；该输入使用临时资源编号，不能使用真实附件定向参数，保存观察前须对应到原附件。
+`OA_MATERIAL_FILE` 使用本单 collect 返回的冻结材料路径。默认在该材料版本目录的 `recognitions/<新标识>/` 保存结果，每次读取使用新目录；需要指定位置时，传 `--output-dir` 指向本单材料版本下尚不存在的子目录。旧报告和原件保留供本次核对。只有处理独立图片时才使用可重复的 `--file /absolute/path/page.png`；该输入使用临时资源编号，不能使用真实附件定向参数，保存观察前须对应到原附件。
 
 读取 `collect` 返回的整份冻结材料时，使用 `--material-file /absolute/path/material.json`。`prepared.structured_contents` 的完整解析内容直接交给审核 Agent，报告标记 `source=parser`，保留原始文本、定位和子资源归属，不发送 DeepSeek。全部准备图片仍按现有流程识别，包括已有解析文字的 PDF 图片。只有文本的输入不需要 API key。该参数与单文件输入择一使用。
 
@@ -18,7 +18,7 @@ bash .codex/python.sh -m apps.oa.materials recognize \
   --material-file /absolute/path/material.json \
   --resource-id attachment-1 --page 2 \
   --region 100 200 900 600 --rotate 90 \
-  --output-dir /absolute/path/new-reread-directory
+  --output-dir "$(dirname "$OA_MATERIAL_FILE")/recognitions/new-reread-directory"
 ```
 
 `--region x0 y0 x1 y1` 按原图像素坐标局部复读，选中内容必须是唯一图片页，文本不参与裁剪。定向报告的 `coverage` 分别为 `selected_resource`、`selected_page` 或 `image_region`；局部完成只表示选中内容已读，不能记为整份材料完成。默认仍读取整份材料。工具只读取并发送选中内容，原件、冻结材料和旧报告均保留。每次复读使用新的输出目录。

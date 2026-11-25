@@ -76,7 +76,7 @@ bash .codex/python.sh -m apps.oa.approvals --root "${OA_RUNTIME_ROOT:?}" finish 
 
 变量取本次工具返回的实际 Agent、任务、流程和轮次身份。真实 start 仅允许干净、已发布且与 origin/main 一致的 main，启动前 fetch 核对；运行中的 checkout 不自动更新。真实运行将 root 设为本项目 runtime 的绝对路径。默认目录不受启动 cwd 影响，锁与账本按所选 root 协调。
 
-`deliver` 必须提供 `--review-file`，记录本次实际审核完成状态、材料版本及证据，保存成功才释放审核槽。`submit` 与 `preview` 只消费已保存结果；格式和失败分支见[提交前审核结果](.agents/skills/oa-finance-preaudit/references/review-assessment.md)。提前关闭的原因通过 `finish --stop-file` 保存，最终汇报读取 `status --view batch` 的 `execution`，不能只依据提交回执判断整轮正常。异常及业务待核材料保留，已验证提交不解除其保留条件。
+`deliver` 必须提供 `--review-file`，记录本次实际审核完成状态、材料版本及证据，保存成功才释放审核槽。`submit` 与 `preview` 只消费已保存结果；格式和失败分支见[提交前审核结果](.agents/skills/oa-finance-preaudit/references/review-assessment.md)。提前关闭的原因通过 `finish --stop-file` 保存，最终汇报读取 `status --view batch` 的 `execution`，不能只依据提交回执判断整轮正常。材料保留见下文。
 
 新轮默认排除同一次投递的历史预览，以及已生成意见但没有提交尝试的排队或待提交任务，保留原意见等待明确授权；新的投递身份仍可入队。提交默认只写本地预览；真实写入需要当前授权及 `--confirm-write YES`，海外还需独立的 `--allow-overseas YES`。预览、失败登记和回查的本地写入与外部写入分别由 help 标明。结果未知只回查，不自动重发。轮次结束不表示所有外部业务已完成。有积压的独立对话接续使用 `finish --require-drained --handoff` 返回的信息与 `start --continue-from <前轮ID>`，执行约定见[连续处理规则](.agents/skills/oa-finance-preaudit/references/hourly-dispatch.md)。
 
@@ -108,9 +108,11 @@ bash .codex/python.sh -m apps.oa.references import-tpm --help
 
 读取 RAR5 分卷时，将同一来源的 `.partN.rar` 原件一起交给材料准备。程序核对卷号、卷尾和跨卷文件衔接，再用 PATH 中的 `7zz` 校验和解包。支持用一个跨越所有卷的数据成员的校验值核验完整卷组。含多个数据成员的卷组缺少可验证的整组关联，保留原件和失败诊断。每卷保留原件及出处，展开项可回查完整卷组。通过验证的卷组按单成员 160 MiB、总解包 200 MiB 限制读取。嵌套归档及它展开的内容都计入总量，并受同一解包时限约束。macOS 可使用 `brew install sevenzip`，也可将官方 26.06 发行版的 `7zz` 放入 PATH。 [7-Zip 26.06](https://github.com/ip7z/7zip/releases/tag/26.06)
 
-运行数据与审批账本继续使用所选 root 下的原有布局。从未发生技术失败的任务，在当前节点提交并回查成功后清理本地附件原件、冻结材料及关联解析文件；有失败历史的任务即使重试成功，仍保留全部尝试材料和回执。预览、结果不明和未完成任务引用的材料保留。后续新一轮重新采集、分析，不凭旧材料跳过审核。SQLite 内的材料正文、意见和提交回执保留 365 天，超过期限且从未失败、已核实完成、未重新出现在待办中的历史在启动或关闭轮次时淘汰；未完成及结果不明的记录继续保留。清理失败不改变已核实提交结果，可在后续轮次重试。附件缓存默认同 root，显式 `OA_FINANCE_PREAUDIT_CACHE_DB` 可共享或禁用；资源槽沿用现有协调目录约定。凭据保存在进程环境或工作树外的私有配置中。
+当前节点提交并回查确认后，账本保留实际提交的意见、最终审核版本的待核事项、回执及查询和防重所需的标识。本地附件原件、历次采集材料、解析文件及库内材料正文随该单清理。按规则留有业务待核项，以及曾失败后重试成功的单据，同样按最终回执处理。未提交、预览、结果不明以及未完成任务共用的材料保留。清理失败或遇到文件仍在使用时，保留回执和待清理标记，在启动或收尾时补扫。新节点重新采集、审核。
 
-已有数据可用 `bash .codex/python.sh -m apps.oa.approvals --root /absolute/runtime/root cleanup` 预览，追加 `--execute` 执行材料清理与历史淘汰。执行使用审批共享锁，须等当前 owner 退出；仅处理所选 root 下由已核实完成任务关联的材料，独立分析输出和范围外文件不自动删除。
+历史资料默认只读预览，使用 `bash .codex/python.sh -m apps.oa.approvals --root /absolute/runtime/root cleanup`，结果含逐单回执标识、候选路径和文件分配量。历史清理获授权且当前 owner 退出后才追加 `--execute`。此命令处理指定 root 的已核实单据。独立分析和范围外文件需要单独核对。数据库精简后可在维护窗口压缩 SQLite，日常处理会复用已释放页。账本到期检查只处理已经清理、超过 365 天且符合原有核验和时限条件的记录。
+
+附件缓存默认同 root，显式 `OA_FINANCE_PREAUDIT_CACHE_DB` 可共享或禁用。凭据保存在进程环境或工作树外的私有配置中。
 
 - [附件识别要求](docs/agents/attachment-recognition.md)
 - [图片压缩要求](docs/agents/image-compression.md)

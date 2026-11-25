@@ -7,8 +7,10 @@ import urllib.request
 
 from apps.oa.approvals.sources import auth, official_sql
 from apps.oa.approvals.sources import browser_session as rpa_session
+from apps.oa.approvals.sources import http as safe_http
 from apps.oa.runtime import control as runtime_control
 from apps.oa.approvals.sources.download_errors import detect_oa_download_fail_code
+from apps.oa.approvals.sources.travel_read_auth import ACCOUNT_PATH, verified_identity
 
 
 class _DocumentContextRedirect(urllib.request.HTTPRedirectHandler):
@@ -34,6 +36,31 @@ def accepts(resource: dict, url: str, *, base_url: str) -> bool:
     )
 
 
+def _read(base_url: str, cookie: str, timeout_sec: int, path: str, params=None) -> dict:
+    query = "?" + urllib.parse.urlencode(params) if params else ""
+    request = urllib.request.Request(
+        base_url + path + query,
+        headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie},
+    )
+    opener = urllib.request.build_opener(_DocumentContextRedirect())
+    with opener.open(request, timeout=max(1, timeout_sec)) as response:
+        payload = json.loads(response.read())
+    return payload if isinstance(payload, dict) else {}
+
+
+def verify_account(*, base_url: str, cookie: str, timeout_sec: int, check_current_account_list: bool = False) -> None:
+    safe_http._origin(base_url)
+    account = _read(base_url, cookie, timeout_sec, ACCOUNT_PATH) if cookie else {}
+    data = account.get("data")
+    expected_user = auth.env("OA_UID")
+    matches = (verified_identity(account, expected_user) if check_current_account_list
+               else bool(expected_user and isinstance(data, dict) and str(data.get("userid") or "") == expected_user))
+    if not matches:
+        raise rpa_session.RpaSessionError(
+            rpa_session.RPA_SESSION_INVALID_CODE, "RPA 文档读取账号与配置不一致"
+        )
+
+
 def verify(resource: dict, url: str, *, base_url: str, document_id: str,
            timeout_sec: int, initialize: bool = True, allow_ofd_attachment: bool = False) -> bool:
     if not accepts(resource, url, base_url=base_url):
@@ -55,33 +82,17 @@ def verify(resource: dict, url: str, *, base_url: str, document_id: str,
                     and isinstance(data, dict) and data.get("docMain") == ""
                     and official_sql.document_ofd_attachment_matches(document_id, file_id))
 
-    def read(path: str, params: dict[str, str] | None = None) -> dict:
-        query = "?" + urllib.parse.urlencode(params) if params else ""
-        request = urllib.request.Request(
-            base_url + path + query,
-            headers={"User-Agent": "Mozilla/5.0", "Cookie": cookie},
-        )
-        opener = urllib.request.build_opener(_DocumentContextRedirect())
-        with opener.open(request, timeout=max(1, timeout_sec)) as response:
-            payload = json.loads(response.read())
-        return payload if isinstance(payload, dict) else {}
-
     try:
-        account = read("/api/hrm/login/getAccountList")
-        actual_user = str((account.get("data") or {}).get("userid") or "")
-        expected_user = auth.env("OA_UID")
-        if not expected_user or actual_user != expected_user:
-            raise rpa_session.RpaSessionError(
-                rpa_session.RPA_SESSION_INVALID_CODE, "RPA 文档读取账号与配置不一致"
-            )
-        preview = read("/api/doc/detail/basicInfo", {"docid": document_id})
+        verify_account(base_url=base_url, cookie=cookie, timeout_sec=timeout_sec)
+        preview = _read(base_url, cookie, timeout_sec, "/api/doc/detail/basicInfo", {"docid": document_id})
         if not matches(preview):
             return False
         if not initialize:
             return True
         if runtime_control.stop_requested():
             raise rpa_session.RpaSessionError(runtime_control.STOP_CODE, "已请求停止")
-        info = read(
+        info = _read(
+            base_url, cookie, timeout_sec,
             "/api/doc/detail/basicInfo",
             {"docid": document_id, "isrequest": "1", "requestid": request_id},
         )

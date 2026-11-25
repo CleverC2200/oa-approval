@@ -488,9 +488,13 @@ def test_explicit_no_write_confirmation_keeps_history_and_checks_current_target(
     else:
         assert code == 0
         assert result['status'] == ('failed' if current_state == 'pending' else 'submitted')
-        assert after['reviews'] == before['reviews']
         assert len(after['submissions']) == 1
+        if current_state == 'handled':
+            assert after['reviews'][0]['opinion'] == before['reviews'][0]['opinion']
+            assert after['task']['material_json'] is None
+            assert json.loads(after['submissions'][0]['result_json'])['postcheck_done_hit']
         if current_state == 'pending':
+            assert after['reviews'] == before['reviews']
             receipt = json.loads(after['submissions'][0]['result_json'])
             assert receipt['failure_code'] == 'user_confirmed_not_written'
             assert receipt['confirmation_note'] == '用户已明确确认未提交成功'
