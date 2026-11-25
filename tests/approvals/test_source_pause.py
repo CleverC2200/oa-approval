@@ -81,7 +81,9 @@ def test_hourly_source_pause_keeps_batch_scope_and_resumes_original_fifo(source_
     assert app.collect(run, expected_task_id=4)['reason'] == 'source_unavailable'
     assert collected == ['1', '3'] and len(requests) == 2
 
-    clock[0] += timedelta(minutes=2)
+    clock[0] += timedelta(seconds=59)
+    assert query(app.root, 'status', view='batch')['next_candidate'] is None
+    clock[0] += timedelta(seconds=1)
     assert query(app.root, 'status', view='batch')['next_candidate']['id'] == 1
     first = app.collect(run, expected_task_id=1)
     assert first['status'] == 'prepared'
@@ -99,21 +101,29 @@ def test_hourly_source_pause_keeps_batch_scope_and_resumes_original_fifo(source_
 
 
 def test_all_source_waiting_can_close_and_continue_without_burning_a_candidate(source_pause):
-    app, rows, collected, _clock, requests, _failed_reads = source_pause
+    app, rows, collected, clock, requests, failed_reads = source_pause
+    failed_reads[0] = 4
     pending_rows(rows)
     run = app.pending(batch_size=2, hourly=True)['run_id']
     assert app.collect(run, expected_task_id=1)['status'] == 'waiting'
     assert app.collect(run, expected_task_id=2)['reason'] == 'source_unavailable'
+    clock[0] += timedelta(minutes=1)
+    assert query(app.root, 'status', view='batch')['next_candidate']['id'] == 1
+    assert app.collect(run, expected_task_id=1)['reason'] == 'source_unavailable'
     closed = app.close(run, handoff=True)
     assert closed['handoff']['status'] == 'ready'
+    assert closed['handoff']['remaining'] == 4
+    assert closed['execution']['status'] == 'continued'
     assert closed['execution']['stop']['kind'] == 'source_unavailable'
     assert closed['execution']['failure_count'] == 0
+    assert closed['execution']['archive_eligible'] is False
     status = query(app.root, 'status', view='batch')
     assert status['hourly_dispatch']['action'] == 'continue'
+    assert status['execution']['headline'] == '来源暂缓｜已提交并验证 0 单，4 单待接续'
     continued = app.pending(continue_from=run, hourly=True)['run_id']
     assert app.collect(continued, expected_task_id=1)['status'] == 'prepared'
     assert app.inspect(1)['submissions'] == []
-    assert collected == ['1', '1'] and sum(request.data is None for request in requests) == 3
+    assert collected == ['1', '1', '1'] and sum(request.data is None for request in requests) == 5
 
 
 def test_single_bad_response_does_not_pause_hourly_collection(source_pause):
@@ -172,4 +182,5 @@ def test_unreserved_source_waiting_close_requires_hourly_recovery_evidence(sourc
     app.close(run)
     status = query(app.root, 'status', view='batch')
     assert status['handoff'] is None
+    assert status['execution']['status'] == 'blocked'
     assert status['hourly_dispatch']['action'] == 'confirm_stopped'

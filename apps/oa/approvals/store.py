@@ -691,9 +691,10 @@ class Store:
             pending = pending_cleanup(self, run_id=run_id, default='awaiting_cleanup_sweep')
             if pending:
                 stored['cleanup'] = {'status': 'deferred', 'reason': 'awaiting_cleanup_sweep', 'pending_tasks': pending}
-            stored['execution'] = close_execution(self, run, tasks, stop)
+            execution = close_execution(self, run, tasks, stop, handoff_requested=handoff)
+            stored['execution'] = execution
             if closure is not None:
-                stored['execution']['archive_eligible'] = False
+                execution['archive_eligible'] = False
             if collection_stopped_note:
                 stored['orphaned_collection'] = {
                     'confirmation_note': collection_stopped_note,
@@ -704,9 +705,10 @@ class Store:
                                                 'batch_size':stored.get('batch', {}).get('size')})
                 stored['handoff'] = self._handoff(run,tasks,stored)
                 if stored['handoff']['status'] == 'blocked':
-                    stored['execution'].update(status='blocked', archive_eligible=False)
-                elif stored['handoff']['status'] == 'ready' and stop and stop['kind'] == 'authorized_handoff':
-                    stored['execution']['handoff_remaining_count'] = stored['handoff']['remaining']
+                    execution.update(status='blocked', archive_eligible=False)
+                elif stored['handoff']['status'] == 'ready' and (execution['stop'] or {}).get('kind') in {
+                        'authorized_handoff', 'source_unavailable'}:
+                    execution['handoff_remaining_count'] = stored['handoff']['remaining']
             self.connection.execute("UPDATE runs SET status='closed',ended_at=?,summary_json=? WHERE id=?", (now(),encoded({**stored,**summary}),run_id))
         result = {'run_id':run_id, 'status':'closed', 'summary':summary, 'execution':stored['execution']}
         if 'cleanup' in stored:

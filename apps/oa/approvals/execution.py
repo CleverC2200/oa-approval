@@ -50,7 +50,7 @@ def validate_stop(store, run_id, value, *, handoff=False):
     return stop
 
 
-def close_execution(store, run, tasks, stop):
+def close_execution(store, run, tasks, stop, *, handoff_requested=False):
     import json
 
     summary = json.loads(run['summary_json'])
@@ -79,7 +79,9 @@ def close_execution(store, run, tasks, stop):
         status = 'blocked'
     elif failed:
         status = 'partial_failure' if verified else 'failed'
-    elif stop and stop['kind'] in {'unexplained', 'execution_incomplete', 'material_read_failure', 'source_unavailable'}:
+    elif stop and stop['kind'] == 'source_unavailable':
+        status = 'continued' if handoff_requested else 'blocked'
+    elif stop and stop['kind'] in {'unexplained', 'execution_incomplete', 'material_read_failure'}:
         status = 'blocked'
     elif stop and stop['kind'] == 'authorized_handoff' and any(task['status'] == 'queued' for task in tasks):
         status = 'continued'
@@ -119,8 +121,9 @@ def execution_headline(execution):
         return ('本次未领取｜待办数量尚未核实' if remaining is None else
                 f'本次未领取｜授权范围内仍有 {remaining} 单待办' if remaining else
                 f"本次未领取｜仍有 {execution['remaining_count']} 单范围外待办")
-    if state == 'continued' and (execution.get('stop') or {}).get('kind') == 'authorized_handoff':
-        return f"正常交接｜已提交并验证 {verified} 单，{execution['handoff_remaining_count']} 单待接续"
+    if state == 'continued' and 'handoff_remaining_count' in execution:
+        label = '来源暂缓' if execution['stop']['kind'] == 'source_unavailable' else '正常交接'
+        return f"{label}｜已提交并验证 {verified} 单，{execution['handoff_remaining_count']} 单待接续"
     return {'continued': f'接续｜已提交并验证 {verified} 单，按证据轮换',
             'stopped': f'已停止｜已提交并验证 {verified} 单',
             'preview': f"仅预览 {execution.get('preview_count', 0)} 单，未提交",
