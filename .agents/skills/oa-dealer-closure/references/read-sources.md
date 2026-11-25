@@ -1,4 +1,4 @@
-# 关户只读数据入口
+# 关户数据入口
 
 按本次实际使用的数据源读取对应段落。凭据走已有私有配置，配置或接口不可用时记录实际错误及影响，不用旧样本填当前结果。真实数据、认证和完整账号不进入Skill或公开提交。
 
@@ -49,23 +49,13 @@ WHERE company_code=%s AND cust_code=%s;
 
 已核基准为`100.100.1.35 / P01 / sysnr01 / client600`，客户端为Production Client。连接后用`RFC_SYSTEM_INFO`、`T000`核环境；配置变化先取得正式依据，测试结果单独保存。
 
-复用私有连接及RFC运行环境。只读接口包括`RFC_SYSTEM_INFO`、`RFC_READ_TABLE`、`RPY_PROGRAM_READ`。`ZSD_CRM_CREDITLIMIT_EXPORT`相关实现会写查询日志，`ZFI029S`保存程序会写表，其执行不属于只读路径。源码读取与报表执行分别记录。
+复用私有连接及RFC运行环境。额度业务接口会在 SAP 留查询日志，按已授权的关户采集入口调用。严格只读核查使用已冻结材料或独立的只读查询。真实关户 collect 会调用额度接口，验收时需允许其查询日志。预提取证使用只读数据源，`ZFI029S`是保存操作。
 
 ### 下单剩余和占单
 
-当前`ZSD025`对应`ZSSR16`：
+从冻结的 `dealer_closure_evidence.sap.credit_limit` 核对 `ZSD_CRM_CREDITLIMIT_EXPORT` 的结果。使用 `remaining_order_limit` 列下单剩余额度，对应 `O_DKLIMK`。使用 `order_occupancy` 列占单，对应订单、交货、开票和合同四项合计。`O_OKLIMK` 是信用已用额。原始结果保留在 `response`。字段错误或客户未确认按技术读取失败处理；BI 另有口径的余额或额度单独列示。
 
-```text
-KALLK = KLIMK - SKFOR - SSOBL
-VKUKW = VKOKW + VAOKW + VLOKW + VFOKW
-VKRKW = KALLK - VKUKW
-```
-
-依次为总额度=信贷限额-应收总额-特别债务，占用=合同+订单+交货+开票，下单剩余=总额度-占用。尾负号`12500.00-`表示负数，用十进制计算。
-
-核`KNKK`信用范围及参考账户、`KNVP`付款方、当前合并组，再按活动源码读`S066`、`S067`、`VAKPA`及合同状态。三个KNKK金额不能替代占用核对，BI占单0也不证明SAP组件全0。归属、作用域和读取完整后输出复算，保存组件及原值。
-
-未清合同按付款方及销售组织关联，核`VBAK-VBTYP=G`、`VBUK-RFGSK=A`、`VBAP-ABGRU`为空及`VBUP-RFSTA=A`。合同占用取有效行`KZWI2`，减去`VBFA-VBTYP_N=C`对应后续订单行的`KZWI2`，保留币种、行号及关联原值；只有合同号和状态不足以复算金额。
+接口按客户及 SAP 合并授信关系返回额度。成功回执可能标识付款方。合并授信结果可能过滤成功消息，冻结的付款方和组成员用于解释该结果。额度币种按冻结的信控范围 `SN01` 核对。比较公司账务时先核对是否同一范围。历史冻结材料按其当时的额度来源与规则核对。
 
 客户账差异按公司/客户读完整`BSID`及适用期间`BSAD`，按`SHKZG`核借贷。特别总账核`UMSKZ`实际行项目，不能只用`SSOBL=0`替代。
 

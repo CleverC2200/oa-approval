@@ -3,6 +3,7 @@ from __future__ import annotations
 import calendar
 from collections import defaultdict
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 import importlib.util
 import json
 import re
@@ -11,6 +12,7 @@ import sys
 
 _MAX_SAP_ROWS = 1_000_000
 _PREACCRUAL_DOCUMENTS_PER_REQUEST = 400
+_CREDIT_CONTROL_AREA = 'SN01'
 
 def doris(payload):
     spec = importlib.util.spec_from_file_location('dealer_balance_connector', payload['connection']['doris_connector'])
@@ -90,11 +92,6 @@ def sap(payload):
             error.source_stage = table
             raise
 
-    def values_condition(field, values):
-        if not values or any(not re.fullmatch(r'[A-Za-z0-9]{1,12}', str(v)) for v in values):
-            raise ValueError('dealer_closure_sap_scope_invalid')
-        return field + ' IN (' + ','.join("'" + v + "'" for v in sorted(values)) + ')'
-
     try:
         info = connection.call('RFC_SYSTEM_INFO')['RFCSI_EXPORT']
         if info['RFCSYSID'] != config['sap_system'] or info['RFCIPADDR'] != config['sap_host']:
@@ -118,45 +115,17 @@ def sap(payload):
             ('merge_group', 'ZTCREDITLIMIT01', ['ZJXS', 'ZJXSBM'], [f"ZJXSBM = '{kunnr}'"]),
         ]:
             q[label] = read(table, fields, options)
-        out['credit_currencies'] = {r['KKBER']: read('T014', ['KKBER', 'WAERS'], [f"KKBER = '{r['KKBER']}'"])
-                                    for r in q['credit']['rows']}
-        customers = {kunnr}
-        groups = {r['ZJXS'] for r in q['merge_group']['rows']}
-        if groups:
-            q['group_members'] = read('ZTCREDITLIMIT01', ['ZJXS', 'ZJXSBM'], [values_condition('ZJXS', groups)])
-            customers.update(r['ZJXSBM'] for r in q['group_members']['rows'])
-        customers.update(r['KUNN2'] for r in q['payer']['rows'] if r['KUNN2'])
-        refs = {r['KNKLI'] or r['KUNNR'] for r in q['credit']['rows']}
-        refs.update(customers)
-        for ref in sorted(refs):
-            scope = values_condition('KNKLI', {ref})
-            q['orders-' + ref] = read('S066', ['KNKLI', 'KKBER', 'SPMON', 'OEIKW'], [scope])
-            q['deliveries_invoices-' + ref] = read('S067', ['KNKLI', 'KKBER', 'SPTAG', 'OLIKW', 'OFAKW'], [scope])
-        q['contracts'] = read('VAKPA', ['KUNDE', 'VKORG', 'PARVW', 'VBELN'],
-                              [values_condition('KUNDE', customers), "AND PARVW = 'RG'"])
-        out['contract_status'] = {r['VBELN']: read('VBUK', ['VBELN', 'RFGSK'], [f"VBELN = '{r['VBELN']}'"])
-                                  for r in q['contracts']['rows']}
-        out['contract_amounts'] = {}
-        for document, status in out['contract_status'].items():
-            if not any(r['RFGSK'] == 'A' for r in status['rows']):
-                continue
-            header = read('VBAK', ['VBELN', 'VKORG', 'VBTYP', 'WAERK', 'AUDAT'], [f"VBELN = '{document}'"])
-            if not any(r['VBTYP'] == 'G' for r in header['rows']):
-                continue
-            items = read('VBAP', ['VBELN', 'POSNR', 'KZWI2', 'ABGRU'], [f"VBELN = '{document}' AND ABGRU = ''"])
-            item_status = read('VBUP', ['VBELN', 'POSNR', 'RFSTA'], [f"VBELN = '{document}' AND RFSTA = 'A'"])
-            eligible = {r['POSNR'] for r in item_status['rows']}
-            following = []
-            for item in items['rows']:
-                if item['POSNR'] not in eligible:
-                    continue
-                links = read('VBFA', ['VBELV', 'POSNV', 'VBELN', 'POSNN', 'VBTYP_N'],
-                    [f"VBELV = '{document}' AND POSNV = '{item['POSNR']}'", "AND VBTYP_N = 'C'"])
-                amounts = [read('VBAP', ['VBELN', 'POSNR', 'KZWI2'],
-                    [f"VBELN = '{r['VBELN']}' AND POSNR = '{r['POSNN']}'"]) for r in links['rows']]
-                following.append({'item': item['POSNR'], 'links': links, 'amounts': amounts})
-            out['contract_amounts'][document] = {'header': header, 'items': items,
-                'item_status': item_status, 'following_orders': following}
+        credit_areas = {row['KKBER'] for row in q['credit']['rows']} | {_CREDIT_CONTROL_AREA}
+        out['credit_currencies'] = {area: read('T014', ['KKBER', 'WAERS'], [f"KKBER = '{area}'"])
+                                    for area in sorted(credit_areas)}
+        credit_groups = {row['ZJXS'] for row in q['merge_group']['rows']}
+        if credit_groups:
+            if len(credit_groups) != 1 or not re.fullmatch(r'[A-Za-z0-9]{1,12}', next(iter(credit_groups))):
+                raise RuntimeError('dealer_closure_credit_group_ambiguous')
+            group, = credit_groups
+            q['group_members'] = read('ZTCREDITLIMIT01', ['ZJXS', 'ZJXSBM'], [f"ZJXS = '{group}'"])
+            if not any(row['ZJXS'] == group and row['ZJXSBM'] == kunnr for row in q['group_members']['rows']):
+                raise RuntimeError('dealer_closure_credit_group_unverified')
         fields = ['BUKRS', 'KUNNR', 'BELNR', 'GJAHR', 'BUZEI', 'BUDAT', 'BLART', 'HKONT', 'UMSKZ', 'SHKZG', 'DMBTR', 'XNEGP', 'SGTXT']
         q['open_items'] = read('BSID', fields, [f"KUNNR = '{kunnr}' AND BUKRS = '{company}'"])
         q['cleared_period'] = read('BSAD', fields, [f"KUNNR = '{kunnr}' AND BUKRS = '{company}'", f"AND BUDAT >= '{begin}' AND BUDAT <= '{cutoff}'"])
@@ -175,11 +144,11 @@ def sap(payload):
             index = read('BSIS', ['BUKRS', 'HKONT', 'GJAHR', 'BELNR', 'BUZEI', 'BUDAT', 'SHKZG', 'DMBTR', 'KOSTL', 'XNEGP'],
                 [f"BUKRS = '{company}' AND HKONT = '{account}'", f"AND BUDAT <= '{cutoff}'"])
             indexed = {(r['BELNR'], r['GJAHR'], r['BUZEI']): r for r in index['rows']}
-            groups = defaultdict(set)
+            documents_by_fiscal_year = defaultdict(set)
             for row in index['rows']:
-                groups[row['GJAHR']].add(row['BELNR'])
+                documents_by_fiscal_year[row['GJAHR']].add(row['BELNR'])
             seen, target, batches = set(), [], []
-            for year, docs in groups.items():
+            for year, docs in documents_by_fiscal_year.items():
                 docs = sorted(docs)
                 for start in range(0, len(docs), _PREACCRUAL_DOCUMENTS_PER_REQUEST):
                     batch = docs[start:start + _PREACCRUAL_DOCUMENTS_PER_REQUEST]
@@ -210,12 +179,53 @@ def sap(payload):
                 'index_keys_seen': len(seen), 'complete': True, 'target_rows': target,
                 'index_request': index['request'], 'index_pages': index['pages'],
                 'index_verification_pages': index['verification_pages'], 'reference_batches': batches, 'target_details': details})
-        for program in ['ZSSR16', 'ZFRR04', 'ZFRR08']:
+        for program in ['ZFRR04', 'ZFRR08']:
             response = connection.call('RPY_PROGRAM_READ', PROGRAM_NAME=program, ONLY_SOURCE='X', WITH_INCLUDELIST='X')
             out['programs'][program] = response
+        out['credit_limit'] = credit_limit(connection, kunnr, q['payer']['rows'], bool(credit_groups))
         return out
     finally:
         connection.close()
+
+
+def credit_limit(connection, customer, payer_rows, merged_credit):
+    function = 'ZSD_CRM_CREDITLIMIT_EXPORT'
+    try:
+        response = connection.call(function, KUNNR=customer)
+        messages = response.get('RETURN') if isinstance(response, dict) else None
+        if not isinstance(messages, list) or any(not isinstance(message, dict) for message in messages):
+            raise RuntimeError('dealer_closure_credit_response_invalid')
+        if any(message.get('TYPE') in ('E', 'A', 'X') for message in messages):
+            raise RuntimeError('dealer_closure_credit_business_error')
+        resolves_payer = customer[2:4] != '49'
+        payers = {row['KUNN2'].zfill(10) for row in payer_rows if re.fullmatch(r'[0-9]{1,10}', row['KUNN2'])}
+        scoped_ids = {customer}
+        if resolves_payer and not merged_credit:
+            scoped_ids.update(payers)
+        success_ids = [str(message.get('ID', '')).strip() for message in messages if message.get('TYPE') == 'S']
+        scoped_success = bool(success_ids) and all(
+            re.fullmatch(r'[0-9]{1,10}', identity) and identity.zfill(10) in scoped_ids for identity in success_ids)
+        group_filtered_success = (not messages and merged_credit and resolves_payer
+                                  and len(payers) == 1 and customer not in payers)
+        if not (scoped_success or group_filtered_success):
+            raise RuntimeError('dealer_closure_credit_identity_unverified')
+
+        occupancy_fields = ('O_ORDER', 'O_DELIVERY', 'O_INVOICE', 'O_CONTRACT')
+        amounts = {}
+        for field in ('O_DKLIMK', *occupancy_fields):
+            raw = str(response.get(field)).strip()
+            try:
+                amount = Decimal('-' + raw[:-1] if raw.endswith('-') else raw)
+            except InvalidOperation:
+                raise RuntimeError('dealer_closure_credit_response_invalid') from None
+            if not amount.is_finite():
+                raise RuntimeError('dealer_closure_credit_response_invalid')
+            amounts[field] = amount
+        return {'source': function, 'customer_code': customer, 'credit_control_area': _CREDIT_CONTROL_AREA,
+                'remaining_order_limit': str(amounts['O_DKLIMK']), 'order_occupancy': str(sum(amounts[field] for field in occupancy_fields)), 'response': response}
+    except Exception as error:
+        error.source_stage = 'credit_limit'
+        raise
 
 
 def failure(error):

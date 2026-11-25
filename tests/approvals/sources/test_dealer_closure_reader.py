@@ -11,6 +11,10 @@ class SapRecording:
     def __init__(self):
         self.closed = False
         self.calls = []
+        self.credit_response = {'RETURN': [{'TYPE': 'S', 'ID': '0099000001'}],
+                                'O_DKLIMK': '638.62-', 'O_OKLIMK': '999.00',
+                                'O_ORDER': '3.15', 'O_DELIVERY': '2.45',
+                                'O_INVOICE': '0.20-', 'O_CONTRACT': '4.00'}
         self.identity = {'RFCSYSID': 'P01', 'RFCIPADDR': '192.0.2.1', 'RFCHOST2': 'synthetic-production'}
         self.tables = {'T000': [{'MANDT': '600', 'MTEXT': 'Production Client', 'CCCATEGORY': 'P', 'LOGSYS': 'SYNTHETIC'}],
                        'T001': [{'BUKRS': 'D001', 'BUTXT': '合成公司', 'WAERS': 'CNY'}],
@@ -19,6 +23,8 @@ class SapRecording:
 
     def call(self, function, **params):
         self.calls.append((function, params))
+        if function == 'ZSD_CRM_CREDITLIMIT_EXPORT':
+            return self.credit_response
         assert function in {'RFC_SYSTEM_INFO', 'RFC_READ_TABLE', 'RPY_PROGRAM_READ'}
         if function == 'RFC_SYSTEM_INFO':
             return {'RFCSI_EXPORT': self.identity}
@@ -39,7 +45,7 @@ def payload():
                            'sap_client': '600', 'sap_user': 'synthetic-reader'}, 'sap_password': 'synthetic-secret'}
 
 
-def test_reader_preserves_raw_sign_window_and_closes_readonly_connection(monkeypatch):
+def test_reader_uses_business_credit_results_and_preserves_company_ledger_scope(monkeypatch):
     connection = SapRecording()
     monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
     result = reader.sap(payload())
@@ -47,13 +53,29 @@ def test_reader_preserves_raw_sign_window_and_closes_readonly_connection(monkeyp
     assert result['queries']['credit']['rows'][0]['SKFOR'] == '12500.00-'
     assert result['financing_window_start'] == '20250930'
     assert connection.closed
-    assert {f for f, _ in connection.calls} == {'RFC_SYSTEM_INFO', 'RFC_READ_TABLE', 'RPY_PROGRAM_READ'}
-    assert all(p['ROWCOUNT'] == 10000 for f, p in connection.calls if f == 'RFC_READ_TABLE')
+    assert result['credit_limit'] == {
+        'source': 'ZSD_CRM_CREDITLIMIT_EXPORT', 'customer_code': '0099000001', 'credit_control_area': 'SN01',
+        'remaining_order_limit': '-638.62', 'order_occupancy': '9.40', 'response': connection.credit_response,
+    }
+    assert [params for function, params in connection.calls if function == 'ZSD_CRM_CREDITLIMIT_EXPORT'] == [
+        {'KUNNR': '0099000001'},
+    ]
+    ledger_tables = {'KNB1', 'BSID', 'BSAD'}
+    previous_credit_tables = {'S066', 'S067', 'VAKPA', 'VBUK', 'VBAK', 'VBAP', 'VBUP', 'VBFA'}
+    reads = [params for function, params in connection.calls if function == 'RFC_READ_TABLE']
+    assert {params['QUERY_TABLE'] for params in reads}.isdisjoint(previous_credit_tables)
+    assert {params['QUERY_TABLE'] for params in reads if params['QUERY_TABLE'] in ledger_tables} == ledger_tables
+    assert all("BUKRS = 'D001'" in ' '.join(row['TEXT'] for row in params['OPTIONS'])
+               for params in reads if params['QUERY_TABLE'] in ledger_tables)
+    assert all(params['ROWCOUNT'] == 10000 for params in reads)
+    assert set(result['programs']) == {'ZFRR04', 'ZFRR08'}
 
 
 def test_preaccrual_batches_cover_document_keys_and_keep_customer_details(monkeypatch):
     connection = SapRecording()
     account = '0000123456'
+    connection.tables['KNVP'] = [{'KUNNR': '0099000001', 'VKORG': 'D001', 'PARVW': 'RG', 'KUNN2': '0099000002'}]
+    connection.credit_response['RETURN'] = [{'TYPE': 'S', 'ID': '0099000002'}]
     keys = [('2025', f'{document:010d}') for document in range(1, 402)] + [('2026', '0000000001')]
     expected = {keys[index] for index in (0, 399, 400, 401)}
     connection.tables['BSIS'] = [
@@ -94,30 +116,76 @@ def test_preaccrual_batches_cover_document_keys_and_keep_customer_details(monkey
     assert reference_batches == [('2025', 400), ('2025', 1), ('2026', 1)]
 
 
-def test_company_ledger_is_scoped_and_active_contract_amounts_include_following_orders(monkeypatch):
+@pytest.mark.parametrize('merged_credit', [False, True])
+def test_business_credit_accepts_sap_payer_scope_and_filtered_group_messages(monkeypatch, merged_credit):
     connection = SapRecording()
-    connection.tables.update({
-        'VAKPA': [{'KUNDE': '0099000001', 'VKORG': 'D001', 'PARVW': 'RG', 'VBELN': '0000001001'}],
-        'VBUK': [{'VBELN': '0000001001', 'RFGSK': 'A'}],
-        'VBAK': [{'VBELN': '0000001001', 'VKORG': 'D001', 'VBTYP': 'G', 'WAERK': 'CNY', 'AUDAT': '20260301'}],
-        'VBAP': [{'VBELN': '0000001001', 'POSNR': '000010', 'KZWI2': '100.00', 'ABGRU': ''}],
-        'VBUP': [{'VBELN': '0000001001', 'POSNR': '000010', 'RFSTA': 'A'}],
-        'VBFA': [{'VBELV': '0000001001', 'POSNV': '000010', 'VBELN': '0000002001', 'POSNN': '000010', 'VBTYP_N': 'C'}],
-    })
+    connection.tables['KNVP'] = [{'KUNNR': '0099000001', 'VKORG': 'D001', 'PARVW': 'RG', 'KUNN2': '0099000002'}]
+    connection.tables['T014'] = [{'KKBER': 'SN01', 'WAERS': 'CNY'}]
+    if merged_credit:
+        connection.tables['ZTCREDITLIMIT01'] = [
+            {'ZJXS': '001', 'ZJXSBM': '0099000001'}, {'ZJXS': '001', 'ZJXSBM': '0099000003'},
+        ]
+        connection.credit_response['RETURN'] = []
+    else:
+        connection.credit_response['RETURN'] = [{'TYPE': 'S', 'ID': '0099000002'}]
+
     original = connection.call
+
     def call(function, **params):
-        if function == 'RFC_READ_TABLE' and params['QUERY_TABLE'] in {'KNB1', 'BSID', 'BSAD'}:
-            assert "BUKRS = 'D001'" in ' '.join(r['TEXT'] for r in params['OPTIONS'])
-        if function == 'RFC_READ_TABLE' and params['QUERY_TABLE'] == 'VBAP' and "VBELN = '0000002001'" in params['OPTIONS'][0]['TEXT']:
-            connection.calls.append((function, params))
-            return {'DATA': [{'WA': '0000002001|000010|40.00'}]}
+        if function == 'RFC_READ_TABLE' and params['QUERY_TABLE'] == 'T014':
+            if "KKBER = 'SN01'" not in params['OPTIONS'][0]['TEXT']:
+                return {'DATA': []}
         return original(function, **params)
+
     connection.call = call
     monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
-    result = reader.sap(payload())
-    amounts = result['contract_amounts']['0000001001']
-    assert amounts['items']['rows'][0]['KZWI2'] == '100.00'
-    assert amounts['following_orders'][0]['amounts'][0]['rows'][0]['KZWI2'] == '40.00'
+    result = reader.sap({**payload(), 'preaccrual_accounts': ['0000123456']})
+    assert result['credit_limit']['remaining_order_limit'] == '-638.62'
+    assert result['credit_limit']['response']['RETURN'] == connection.credit_response['RETURN']
+    assert result['credit_currencies']['SN01']['rows'] == [{'KKBER': 'SN01', 'WAERS': 'CNY'}]
+    if merged_credit:
+        assert result['queries']['group_members']['rows'] == connection.tables['ZTCREDITLIMIT01']
+
+
+@pytest.mark.parametrize(('customer', 'response_id', 'extra_payer'), [
+    ('0049000001', None, None),
+    ('0099000001', '0099000002', None),
+    ('0099000001', None, '0099000003'),
+])
+def test_business_credit_rejects_group_messages_outside_sap_payer_rules(
+        monkeypatch, customer, response_id, extra_payer):
+    connection = SapRecording()
+    payer = {'KUNNR': customer, 'VKORG': 'D001', 'PARVW': 'RG', 'KUNN2': '0099000002'}
+    connection.tables['KNVP'] = [payer]
+    if extra_payer:
+        connection.tables['KNVP'].append({**payer, 'VKORG': 'D002', 'KUNN2': extra_payer})
+    connection.tables['ZTCREDITLIMIT01'] = [{'ZJXS': '001', 'ZJXSBM': customer}]
+    connection.credit_response['RETURN'] = [{'TYPE': 'S', 'ID': response_id}] if response_id else []
+    monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
+    with pytest.raises(RuntimeError, match='dealer_closure_credit_identity_unverified'):
+        reader.sap({**payload(), 'customer_code': customer})
+    assert connection.closed
+
+
+@pytest.mark.parametrize(('changes', 'reason'), [
+    ({'RETURN': [{'TYPE': 'S', 'ID': '0099000001'}, {'TYPE': 'E', 'MESSAGE': 'private message'}]},
+     'dealer_closure_credit_business_error'),
+    ({'RETURN': [{'TYPE': 'S', 'ID': '0099000002'}]}, 'dealer_closure_credit_identity_unverified'),
+    ({'RETURN': [{'TYPE': 'S'}]}, 'dealer_closure_credit_identity_unverified'),
+    ({'RETURN': []}, 'dealer_closure_credit_identity_unverified'),
+    ({'O_DKLIMK': None}, 'dealer_closure_credit_response_invalid'),
+    ({'O_CONTRACT': 'NaN'}, 'dealer_closure_credit_response_invalid'),
+])
+def test_reader_rejects_failed_or_unbound_business_credit_result(monkeypatch, changes, reason):
+    connection = SapRecording()
+    connection.credit_response.update(changes)
+    monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
+    with pytest.raises(RuntimeError, match=reason) as captured:
+        reader.sap(payload())
+    assert reader.failure(captured.value) == {
+        'status': 'failed', 'error_type': 'RuntimeError', 'reason': reason, 'stage': 'credit_limit', 'error_key': '',
+    }
+    assert sum(function == 'ZSD_CRM_CREDITLIMIT_EXPORT' for function, _ in connection.calls) == 1
     assert connection.closed
 
 
@@ -135,6 +203,7 @@ def test_reader_rejects_wrong_environment_and_nonproduction_client(monkeypatch, 
                                           'client': 'client_not_production', 'cardinality': 'client_not_production'}[failure]):
         reader.sap(payload())
     assert connection.closed
+    assert not any(function == 'ZSD_CRM_CREDITLIMIT_EXPORT' for function, _ in connection.calls)
     if failure == 'cardinality':
         try:
             reader.sap(payload())
