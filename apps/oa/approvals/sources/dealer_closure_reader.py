@@ -118,11 +118,11 @@ def sap(payload):
         credit_areas = {row['KKBER'] for row in q['credit']['rows']} | {_CREDIT_CONTROL_AREA}
         out['credit_currencies'] = {area: read('T014', ['KKBER', 'WAERS'], [f"KKBER = '{area}'"])
                                     for area in sorted(credit_areas)}
-        groups = {row['ZJXS'] for row in q['merge_group']['rows']}
-        if groups:
-            if len(groups) != 1 or not re.fullmatch(r'[A-Za-z0-9]{1,12}', next(iter(groups))):
+        credit_groups = {row['ZJXS'] for row in q['merge_group']['rows']}
+        if credit_groups:
+            if len(credit_groups) != 1 or not re.fullmatch(r'[A-Za-z0-9]{1,12}', next(iter(credit_groups))):
                 raise RuntimeError('dealer_closure_credit_group_ambiguous')
-            group, = groups
+            group, = credit_groups
             q['group_members'] = read('ZTCREDITLIMIT01', ['ZJXS', 'ZJXSBM'], [f"ZJXS = '{group}'"])
             if not any(row['ZJXS'] == group and row['ZJXSBM'] == kunnr for row in q['group_members']['rows']):
                 raise RuntimeError('dealer_closure_credit_group_unverified')
@@ -144,11 +144,11 @@ def sap(payload):
             index = read('BSIS', ['BUKRS', 'HKONT', 'GJAHR', 'BELNR', 'BUZEI', 'BUDAT', 'SHKZG', 'DMBTR', 'KOSTL', 'XNEGP'],
                 [f"BUKRS = '{company}' AND HKONT = '{account}'", f"AND BUDAT <= '{cutoff}'"])
             indexed = {(r['BELNR'], r['GJAHR'], r['BUZEI']): r for r in index['rows']}
-            groups = defaultdict(set)
+            documents_by_fiscal_year = defaultdict(set)
             for row in index['rows']:
-                groups[row['GJAHR']].add(row['BELNR'])
+                documents_by_fiscal_year[row['GJAHR']].add(row['BELNR'])
             seen, target, batches = set(), [], []
-            for year, docs in groups.items():
+            for year, docs in documents_by_fiscal_year.items():
                 docs = sorted(docs)
                 for start in range(0, len(docs), _PREACCRUAL_DOCUMENTS_PER_REQUEST):
                     batch = docs[start:start + _PREACCRUAL_DOCUMENTS_PER_REQUEST]
@@ -182,7 +182,7 @@ def sap(payload):
         for program in ['ZFRR04', 'ZFRR08']:
             response = connection.call('RPY_PROGRAM_READ', PROGRAM_NAME=program, ONLY_SOURCE='X', WITH_INCLUDELIST='X')
             out['programs'][program] = response
-        out['credit_limit'] = credit_limit(connection, kunnr, q['payer']['rows'], bool(groups))
+        out['credit_limit'] = credit_limit(connection, kunnr, q['payer']['rows'], bool(credit_groups))
         return out
     finally:
         connection.close()

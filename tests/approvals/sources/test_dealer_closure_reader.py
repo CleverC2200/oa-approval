@@ -74,6 +74,8 @@ def test_reader_uses_business_credit_results_and_preserves_company_ledger_scope(
 def test_preaccrual_batches_cover_document_keys_and_keep_customer_details(monkeypatch):
     connection = SapRecording()
     account = '0000123456'
+    connection.tables['KNVP'] = [{'KUNNR': '0099000001', 'VKORG': 'D001', 'PARVW': 'RG', 'KUNN2': '0099000002'}]
+    connection.credit_response['RETURN'] = [{'TYPE': 'S', 'ID': '0099000002'}]
     keys = [('2025', f'{document:010d}') for document in range(1, 402)] + [('2026', '0000000001')]
     expected = {keys[index] for index in (0, 399, 400, 401)}
     connection.tables['BSIS'] = [
@@ -137,7 +139,7 @@ def test_business_credit_accepts_sap_payer_scope_and_filtered_group_messages(mon
 
     connection.call = call
     monkeypatch.setitem(sys.modules, 'pyrfc', SimpleNamespace(Connection=lambda **_: connection))
-    result = reader.sap(payload())
+    result = reader.sap({**payload(), 'preaccrual_accounts': ['0000123456']})
     assert result['credit_limit']['remaining_order_limit'] == '-638.62'
     assert result['credit_limit']['response']['RETURN'] == connection.credit_response['RETURN']
     assert result['credit_currencies']['SN01']['rows'] == [{'KKBER': 'SN01', 'WAERS': 'CNY'}]
