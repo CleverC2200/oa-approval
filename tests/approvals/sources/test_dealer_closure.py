@@ -57,7 +57,8 @@ def test_no_balance_collection_skips_refund_and_keeps_raw_null_scoped_confirmati
         if mode == 'doris':
             return {'rows': [{'company_code': 'D001', 'cust_code': '99000001', 'freezers_qty': None,
                               'ledger_account_control': None, 'pre_end_balance': '0.00'}]}
-        return {'company_code': payload['company_code'], 'customer_code': payload['customer_code']}
+        return {'company_code': payload['company_code'], 'customer_code': payload['customer_code'],
+                'credit_limit': {'remaining_order_limit': '100.00', 'order_occupancy': '0.00'}}
     monkeypatch.setattr(source, '_worker', worker)
     dms = Mock(return_value={'response': {'success': True, 'result': None}})
     monkeypatch.setattr(source, '_dms', dms)
@@ -65,6 +66,7 @@ def test_no_balance_collection_skips_refund_and_keeps_raw_null_scoped_confirmati
     assert set(result['dms']) == {'querySignedOneAddNContractByCustomerCode'}
     assert dms.call_args[0][1] == 'querySignedOneAddNContractByCustomerCode'
     assert result['bi']['rows'][0]['freezers_qty'] is None
+    assert result['sap']['credit_limit'] == {'remaining_order_limit': '100.00', 'order_occupancy': '0.00'}
     assert result['freezer_none_confirmation'] == confirmation
     assert result['submission_context']['forwarder_id'] == '9'
     assert result['submission_context']['actual_node'] == context
