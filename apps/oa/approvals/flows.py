@@ -9,6 +9,8 @@ from typing import Any
 
 CONFIG_DIR = Path(__file__).resolve().parent / "configs"
 DEFAULT_CONFIG = CONFIG_DIR / "business_entertainment.json"
+DEALER_FINANCE_NODES = {"195056": "225119", "194522": "225120"}
+DEALER_FINANCE_KEYS = frozenset({"dealer_temporary_refund", "dealer_balance_adjustment"})
 
 
 def resolve_config_path(path: str | None) -> Path:

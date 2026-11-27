@@ -14,11 +14,15 @@ _MAX_SAP_ROWS = 1_000_000
 _PREACCRUAL_DOCUMENTS_PER_REQUEST = 400
 _CREDIT_CONTROL_AREA = 'SN01'
 
-def doris(payload):
-    spec = importlib.util.spec_from_file_location('dealer_balance_connector', payload['connection']['doris_connector'])
+def connect_read_source(path):
+    spec = importlib.util.spec_from_file_location('dealer_balance_connector', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    connection = module.connect()
+    return module.connect()
+
+
+def doris(payload):
+    connection = connect_read_source(payload['connection']['doris_connector'])
     sql = 'SELECT * FROM hive.dw.dwd_fin_cust_balance WHERE company_code=%s AND cust_code=%s'
     params = [payload['company_code'], payload['customer_code']]
     try:
@@ -30,6 +34,21 @@ def doris(payload):
         return {'status': 'ok', 'sql': sql, 'params': params, 'rows': rows}
     finally:
         connection.close()
+
+
+def sap_credit(payload):
+    from pyrfc import Connection
+
+    config = payload['connection']
+    customer = payload['customer_code'].zfill(10)
+    if not re.fullmatch(r'[0-9]{10}', customer):
+        raise ValueError('dealer_closure_identity_invalid')
+    with Connection(ashost=config['sap_host'], sysnr=config['sap_sysnr'], client=config['sap_client'],
+                    user=config['sap_user'], passwd=payload['sap_password'], lang='ZH', trace='0') as connection:
+        info = connection.call('RFC_SYSTEM_INFO')['RFCSI_EXPORT']
+        if info['RFCSYSID'] != config['sap_system'] or info['RFCIPADDR'] != config['sap_host']:
+            raise RuntimeError('dealer_closure_sap_environment_mismatch')
+        return {'status': 'ok', 'credit_limit': credit_limit(connection, customer, (), False)}
 
 
 def sap(payload):
@@ -240,7 +259,7 @@ def failure(error):
 def main():
     try:
         payload = json.load(sys.stdin)
-        result = {'doris': doris, 'sap': sap}[sys.argv[1]](payload)
+        result = {'doris': doris, 'sap': sap, 'sap_credit': sap_credit}[sys.argv[1]](payload)
         print(json.dumps(result, ensure_ascii=False, default=str))
         return 0
     except Exception as error:

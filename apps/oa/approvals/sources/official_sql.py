@@ -152,7 +152,10 @@ def _query_rows(
             return []
         conn.call_timeout = max(1, int(query.timeout_sec)) * 1000
         with conn.cursor() as cursor:
-            cursor.execute(query.sql, query.params)
+            if name == 'dealer_finance_history':
+                cursor.execute(query.sql, query.params, fetch_lobs=False)
+            else:
+                cursor.execute(query.sql, query.params)
             columns = [str(item[0]).lower() for item in cursor.description or []]
             rows = cursor.fetchmany(query.max_rows)
             return [dict(zip(columns, row)) for row in rows]

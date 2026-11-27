@@ -169,6 +169,30 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
         """,
         params=("request_id",), max_rows=2, timeout_sec=5,
     ),
+    "dealer_finance_current_node": SqlTemplate(
+        name="dealer_finance_current_node",
+        purpose="按申请及流程读取经销商临时退款或调账的实际节点",
+        sql="""
+            select r.requestid, r.workflowid, r.currentnodeid, r.currentnodetype, n.nodename
+            from ecology.workflow_requestbase r
+            left join ecology.workflow_nodebase n on n.id = r.currentnodeid
+            where r.requestid = :request_id and r.workflowid = :workflow_id
+        """,
+        params=("request_id", "workflow_id"), max_rows=2, timeout_sec=5,
+    ),
+    "dealer_finance_history": SqlTemplate(
+        name="dealer_finance_history",
+        purpose="保留指定临时退款或调账归档单原审批时点的意见",
+        sql="""
+            select l.logid, l.requestid, l.nodeid, l.logtype,
+                   l.operatedate, l.operatetime, length(l.remark) as remark_length, l.remark
+            from ecology.workflow_requestlog l
+            join ecology.workflow_requestbase r on r.requestid = l.requestid
+            where r.workflowid = :workflow_id and l.requestid = :request_id
+            order by l.logid
+        """,
+        params=("request_id", "workflow_id"), max_rows=1001, timeout_sec=10,
+    ),
     "overseas_invoice_attachment_fields": SqlTemplate(
         name="overseas_invoice_attachment_fields",
         purpose="按当前海外采购流程与精确明细身份核对上传发票空值",

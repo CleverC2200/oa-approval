@@ -21,6 +21,8 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 | `general_expense` | [通用费用报销](references/flows/general-expense.md) |
 | `packaging_layout_approval` | [包装版面](references/flows/packaging-layout-approval.md) |
 | `dealer_closure` | [经销商关户](../oa-dealer-closure/SKILL.md) |
+| `dealer_temporary_refund` | [经销商临时退款](../../../docs/agents/temporary-refund.md) |
+| `dealer_balance_adjustment` | [经销商账面余额调整](references/flows/dealer-balance-adjustment.md) |
 
 六类财务同时完整读取[对公付款免支付截图](references/payment-screenshot-exemption.md)，先核对已有支付截图，仅在缺少有效截图时按共用规则核验豁免及相关补充材料。包装只读取自己的规则包。关户完整读取本次冻结的关户Skill及其结果和数据入口参考，不加载费用报销的意见格式或付款截图条件。
 
@@ -44,6 +46,8 @@ description: 执行 OA SQLite 预审批次及原生审核 Agent 调度，或使�
 按匹配规则完成全部审核项和明细覆盖，再按[共享结果格式](references/result-contract.md)写签字意见。业务判定、项目名、顺序和状态继续采用当前冻结规则。
 
 关户意见采用其独立结果合同的✅/❗简版格式；审核者读取`dealer_closure_evidence`中的本轮BI、SAP、DMS及提交上下文，不用历史截图替代当前冻结事实。转发批注与正常审批的动作由已核提交上下文决定。
+
+临时退款和调账完整读取 `dealer_finance_evidence` 及适用 OA 材料，使用各自的签字模板。未阅转发只反馈批注，正常流程只在对应 RPA 预审节点提交意见。
 
 将最终意见保存到 `material_file` 同级目录的独立文本文件。附件识别报告保留真实资源、页码/区域/单元格位置及来源；人工复读、配对和验算依据按[执行接口](references/execution-contract.md)记录为附件观察，与意见一并交回主 Agent，使用适用的 `--recognition-file`、`--observations-file` 送入本地 `deliver`，两者可同时提供。仅表单或商旅页面的事实保留冻结来源与本次核对记录，不虚构附件归属。主 Agent 按批次执行规则通过 `deliver` 原子保存交付，再按当前授权提交或预览。
 

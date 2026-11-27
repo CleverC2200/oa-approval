@@ -153,7 +153,7 @@ def _authority_facts(
         if str(item.get("observed_at") or "").strip():
             fact["observed_at"] = str(item["observed_at"])
         facts.append(fact)
-    if str(config.get("flow_key") or "") in {_PACKAGING_FLOW, "dealer_closure"}:
+    if str(config.get("flow_key") or "") in {_PACKAGING_FLOW, "dealer_closure", *flow.DEALER_FINANCE_KEYS}:
         return facts
     workflow_key = str(config.get("flow_key") or "")
     invoice_result = invoice_buyers.read_invoice_buyers(
@@ -552,9 +552,13 @@ def _collect_case(
         if str(workflow.get('requestId')) != str(request_id):
             raise ValueError('attachment_read_exception_target_changed')
     closure_evidence = None
+    finance_evidence = None
     if config.get("flow_key") == "dealer_closure":
         from apps.oa.approvals.sources import dealer_closure
         closure_evidence = dealer_closure.read(oa_api, workflow, raw_resources)
+    if config.get("flow_key") in flow.DEALER_FINANCE_KEYS:
+        from apps.oa.approvals.sources import dealer_finance
+        finance_evidence = dealer_finance.collect(oa_api, workflow, raw_resources, origins=source_policy.attachments)
     invoice_evidence: dict = {}
     authority_facts = _authority_facts(
         oa_api=oa_api,
@@ -651,6 +655,7 @@ def _collect_case(
         if _trip_content_id(resource)
     })
     prepared_result = attachment_extractors.PreparedMaterial({"images": [], "structured_contents": [], "manifest": []})
+    bound_downloads = []
     if logical_resources:
         attachment_dir = Path(
             attachment_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_attachments"
@@ -691,7 +696,6 @@ def _collect_case(
         descriptors_by_raw_id = {
             str(item["raw_resource_id"]): item for item in descriptors
         }
-        bound_downloads = []
         for item in downloaded:
             descriptor = descriptors_by_raw_id.get(str(item.get("resource_id") or ""))
             if descriptor is None:
@@ -718,6 +722,18 @@ def _collect_case(
             ):
                 bound_item["parent_resource_id"] = descriptor["resource_id"]
             bound_downloads.append(bound_item)
+    if finance_evidence is not None and config['flow_key'] == 'dealer_balance_adjustment':
+        source_root = Path(attachment_root or runtime_control.RUNTIME_ROOT / "finance_preaudit_attachments")
+        for signed in dealer_finance.signed_adjustment_files(finance_evidence, source_root / str(request_id) / 'dms'):
+            descriptor = _resource_descriptor(signed, request_id=str(request_id))
+            if any(item['resource_id'] == descriptor['resource_id'] for item in descriptors):
+                raise ValueError('dealer_finance_dms_attachment_duplicate')
+            descriptor.update(local_readonly_path=signed['path'], media_type='application/pdf')
+            descriptors.append(descriptor)
+            bound_downloads.append(_bind_downloaded_item({
+                'path': signed['path'], 'name': signed['name'],
+            }, descriptor))
+    if bound_downloads:
         with invoice_originals.preserve_collection_diagnostics(invoice_evidence, "preparation"):
             prepared_result = attachment_extractors.prepare_materials(
                 bound_downloads,
@@ -813,6 +829,8 @@ def _collect_case(
             and {field['code'] for field in closure_attachment_fields} == {'fjsc1', 'fjsc2', 'tksqs'}
             and all(field['read_status'] == 'empty' for field in closure_attachment_fields)):
         empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
+    if finance_evidence is not None and not descriptors and not raw_resources:
+        empty_evidence_refs = ['material:dealer_finance_evidence.resource_inventory']
 
     invoice_title_reference = None
     if config.get('flow_key') in invoice_titles.WORKFLOWS:
@@ -837,6 +855,7 @@ def _collect_case(
         "authority_facts": authority_facts,
         **({'invoice_title_reference': invoice_title_reference} if invoice_title_reference is not None else {}),
         **({"dealer_closure_evidence": closure_evidence} if closure_evidence is not None else {}),
+        **({"dealer_finance_evidence": finance_evidence} if finance_evidence is not None else {}),
         **({"attachment_scan": travel_scan} if travel_scan else {}),
         **({"invoice_evidence": invoice_evidence} if invoice_evidence else {}),
         "warnings": warnings,

@@ -23,6 +23,11 @@ def freeze_rules(workflow_key, directory):
         skill = Path(".agents/skills/oa-dealer-closure")
         entry = skill / "SKILL.md"
         selected = [entry, skill / "references/read-sources.md", skill / "references/result-format.md"]
+    elif workflow_key in {"dealer_temporary_refund", "dealer_balance_adjustment"}:
+        entry = (Path("docs/agents/temporary-refund.md") if workflow_key == "dealer_temporary_refund"
+                 else reference / "flows/dealer-balance-adjustment.md")
+        selected = [entry, *(reference / name for name in (
+            "execution-contract.md", "observation-contract.md", "result-contract.md"))]
     else:
         if workflow_key not in RULE_NAMES:
             raise ValueError("rule_workflow_unknown")

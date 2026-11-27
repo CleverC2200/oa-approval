@@ -9,7 +9,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from apps.oa.approvals import receipts
-from apps.oa.approvals.sources import auth
+from apps.oa.approvals.sources import auth, dealer_finance_delivery
 from apps.oa.approvals.sources import transfer
 from apps.oa.approvals.sources import http as safe_http
 from apps.oa.approvals.sources.oa import OaApi
@@ -101,7 +101,8 @@ class FrozenWriterApi(OaApi):
         with safe_http.urlopen(request, timeout=TIMEOUT) as response:
             return _decode_json(response.read().decode("utf-8", errors="ignore"))
 
-    def submit_and_verify(self, request_id: str, remark: str, *, dealer_material=None) -> dict[str, Any]:
+    def submit_and_verify(self, request_id: str, remark: str, *, dealer_material=None,
+                          dealer_finance_context=None) -> dict[str, Any]:
         started_at = datetime.now(timezone.utc).isoformat()
         try:
             response = self._post_submit(request_id, remark)
@@ -118,11 +119,14 @@ class FrozenWriterApi(OaApi):
                 if dealer_material is not None:
                     from apps.oa.approvals.sources.dealer_closure import feedback_verified
                     done_hit = feedback_verified(self, dealer_material, remark, started_at)
+                elif dealer_finance_context is not None and dealer_finance_context['delivery_kind'] == 'comment':
+                    done_hit = dealer_finance_delivery.feedback_verified(dealer_finance_context, remark, started_at)
                 else:
                     done_hit = handled_since(self.handled_rows(max_pages=None),target,started_at)
-                pending_hit = any(
-                    row.get("request_id") == target for row in self.pending_rows()
-                )
+                pending_rows = self.pending_rows()
+                pending_hit = (dealer_finance_delivery.pending_matches(pending_rows, dealer_finance_context)
+                               if dealer_finance_context is not None
+                               else any(row.get("request_id") == target for row in pending_rows))
             except Exception:
                 break
             result = receipts.verification_result(done_hit, pending_hit, submit_ok=True)
