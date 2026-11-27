@@ -829,8 +829,21 @@ def _collect_case(
             and {field['code'] for field in closure_attachment_fields} == {'fjsc1', 'fjsc2', 'tksqs'}
             and all(field['read_status'] == 'empty' for field in closure_attachment_fields)):
         empty_evidence_refs = ['material:dealer_closure_evidence.resource_inventory']
-    if finance_evidence is not None and not descriptors and not raw_resources:
-        empty_evidence_refs = ['material:dealer_finance_evidence.resource_inventory']
+    if finance_evidence is not None and not descriptors:
+        inventory = finance_evidence['resource_inventory']
+        fixed_groups = finance_evidence['items'] and all(
+            item.get('fixed_group') is True for item in finance_evidence['items'])
+        exempt_references = fixed_groups and all(
+            str(row.get('type')) == '2'
+            and str(row.get('name') or '').strip() in {'对账单', '调账申请书', '经销商调账申请书'}
+            and not (row.get('downloadUrl') or row.get('download_url'))
+            for row in raw_resources)
+        if not raw_resources or exempt_references:
+            empty_evidence_refs = ['material:dealer_finance_evidence.resource_inventory']
+            if raw_resources:
+                inventory['fixed_group_document_references'] = [
+                    {key: row[key] for key in ('id', 'name', 'type') if key in row} for row in raw_resources
+                ]
 
     invoice_title_reference = None
     if config.get('flow_key') in invoice_titles.WORKFLOWS:

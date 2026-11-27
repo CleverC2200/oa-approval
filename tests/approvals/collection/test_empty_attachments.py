@@ -51,6 +51,44 @@ class EmptyOaApi:
                 ]}]}]}, []
 
 
+@pytest.mark.parametrize(('fixed_group', 'reference', 'skip'), [
+    (True, '经销商调账申请书', True),
+    (False, '经销商调账申请书', False),
+    (True, '资金证明', False),
+])
+def test_fixed_dealer_group_can_skip_a_document_reference_without_a_file(
+        monkeypatch, tmp_path, fixed_group, reference, skip):
+    from apps.oa.approvals.sources import dealer_finance
+
+    config = {'flow_key': 'dealer_balance_adjustment', 'workflow_id': '194522',
+              'workflow_name': '经销商账面余额调整申请流程'}
+
+    class AdjustmentApi:
+        def request_context(self, request_id):
+            return {'requestId': request_id, 'workflowId': config['workflow_id'],
+                    'workflowName': config['workflow_name']}, [{'id': 10, 'name': reference, 'type': 2}]
+
+    monkeypatch.setattr(dealer_finance, 'collect', lambda *_a, **_k: {
+        'items': [{'fixed_group': fixed_group}], 'customers': {},
+        'resource_inventory': {'count': 1, 'source': 'getRequestResources'},
+    })
+    monkeypatch.setattr(dealer_finance, '_settings', lambda: {})
+    material = collect_case('12', oa_api=AdjustmentApi(), configs=[config],
+                            allow_browser_download=False, source_policy=POLICY)
+    assert material['resources'] == []
+    if skip:
+        material_file = tmp_path / 'material.json'
+        material_file.write_text(json.dumps(material))
+        report = attachment_recognition.recognize(material_file=material_file, output_dir=tmp_path / 'recognized')
+        assert report['status'] == 'skipped'
+        assert report['coverage'] == 'no_attachments'
+        assert material['dealer_finance_evidence']['resource_inventory']['fixed_group_document_references'] == [
+            {'id': 10, 'name': reference, 'type': 2},
+        ]
+    else:
+        assert 'attachment_presence' not in material
+
+
 def test_collection_reuses_confirmed_official_empty_fields(monkeypatch):
     monkeypatch.setattr(official_sql, '_query_rows', lambda *_a, **_k: [{
         'requestid': '12', 'detail_id': '7', 'scfj': None, 'fj': None, 'glfp': None,
