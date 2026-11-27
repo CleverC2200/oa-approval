@@ -185,8 +185,7 @@ SQL_TEMPLATES: dict[str, SqlTemplate] = {
         purpose="保留指定临时退款或调账归档单原审批时点的意见",
         sql="""
             select l.logid, l.requestid, l.nodeid, l.logtype,
-                   l.operatedate, l.operatetime, length(l.remark) as remark_length,
-                   dbms_lob.substr(l.remark, 4000, 1) as remark
+                   l.operatedate, l.operatetime, length(l.remark) as remark_length, l.remark
             from ecology.workflow_requestlog l
             join ecology.workflow_requestbase r on r.requestid = l.requestid
             where r.workflowid = :workflow_id and l.requestid = :request_id
