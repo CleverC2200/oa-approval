@@ -80,10 +80,11 @@ def _form_snapshot(workflow, resources):
 def _worker(mode, payload, config):
     from apps.oa.approvals.collection.case import CollectionFailure
 
-    executable = config['sap_python' if mode == 'sap' else 'doris_python']
+    sap_source = mode in {'sap', 'sap_credit'}
+    executable = config['sap_python' if sap_source else 'doris_python']
     command = [executable, str(Path(__file__).with_name('dealer_closure_reader.py')), mode]
     inputs = {**payload, 'connection': config}
-    if mode == 'sap':
+    if sap_source:
         secret = official_sql._keychain_password(config['sap_user'], config['sap_keychain_service'])
         if not secret:
             raise RuntimeError('dealer_closure_sap_credential_unavailable')

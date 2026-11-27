@@ -11,6 +11,7 @@
 - 新增或调整 SAP 业务取数时，采用业务方或 SAP 顾问指定的接口和字段口径。缺少接口或口径时，先向用户索取并确认，再实现该项取数。SAP 系统表仅用于用户单独授权的核查。
 - 执行预审批次、派发或轮换审核 Agent 时，读取[财务预审 Skill](.agents/skills/oa-finance-preaudit/SKILL.md)；执行规则在该 Skill 维护。
 - 核对经销商关户申请、关户异常或生成关户签字意见时，读取[经销商关户 Skill](.agents/skills/oa-dealer-closure/SKILL.md)，按其分支、取数和结果合同执行。
+- 核对经销商临时退款或账面余额调整时，读取对应的[临时退款规则](docs/agents/temporary-refund.md)或[调账规则](.agents/skills/oa-finance-preaudit/references/flows/dealer-balance-adjustment.md)。
 - 能力入口为 `python -m apps.oa`。SQLite 记录队列和事实，文件目录保存完整材料；代码直接复用材料采集与提交能力。
 - 业务判断由 Agent 形成；财务只给意见，包装只校对文字，海外只处理独立授权字段和当前节点。
 - 完整材料与业务规则必须保留。图片压缩、解包和格式转换只派生副本，资源与明细归属不能被内容复用抹去。

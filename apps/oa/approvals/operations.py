@@ -16,11 +16,12 @@ from pathlib import Path
 from uuid import uuid4
 
 from apps.oa.approvals.collection import cache as attachment_cache
-from apps.oa.approvals import attachment_exception, finance_precheck, receipts, retention
+from apps.oa.approvals import attachment_exception, finance_precheck, flows, receipts, retention
 
 from apps.oa.approvals import overseas as business
 from apps.oa.approvals.collection.overseas import snapshot as overseas_snapshot
 from apps.oa.approvals.sources.writer import handled_since
+from apps.oa.approvals.sources import dealer_finance_delivery
 
 from apps.oa.approvals.store import REVIEW_SLOTS, REVIEW_SLOT_OPTIONS, Store
 from apps.oa.approvals.store import encoded
@@ -214,6 +215,11 @@ class Approval:
             frozen = {str(path):file_digest(path) for path in files}
             missing = invoice_originals.readiness_diagnostics(material)
             incomplete = CollectionFailure('invoice_original_coverage_incomplete', diagnostics=missing) if missing else None
+            if 'dealer_finance_evidence' in material:
+                from apps.oa.approvals.sources import dealer_finance
+                missing = dealer_finance.incomplete_reads(material['dealer_finance_evidence'])
+                if missing:
+                    incomplete = CollectionFailure('dealer_finance_source_read_failed', diagnostics=missing)
             if incomplete is not None:
                 self._write_collection_diagnostics(task, directory, incomplete)
             frozen_task = self.store.freeze(
@@ -424,6 +430,11 @@ class Approval:
             if task['workflow_key'] == 'dealer_closure':
                 from apps.oa.approvals.sources import dealer_closure
                 dealer_closure.validate_submission(self._api(), material)
+            dealer_finance_context = None
+            if task['workflow_key'] in flows.DEALER_FINANCE_KEYS:
+                dealer_finance_context = material['dealer_finance_evidence']['submission_context']
+                dealer_finance_delivery.validate(self._api(), dealer_finance_context,
+                    origins=self.source_policy.attachments)
             if material.get('attachment_read_exception'):
                 attachment_exception.recheck(self._api(), material, origins=self.source_policy.attachments)
             writer = self.writer
@@ -450,6 +461,8 @@ class Approval:
                     if (task['workflow_key'] == 'dealer_closure'
                             and material['dealer_closure_evidence']['submission_context']['delivery_kind'] == 'comment'):
                         options['dealer_material'] = material
+                    if dealer_finance_context is not None:
+                        options['dealer_finance_context'] = dealer_finance_context
                     result = writer.submit_and_verify(task["request_id"],opinion, **options)
             except Exception:
                 result = {**receipts.verification_result(False,False,submit_ok=False),"failure_code":"writer_result_unknown"}
@@ -502,6 +515,13 @@ class Approval:
                     from apps.oa.approvals.sources import dealer_closure
                     handled = dealer_closure.feedback_verified(self._api(), material,
                         details['reviews'][-1]['opinion'], submission['started_at'])
+            if task['workflow_key'] in flows.DEALER_FINANCE_KEYS:
+                context = json.loads(task['material_json'])['dealer_finance_evidence']['submission_context']
+                pending = dealer_finance_delivery.pending_matches(pending_rows, context)
+                if context['delivery_kind'] == 'comment':
+                    sent_review = next(review for review in details['reviews'] if review['id'] == submission['review_id'])
+                    handled = dealer_finance_delivery.feedback_verified(
+                        context, sent_review['opinion'], submission['started_at'])
             if handled is None:
                 handled = handled_since(self._api().handled_rows(max_pages=None),task['request_id'],submission['started_at'])
             fields_match = None
